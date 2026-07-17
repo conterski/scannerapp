@@ -149,5 +149,16 @@
     return out;
   }
 
-  window.Detect = { ensureOpenCV, detectCorners, warpPerspective, fullImageCorners, scaledCanvas };
+  /** Debug variant: returns per-candidate scoring info at detection scale. */
+  async function detectDebug(sourceCanvas) {
+    await ensureOpenCV();
+    const { canvas: small, scale } = scaledCanvas(sourceCanvas, 800);
+    const img = imageDataOf(small);
+    const res = await call("detect",
+      { width: img.width, height: img.height, buffer: img.data.buffer, debug: true },
+      [img.data.buffer]);
+    return { corners: res.corners, debug: res.debug, scale };
+  }
+
+  window.Detect = { ensureOpenCV, detectCorners, warpPerspective, fullImageCorners, scaledCanvas, detectDebug };
 })();
