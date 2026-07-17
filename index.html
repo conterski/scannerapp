@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a1d24">
+<title>ScannerApp</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <h1>ScannerApp</h1>
+  <span id="statusText" class="status" hidden></span>
+</header>
+
+<!-- ============ PAGE LIST VIEW ============ -->
+<main id="listView" class="view">
+  <div id="emptyState" class="empty-state">
+    <div class="empty-icon">&#128196;</div>
+    <p>Photograph documents and turn them into clean scans.</p>
+    <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped &mdash; no filters are applied.</p>
+  </div>
+
+  <div id="pageGrid" class="page-grid"></div>
+
+  <div class="add-bar">
+    <button id="addPhotosBtn" class="btn btn-secondary">&#128247; Add photos</button>
+    <button id="cameraBtn" class="btn btn-secondary">&#128248; Camera</button>
+  </div>
+
+  <div class="export-bar">
+    <button id="pdfBtn" class="btn btn-primary" disabled>&#11015;&#65039; Download PDF</button>
+    <button id="photosBtn" class="btn btn-primary" disabled>&#128190; Save to Photos</button>
+  </div>
+  <p class="export-hint" id="exportHint">On iPhone, &ldquo;Save to Photos&rdquo; opens the share sheet &mdash; tap <b>Save Images</b> there.</p>
+
+  <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+</main>
+
+<!-- ============ EDITOR VIEW ============ -->
+<section id="editorView" class="view" hidden>
+  <div class="editor-stage" id="editorStage">
+    <canvas id="editorCanvas"></canvas>
+    <div class="corner-handle" data-corner="tl"></div>
+    <div class="corner-handle" data-corner="tr"></div>
+    <div class="corner-handle" data-corner="br"></div>
+    <div class="corner-handle" data-corner="bl"></div>
+    <svg id="quadOverlay" class="quad-overlay"></svg>
+    <div id="loupe" class="loupe" hidden><canvas id="loupeCanvas" width="120" height="120"></canvas></div>
+  </div>
+
+  <div class="editor-controls">
+    <div class="control-row">
+      <button id="rotLeftBtn" class="btn btn-small" title="Rotate left">&#8634; 90&deg;</button>
+      <button id="rotRightBtn" class="btn btn-small" title="Rotate right">&#8635; 90&deg;</button>
+      <button id="fullCropBtn" class="btn btn-small" title="Reset corners to full image">Full</button>
+      <button id="redetectBtn" class="btn btn-small" title="Re-run auto detection">Auto</button>
+    </div>
+    <div class="control-row slider-row">
+      <label for="fineSlider">Straighten</label>
+      <input type="range" id="fineSlider" min="-15" max="15" step="0.2" value="0">
+      <output id="fineValue">0&deg;</output>
+      <button id="fineResetBtn" class="btn btn-tiny">0</button>
+    </div>
+    <div class="preview-row">
+      <span class="preview-label">Preview</span>
+      <canvas id="previewCanvas"></canvas>
+    </div>
+    <div class="control-row">
+      <button id="cancelEditBtn" class="btn btn-secondary">Cancel</button>
+      <button id="doneEditBtn" class="btn btn-primary">Done</button>
+    </div>
+  </div>
+</section>
+
+<div id="busyOverlay" class="busy-overlay" hidden>
+  <div class="spinner"></div>
+  <p id="busyText">Working&hellip;</p>
+</div>
+
+<script src="vendor/jscanify.min.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="js/detect.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/export.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
