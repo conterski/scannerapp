@@ -301,9 +301,12 @@ function bandMatchesInside(gray, inner, outer, centroid, w, h) {
  * outermost side that shows real cross-edge contrast; sides without contrast
  * (printed tables, merge overshoot through uniform background) lose.
  */
-function fuseQuad(candidates, best, gray, w, h, segments) {
+function fuseQuad(candidates, best, gray, w, h, segments, trace) {
   const bestBox = bboxOf(best.corners);
+  // Split parts (other than a winning one) are excluded: their cut chords
+  // are interior lines that would poison the side pools.
   const contributors = candidates.filter((c) => !c.rejected &&
+    (c === best || !c.split) &&
     c.score >= 0.25 * best.score && bboxIoU(bboxOf(c.corners), bestBox) >= 0.45);
   if (!contributors.length) return null;
 
@@ -315,6 +318,78 @@ function fuseQuad(candidates, best, gray, w, h, segments) {
     const d = Math.abs(u - v) % Math.PI;
     return Math.min(d, Math.PI - d);
   };
+  const dirOf = (s) => Math.atan2(s.b.y - s.a.y, s.b.x - s.a.x);
+  // Median gray of the document's central region (interior estimate).
+  const interiorVals = [];
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const x = Math.round(centroid.x + dx * 0.04 * w);
+      const y = Math.round(centroid.y + dy * 0.04 * h);
+      if (x >= 0 && y >= 0 && x < w && y < h) interiorVals.push(gray.ucharPtr(y, x)[0]);
+    }
+  }
+  interiorVals.sort((a, b) => a - b);
+  const interiorRef = interiorVals.length
+    ? interiorVals[Math.floor(interiorVals.length / 2)] : 128;
+  // A real document EDGE separates document-looking (inside) from
+  // non-document (outside). Sampled at 3 depths per point so sparse text
+  // can't imitate background and background can't imitate paper.
+  const boundaryLike = (s) => {
+    const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 1;
+    let nx = -(s.b.y - s.a.y) / len, ny = (s.b.x - s.a.x) / len;
+    const midx = (s.a.x + s.b.x) / 2, midy = (s.a.y + s.b.y) / 2;
+    if (nx * (centroid.x - midx) + ny * (centroid.y - midy) > 0) { nx = -nx; ny = -ny; }
+    const majority = (px, py, dirX, dirY, test) => {
+      let hit = 0, m = 0;
+      for (const d of [12, 22, 32]) {
+        const x = Math.round(px + dirX * d), y = Math.round(py + dirY * d);
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        m++;
+        if (test(gray.ucharPtr(y, x)[0])) hit++;
+      }
+      return m >= 2 && hit / m > 0.5;
+    };
+    let good = 0, n = 0;
+    for (let t = 0.15; t <= 0.86; t += 0.1) {
+      const px = s.a.x + (s.b.x - s.a.x) * t;
+      const py = s.a.y + (s.b.y - s.a.y) * t;
+      const inDoc = majority(px, py, -nx, -ny, (v) => Math.abs(v - interiorRef) <= 35);
+      const outNot = majority(px, py, nx, ny, (v) => Math.abs(v - interiorRef) > 30);
+      n++;
+      if (inDoc && outNot) good++;
+    }
+    return n >= 5 && good / n >= 0.55;
+  };
+  // Walk outward, extending only while the strip between sides still looks
+  // like the document. NEVER extend past a side already sitting on a strong
+  // real edge — strong edges ARE the document boundary.
+  const walkOutward = (pick, list) => {
+    for (const next of list) {
+      if (next.outward <= pick.outward) continue;
+      if (next.outward - pick.outward < 8 ||
+          bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
+        pick = next;
+      }
+    }
+    return pick;
+  };
+  // Segment side-candidates aligned to a direction, gated by contrast and
+  // the continues-beyond veto.
+  const segSides = (type, refDir, minContrast) => {
+    const out = [];
+    for (const seg of segments || []) {
+      if (angDiff(dirOf({ a: seg.a, b: seg.b }), refDir) > (25 * Math.PI) / 180) continue;
+      const mx = (seg.a.x + seg.b.x) / 2, my = (seg.a.y + seg.b.y) / 2;
+      const outward = [-1, 1, 1, -1][type] * (type % 2 === 0 ? my : mx);
+      const contrast = sideContrast(gray, seg.a, seg.b, w, h);
+      if (contrast < minContrast) continue;
+      if (lineContinuesBeyond(gray, seg.a, seg.b, w, h)) continue;
+      out.push({ s: seg, contrast, outward, continues: false });
+    }
+    return out;
+  };
+
+  const sidesByType = [];
   const chosen = [];
   for (let type = 0; type < 4; type++) {
     const sides = contributors.map((c) => {
@@ -326,6 +401,7 @@ function fuseQuad(candidates, best, gray, w, h, segments) {
         outward: [-1, 1, 1, -1][type] * mid,
       };
     });
+    sidesByType.push(sides);
     // Relative gate: a soft-but-real edge stays in play when nothing
     // stronger exists for this side.
     const topContrast = sides.reduce((m, x) => Math.max(m, x.contrast), 0);
@@ -350,44 +426,29 @@ function fuseQuad(candidates, best, gray, w, h, segments) {
         .sort((a, b) => a.outward - b.outward);
     }
     if (!pick) pick = eligible[0];
-    // Walk outward from the starting side, extending only while the strip
-    // between sides still looks like the document — stops merge-overshoot
-    // edges that run through the background.
-    for (const next of eligible) {
-      if (next.outward <= pick.outward) continue;
-      if (next.outward - pick.outward < 8 ||
-          bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
-        pick = next;
-      }
-    }
+    pick = walkOutward(pick, eligible);
     // Hough segments as OUTWARD-only extensions: a partially visible edge
     // (behind an occluder) can push a side out, but interior form lines can
     // never pull one in.
-    if (segments && segments.length) {
-      const refDir = Math.atan2(pick.s.b.y - pick.s.a.y, pick.s.b.x - pick.s.a.x);
-      const extras = [];
-      for (const seg of segments) {
-        const segDir = Math.atan2(seg.b.y - seg.a.y, seg.b.x - seg.a.x);
-        if (angDiff(segDir, refDir) > (25 * Math.PI) / 180) continue;
-        const mx = (seg.a.x + seg.b.x) / 2, my = (seg.a.y + seg.b.y) / 2;
-        const outward = [-1, 1, 1, -1][type] * (type % 2 === 0 ? my : mx);
-        if (outward <= pick.outward) continue;
-        if (outward - pick.outward > 0.2 * Math.min(w, h)) continue;
-        const contrast = sideContrast(gray, seg.a, seg.b, w, h);
-        if (contrast < 0.35) continue;
-        if (lineContinuesBeyond(gray, seg.a, seg.b, w, h)) continue;
-        extras.push({ s: seg, contrast, outward });
-      }
-      extras.sort((a, b) => a.outward - b.outward);
-      for (const next of extras) {
-        if (next.outward <= pick.outward) continue;
-        if (next.outward - pick.outward < 8 ||
-            bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
-          pick = next;
-        }
-      }
+    if (segments && segments.length && pick.contrast < 0.6) {
+      const extras = segSides(type, dirOf(pick.s), 0.35)
+        .filter((x) => x.outward > pick.outward &&
+                       x.outward - pick.outward <= 0.2 * Math.min(w, h))
+        .sort((a, b) => a.outward - b.outward);
+      pick = walkOutward(pick, extras);
     }
     chosen.push(pick);
+  }
+
+  if (trace) {
+    for (let type = 0; type < 4; type++) {
+      const pick = chosen[type];
+      trace.push({
+        type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
+        a: { x: Math.round(pick.s.a.x), y: Math.round(pick.s.a.y) },
+        b: { x: Math.round(pick.s.b.x), y: Math.round(pick.s.b.y) },
+      });
+    }
   }
 
   const lines = chosen.map((p) => lineThrough(p.s.a, p.s.b));
@@ -409,6 +470,87 @@ function fuseQuad(candidates, best, gray, w, h, segments) {
   return q;
 }
 
+/** Quad-fits an arbitrary point list (via its convex hull) into `out`. */
+function candidateFromPoints(pts, w, h, out, maskName) {
+  if (pts.length < 8) return;
+  const flat = [];
+  for (const p of pts) { flat.push(p.x, p.y); }
+  const mat = cv.matFromArray(pts.length, 1, cv.CV_32SC2, flat);
+  const hull = new cv.Mat();
+  try {
+    cv.convexHull(mat, hull, false, true);
+    const q = quadFromHull(hull);
+    if (!q) return;
+    const area = cv.contourArea(mat);
+    const m = quadMetrics(q, Math.max(area, cv.contourArea(hull) * 0.8),
+      cv.contourArea(hull), w, h);
+    // Lightly penalized: a declumped part should win over a genuinely bad
+    // merged quad but not over a decent one. Marked `split` so its cut
+    // chord never joins side pools.
+    out.push({
+      corners: q, score: m.score * 0.85, quadArea: m.quadArea,
+      borderCorners: m.borderCorners, rejected: m.score <= 0,
+      hullPts: hullPoints(hull), mask: maskName, split: true,
+    });
+  } finally {
+    mat.delete(); hull.delete();
+  }
+}
+
+/**
+ * Declumping: a document merged with an occluding paper produces deep
+ * concave notches where the two meet. Cut the contour at the two deepest
+ * convexity defects and quad-fit each part — the document-only part
+ * becomes a clean candidate with its true edges.
+ */
+function splitCandidates(contour, w, h, out, maskName) {
+  const hullIdx = new cv.Mat();
+  const defects = new cv.Mat();
+  try {
+    cv.convexHull(contour, hullIdx, false, false);
+    if (hullIdx.rows < 3) return;
+    cv.convexityDefects(contour, hullIdx, defects);
+    const deep = [];
+    for (let i = 0; i < defects.rows; i++) {
+      const far = defects.data32S[i * 4 + 2];
+      const depth = defects.data32S[i * 4 + 3] / 256;
+      if (depth > 0.08 * Math.min(w, h)) deep.push({ far, depth });
+    }
+    if (!deep.length) return;
+    deep.sort((a, b) => b.depth - a.depth);
+    const pts = [];
+    for (let i = 0; i < contour.rows; i++) {
+      pts.push({ x: contour.data32S[i * 2], y: contour.data32S[i * 2 + 1] });
+    }
+    const cuts = deep.slice(0, 2).map((d) => d.far).sort((a, b) => a - b);
+    if (cuts.length === 2 && cuts[1] - cuts[0] > 4) {
+      const partA = pts.slice(cuts[0], cuts[1] + 1);
+      const partB = pts.slice(cuts[1]).concat(pts.slice(0, cuts[0] + 1));
+      // A true two-paper merge splits into two SUBSTANTIAL parts. If one
+      // part is a sliver, this is just an irregular outline — splitting it
+      // would shave a strip off the document.
+      const polyArea = (p) => {
+        let a = 0;
+        for (let i = 0; i < p.length; i++) {
+          const q2 = p[(i + 1) % p.length];
+          a += p[i].x * q2.y - q2.x * p[i].y;
+        }
+        return Math.abs(a) / 2;
+      };
+      const areaA = polyArea(partA), areaB = polyArea(partB);
+      const total = areaA + areaB;
+      if (total > 0 && Math.min(areaA, areaB) / total >= 0.15) {
+        candidateFromPoints(partA, w, h, out, maskName + "-split");
+        candidateFromPoints(partB, w, h, out, maskName + "-split");
+      }
+    }
+  } catch (e) {
+    // convexityDefects can throw on self-intersecting contours — skip.
+  } finally {
+    hullIdx.delete(); defects.delete();
+  }
+}
+
 /** Collects scored quad candidates from every sizable outer contour of a mask. */
 function candidatesFromMask(bin, w, h, out, maskName) {
   const contours = new cv.MatVector();
@@ -425,9 +567,10 @@ function candidatesFromMask(bin, w, h, out, maskName) {
       const hull = new cv.Mat();
       try {
         cv.convexHull(contours.get(i), hull, false, true);
+        const hullArea = cv.contourArea(hull);
         const q = quadFromHull(hull);
         if (q) {
-          const m = quadMetrics(q, area, cv.contourArea(hull), w, h);
+          const m = quadMetrics(q, area, hullArea, w, h);
           out.push({
             corners: q, score: m.score, quadArea: m.quadArea,
             borderCorners: m.borderCorners, rejected: m.score <= 0,
@@ -436,6 +579,15 @@ function candidatesFromMask(bin, w, h, out, maskName) {
         } else {
           out.push({ corners: null, score: 0, rejected: true, mask: maskName,
             noQuad: true, areaFrac: area / (w * h) });
+        }
+        // Deeply notched blob whose own quad is BAD: probably two merged
+        // papers — offer the declumped parts as candidates. When the whole
+        // blob already yields a decent quad, splitting only lets crisp
+        // partial-document quads hijack the selection.
+        const ownScore = out.length && out[out.length - 1].mask === maskName
+          ? out[out.length - 1].score : 0;
+        if (hullArea > 0 && area / hullArea < 0.88 && ownScore < 0.55) {
+          splitCandidates(contours.get(i), w, h, out, maskName);
         }
       } finally {
         hull.delete();
@@ -556,6 +708,12 @@ function snapSidesOutward(gray, q, w, h) {
   for (let type = 0; type < 4; type++) {
     const s = sideOf(q, type);
     const { nx, ny } = outwardNormal(q, s);
+    // A side already sitting on a strong real edge must not move — marching
+    // outward from it would climb across a merged occluding paper.
+    if (sideContrast(gray, s.a, s.b, w, h) >= 0.55) {
+      lines.push(lineThrough(s.a, s.b));
+      continue;
+    }
     // Robust paper reference: median of the just-inside samples along the
     // whole side, so text or artwork under one sample can't poison it.
     const ts = [];
@@ -744,8 +902,12 @@ function detect({ width, height, buffer, debug }) {
     // Fuse the four edges across candidates by cross-edge contrast; fall back
     // to the raw best quad if fusion fails.
     let corners = null;
+    const trace = debug ? [] : null;
+    let fusedOk = false;
     if (best) {
-      corners = fuseQuad(candidates, best, gray, width, height, segments) ||
+      const fused = fuseQuad(candidates, best, gray, width, height, segments, trace);
+      fusedOk = !!fused;
+      corners = fused ||
         refineQuadEdges(best.corners, best.hullPts, width, height);
       corners = snapSidesOutward(gray, corners, width, height);
       corners = expandQuad(corners, 0.004 * Math.min(width, height), width, height);
@@ -753,6 +915,9 @@ function detect({ width, height, buffer, debug }) {
     if (debug) {
       return {
         corners,
+        fusedOk,
+        trace,
+        segments,
         debug: candidates.map((c) => ({
           mask: c.mask, score: +c.score.toFixed(4), rejected: !!c.rejected,
           noQuad: !!c.noQuad, areaFrac: c.areaFrac,
@@ -797,7 +962,8 @@ self.onmessage = async (e) => {
     } else if (type === "detect") {
       await ensureInit();
       const res = detect(e.data);
-      self.postMessage({ id, ok: true, corners: res.corners, debug: res.debug });
+      self.postMessage({ id, ok: true, corners: res.corners, debug: res.debug,
+        fusedOk: res.fusedOk, trace: res.trace, segments: res.segments });
     } else if (type === "warp") {
       await ensureInit();
       const buffer = warp(e.data);

@@ -157,7 +157,8 @@
     const res = await call("detect",
       { width: img.width, height: img.height, buffer: img.data.buffer, debug: true },
       [img.data.buffer]);
-    return { corners: res.corners, debug: res.debug, scale };
+    return { corners: res.corners, debug: res.debug, scale,
+      fusedOk: res.fusedOk, trace: res.trace, segments: res.segments };
   }
 
   window.Detect = { ensureOpenCV, detectCorners, warpPerspective, fullImageCorners, scaledCanvas, detectDebug };
