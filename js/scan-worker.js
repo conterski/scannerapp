@@ -182,17 +182,21 @@ function sideContrast(gray, a, b, w, h) {
   if (len < 8) return 0;
   const nx = -(b.y - a.y) / len, ny = (b.x - a.x) / len;
   const d = Math.max(6, 0.012 * Math.min(w, h));
-  let sum = 0, n = 0;
+  // Median of SIGNED differences: a real edge is a consistent one-direction
+  // step; printed lines surrounded by text produce noisy both-way diffs
+  // whose median collapses toward zero.
+  const diffs = [];
   for (let t = 0.1; t <= 0.9; t += 0.05) {
     const px = a.x + (b.x - a.x) * t, py = a.y + (b.y - a.y) * t;
     const x1 = Math.round(px + nx * d), y1 = Math.round(py + ny * d);
     const x2 = Math.round(px - nx * d), y2 = Math.round(py - ny * d);
     if (x1 < 0 || y1 < 0 || x1 >= w || y1 >= h) continue;
     if (x2 < 0 || y2 < 0 || x2 >= w || y2 >= h) continue;
-    sum += Math.abs(gray.ucharPtr(y1, x1)[0] - gray.ucharPtr(y2, x2)[0]);
-    n++;
+    diffs.push(gray.ucharPtr(y1, x1)[0] - gray.ucharPtr(y2, x2)[0]);
   }
-  return n >= 5 ? Math.min(1, sum / n / 30) : 0;
+  if (diffs.length < 5) return 0;
+  diffs.sort((p, q) => p - q);
+  return Math.min(1, Math.abs(diffs[Math.floor(diffs.length / 2)]) / 25);
 }
 
 function lineThrough(a, b) {
@@ -200,33 +204,57 @@ function lineThrough(a, b) {
   return { px: a.x, py: a.y, dx: (b.x - a.x) / len, dy: (b.y - a.y) / len };
 }
 
-/** Median gray level of the document's central region. */
-function interiorReference(gray, q, w, h) {
-  const cx = (q.tl.x + q.tr.x + q.br.x + q.bl.x) / 4;
-  const cy = (q.tl.y + q.tr.y + q.br.y + q.bl.y) / 4;
-  const vals = [];
-  for (let dy = -2; dy <= 2; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
-      const x = Math.round(cx + dx * 0.05 * w), y = Math.round(cy + dy * 0.05 * h);
-      if (x >= 0 && y >= 0 && x < w && y < h) vals.push(gray.ucharPtr(y, x)[0]);
+/**
+ * True if this line's contrast step CONTINUES past both endpoints — a shadow
+ * boundary or desk edge crosses the whole scene, while a real paper edge
+ * stops at the document corners.
+ */
+function lineContinuesBeyond(gray, a, b, w, h) {
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len < 8) return false;
+  const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+  const nx = -uy, ny = ux;
+  const d = Math.max(6, 0.012 * Math.min(w, h));
+  const ext = 0.25 * len;
+  const diffs = [];
+  for (const [ox, oy, dir] of [[a.x, a.y, -1], [b.x, b.y, 1]]) {
+    for (let e = 0.3; e <= 1.0; e += 0.175) {
+      const px = ox + dir * ux * ext * e, py = oy + dir * uy * ext * e;
+      const x1 = Math.round(px + nx * d), y1 = Math.round(py + ny * d);
+      const x2 = Math.round(px - nx * d), y2 = Math.round(py - ny * d);
+      if (x1 < 0 || y1 < 0 || x1 >= w || y1 >= h) continue;
+      if (x2 < 0 || y2 < 0 || x2 >= w || y2 >= h) continue;
+      diffs.push(gray.ucharPtr(y1, x1)[0] - gray.ucharPtr(y2, x2)[0]);
     }
   }
-  vals.sort((a, b) => a - b);
-  return vals.length ? vals[Math.floor(vals.length / 2)] : 128;
+  if (diffs.length < 5) return false;
+  diffs.sort((p, q) => p - q);
+  return Math.abs(diffs[Math.floor(diffs.length / 2)]) / 25 >= 0.4;
 }
 
-/** True if the strip between two competing sides still looks like document. */
-function bandLooksInterior(gray, inner, outer, ref, w, h) {
+/**
+ * True if the strip between two competing sides still looks like document.
+ * Each band sample is compared to the pixel just INSIDE the inner side at
+ * the same position (a local paper reference), so brightness gradients and
+ * dark artwork on the paper don't break the comparison.
+ */
+function bandMatchesInside(gray, inner, outer, centroid, w, h) {
   let ok = 0, n = 0;
   for (let t = 0.15; t <= 0.86; t += 0.1) {
     const ax = inner.a.x + (inner.b.x - inner.a.x) * t;
     const ay = inner.a.y + (inner.b.y - inner.a.y) * t;
     const bx = outer.a.x + (outer.b.x - outer.a.x) * t;
     const by = outer.a.y + (outer.b.y - outer.a.y) * t;
+    // Local reference: 12px inward (toward the document centroid) from
+    // the inner side.
+    const dLen = Math.hypot(centroid.x - ax, centroid.y - ay) || 1;
+    const rx = Math.round(ax + (centroid.x - ax) / dLen * 12);
+    const ry = Math.round(ay + (centroid.y - ay) / dLen * 12);
     const mx = Math.round((ax + bx) / 2), my = Math.round((ay + by) / 2);
     if (mx < 0 || my < 0 || mx >= w || my >= h) continue;
+    if (rx < 0 || ry < 0 || rx >= w || ry >= h) continue;
     n++;
-    if (Math.abs(gray.ucharPtr(my, mx)[0] - ref) <= 30) ok++;
+    if (Math.abs(gray.ucharPtr(my, mx)[0] - gray.ucharPtr(ry, rx)[0]) <= 35) ok++;
   }
   return n >= 4 && ok / n >= 0.6;
 }
@@ -242,7 +270,10 @@ function fuseQuad(candidates, best, gray, w, h) {
     c.score >= 0.25 * best.score && bboxIoU(bboxOf(c.corners), bestBox) >= 0.45);
   if (!contributors.length) return null;
 
-  const interiorRef = interiorReference(gray, best.corners, w, h);
+  const centroid = {
+    x: (best.corners.tl.x + best.corners.tr.x + best.corners.br.x + best.corners.bl.x) / 4,
+    y: (best.corners.tl.y + best.corners.tr.y + best.corners.br.y + best.corners.bl.y) / 4,
+  };
   const chosen = [];
   for (let type = 0; type < 4; type++) {
     const sides = contributors.map((c) => {
@@ -254,23 +285,38 @@ function fuseQuad(candidates, best, gray, w, h) {
         outward: [-1, 1, 1, -1][type] * mid,
       };
     });
-    const eligible = sides.filter((x) => x.contrast >= 0.5)
+    // Relative gate: a soft-but-real edge stays in play when nothing
+    // stronger exists for this side.
+    const topContrast = sides.reduce((m, x) => Math.max(m, x.contrast), 0);
+    const gate = Math.max(0.35, Math.min(0.5, 0.6 * topContrast));
+    // Shadow boundaries and desk edges continue past the document corners;
+    // real paper edges don't. Veto the continuers.
+    for (const x of sides) {
+      x.continues = x.contrast >= 0.15 &&
+        lineContinuesBeyond(gray, x.s.a, x.s.b, w, h);
+    }
+    let eligible = sides.filter((x) => x.contrast >= gate && !x.continues)
       .sort((a, b) => a.outward - b.outward);
     let pick;
     if (!eligible.length) {
-      // No side shows real cross-edge contrast — take the least bad.
-      pick = sides.reduce((a, b) => (b.contrast > a.contrast ? b : a));
-    } else {
-      // Walk outward from the innermost contrasted side, extending only
-      // while the strip between sides still looks like the document —
-      // stops merge-overshoot edges that run through the background.
-      pick = eligible[0];
-      for (let k = 1; k < eligible.length; k++) {
-        const next = eligible[k];
-        if (next.outward - pick.outward < 8 ||
-            bandLooksInterior(gray, pick.s, next.s, interiorRef, w, h)) {
-          pick = next;
-        }
+      // Low-contrast scene (e.g. white paper on a white floor): start from
+      // the strongest side, but still walk outward over sides with at least
+      // weak edge evidence — a printed form border must not win outright.
+      const nonContinuing = sides.filter((x) => !x.continues);
+      const pool = nonContinuing.length ? nonContinuing : sides;
+      pick = pool.reduce((a, b) => (b.contrast > a.contrast ? b : a));
+      eligible = pool.filter((x) => x.contrast >= 0.15 && x.outward >= pick.outward)
+        .sort((a, b) => a.outward - b.outward);
+    }
+    if (!pick) pick = eligible[0];
+    // Walk outward from the starting side, extending only while the strip
+    // between sides still looks like the document — stops merge-overshoot
+    // edges that run through the background.
+    for (const next of eligible) {
+      if (next.outward <= pick.outward) continue;
+      if (next.outward - pick.outward < 8 ||
+          bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
+        pick = next;
       }
     }
     chosen.push(pick);
@@ -405,11 +451,143 @@ function refineQuadEdges(q, hullPts, w, h) {
   return orderCorners(refined) || q;
 }
 
+/** Outward-pointing unit normal of a quad side (away from the centroid). */
+function outwardNormal(q, s) {
+  const cx = (q.tl.x + q.tr.x + q.br.x + q.bl.x) / 4;
+  const cy = (q.tl.y + q.tr.y + q.br.y + q.bl.y) / 4;
+  const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 1;
+  let nx = -(s.b.y - s.a.y) / len, ny = (s.b.x - s.a.x) / len;
+  const midx = (s.a.x + s.b.x) / 2, midy = (s.a.y + s.b.y) / 2;
+  if (nx * (cx - midx) + ny * (cy - midy) > 0) { nx = -nx; ny = -ny; }
+  return { nx, ny };
+}
+
+function validQuadOrNull(pts, w, h) {
+  if (pts.some((p) => !p || !isFinite(p.x) || !isFinite(p.y))) return null;
+  if (pts.some((p) => p.x < -0.15 * w || p.x > 1.15 * w ||
+                      p.y < -0.15 * h || p.y > 1.15 * h)) return null;
+  const q = orderCorners(pts);
+  if (!q) return null;
+  const angles = internalAngles(q);
+  if (angles.some((a) => a < 30 || a > 150)) return null;
+  return q;
+}
+
+/**
+ * Direct anti-clip pass: for each side, march outward from sample points
+ * while the pixels still match the paper just inside the side. If most
+ * points consistently find the real edge further out, the side snaps to a
+ * line fitted through those stop points. Works from the pixels, so it
+ * recovers document strips that every candidate mask missed.
+ */
+function snapSidesOutward(gray, q, w, h) {
+  const maxMarch = 0.06 * Math.min(w, h);
+  const origArea = shoelaceArea(q);
+  const lines = [];
+  let moved = false;
+  for (let type = 0; type < 4; type++) {
+    const s = sideOf(q, type);
+    const { nx, ny } = outwardNormal(q, s);
+    // Robust paper reference: median of the just-inside samples along the
+    // whole side, so text or artwork under one sample can't poison it.
+    const ts = [];
+    for (let t = 0.12; t <= 0.89; t += 0.096) ts.push(t);
+    const refs = [];
+    for (const t of ts) {
+      const rx = Math.round(s.a.x + (s.b.x - s.a.x) * t - nx * 6);
+      const ry = Math.round(s.a.y + (s.b.y - s.a.y) * t - ny * 6);
+      if (rx >= 0 && ry >= 0 && rx < w && ry < h) refs.push(gray.ucharPtr(ry, rx)[0]);
+    }
+    if (refs.length < 5) { lines.push(lineThrough(s.a, s.b)); continue; }
+    refs.sort((p, q2) => p - q2);
+    const ref = refs[Math.floor(refs.length / 2)];
+
+    const stops = [];
+    for (const t of ts) {
+      const px = s.a.x + (s.b.x - s.a.x) * t;
+      const py = s.a.y + (s.b.y - s.a.y) * t;
+      let d = 0, edgeFound = false, softStart = -1;
+      for (let step = 2; step <= maxMarch; step += 2) {
+        const x = Math.round(px + nx * step), y = Math.round(py + ny * step);
+        if (x < 0 || y < 0 || x >= w || y >= h) break;
+        const diff = Math.abs(gray.ucharPtr(y, x)[0] - ref);
+        if (diff > 20) {
+          // Thin dark run (a printed border line) with paper resuming right
+          // behind it is not the document edge — hop over it and continue.
+          let resumeAt = 0;
+          for (let peek = step + 2; peek <= Math.min(step + 12, maxMarch); peek += 2) {
+            const qx = Math.round(px + nx * peek), qy = Math.round(py + ny * peek);
+            if (qx < 0 || qy < 0 || qx >= w || qy >= h) break;
+            if (Math.abs(gray.ucharPtr(qy, qx)[0] - ref) <= 20) { resumeAt = peek; break; }
+          }
+          if (resumeAt) { d = resumeAt; step = resumeAt; softStart = -1; continue; }
+          edgeFound = true;
+          break;
+        }
+        // Soft sustained step (white paper on near-white background): a
+        // small but persistent offset marks the boundary.
+        if (diff > 9) {
+          if (softStart < 0) softStart = step;
+          else if (step - softStart >= 10) { d = softStart - 2; edgeFound = true; break; }
+        } else {
+          softStart = -1;
+          d = step;
+        }
+      }
+      // Marches that never hit an edge are unreliable (probably already on
+      // background) — only edge-confirmed stops count.
+      if (edgeFound) stops.push({ x: px + nx * Math.max(0, d), y: py + ny * Math.max(0, d), d: Math.max(0, d) });
+    }
+    if (stops.length < 5) { lines.push(lineThrough(s.a, s.b)); continue; }
+    const ds = stops.map((o) => o.d).sort((a, b) => a - b);
+    const median = ds[Math.floor(ds.length / 2)];
+    if (median <= 3) { lines.push(lineThrough(s.a, s.b)); continue; }
+    const usable = stops.filter((o) => Math.abs(o.d - median) <= Math.max(6, 0.5 * median));
+    if (usable.length < 5) { lines.push(lineThrough(s.a, s.b)); continue; }
+    lines.push(fitLinePts(usable));
+    moved = true;
+  }
+  if (!moved) return q;
+  const nq = validQuadOrNull([
+    lineIntersect(lines[3], lines[0]),
+    lineIntersect(lines[0], lines[1]),
+    lineIntersect(lines[1], lines[2]),
+    lineIntersect(lines[2], lines[3]),
+  ], w, h);
+  if (!nq) return q;
+  const area = shoelaceArea(nq);
+  // Snap may only GROW the quad, and never explosively.
+  if (area < origArea || area > 1.2 * origArea || area > 1.03 * w * h) return q;
+  return nq;
+}
+
+/** Pushes every side outward by `margin` px — hairline errors land on
+ *  background instead of clipping document content. */
+function expandQuad(q, margin, w, h) {
+  const lines = [];
+  for (let type = 0; type < 4; type++) {
+    const s = sideOf(q, type);
+    const { nx, ny } = outwardNormal(q, s);
+    const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 1;
+    lines.push({
+      px: s.a.x + nx * margin, py: s.a.y + ny * margin,
+      dx: (s.b.x - s.a.x) / len, dy: (s.b.y - s.a.y) / len,
+    });
+  }
+  return validQuadOrNull([
+    lineIntersect(lines[3], lines[0]),
+    lineIntersect(lines[0], lines[1]),
+    lineIntersect(lines[1], lines[2]),
+    lineIntersect(lines[2], lines[3]),
+  ], w, h) || q;
+}
+
 /**
  * Finds the document outline. Candidate masks (OTSU both polarities, local
- * adaptive threshold, dilated Canny edges) each yield scored quads from
- * their outer contours; the best-scoring quad wins and its corners are
- * refined by edge-line fitting.
+ * adaptive threshold, saturation, dilated Canny at two sensitivities) each
+ * yield scored quads from their outer contours; edge fusion assembles the
+ * best four sides, an outward snap recovers any clipped strips, and a small
+ * margin guarantees hairline errors never cut content.
  */
 function detect({ width, height, buffer, debug }) {
   const img = cv.matFromImageData(toImageData(width, height, buffer));
@@ -442,10 +620,34 @@ function detect({ width, height, buffer, debug }) {
     cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
     candidatesFromMask(bin, width, height, candidates, "adaptive");
 
-    // Edge-based candidate: contrast-independent paper outline.
+    // Saturation mask: paper is colorless even in shadow, wood/desks are
+    // saturated — survives brightness gradients that break gray thresholds.
+    const rgb = new cv.Mat();
+    const hsv = new cv.Mat();
+    const chans = new cv.MatVector();
+    try {
+      cv.cvtColor(img, rgb, cv.COLOR_RGBA2RGB);
+      cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+      cv.split(hsv, chans);
+      const sat = chans.get(1);
+      cv.GaussianBlur(sat, sat, new cv.Size(5, 5), 0);
+      cv.threshold(sat, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+      cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
+      cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
+      candidatesFromMask(bin, width, height, candidates, "saturation");
+      sat.delete();
+    } finally {
+      rgb.delete(); hsv.delete(); chans.delete();
+    }
+
+    // Edge-based candidates: contrast-independent paper outline. The soft
+    // pass catches low-contrast paper edges in shadow.
     cv.Canny(gray, bin, 50, 150);
     cv.dilate(bin, bin, kDilate);
     candidatesFromMask(bin, width, height, candidates, "canny");
+    cv.Canny(gray, bin, 25, 80);
+    cv.dilate(bin, bin, kDilate);
+    candidatesFromMask(bin, width, height, candidates, "canny-soft");
 
     let best = null;
     for (const c of candidates) {
@@ -460,6 +662,8 @@ function detect({ width, height, buffer, debug }) {
     if (best) {
       corners = fuseQuad(candidates, best, gray, width, height) ||
         refineQuadEdges(best.corners, best.hullPts, width, height);
+      corners = snapSidesOutward(gray, corners, width, height);
+      corners = expandQuad(corners, 0.004 * Math.min(width, height), width, height);
     }
     if (debug) {
       return {
