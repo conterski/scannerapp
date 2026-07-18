@@ -90,8 +90,41 @@ function internalAngles(q) {
 }
 
 /**
+ * A pentagon is usually a document with one corner truncated (occluded by
+ * another paper). Reconstruct the quad: drop one side, extend its neighbors
+ * to their intersection. The right drop yields a clean near-parallelogram;
+ * score reconstructions by area x opposite-side parallelism.
+ */
+function pentagonToQuad(pts) {
+  const dirOf = (p1, p2) => Math.atan2(p2.y - p1.y, p2.x - p1.x);
+  const angDiff = (u, v) => {
+    const d = Math.abs(u - v) % Math.PI;
+    return Math.min(d, Math.PI - d);
+  };
+  let best = null, bestScore = 0;
+  for (let drop = 0; drop < 5; drop++) {
+    // Side dropped: pts[drop] → pts[drop+1]. Extend the two adjacent sides.
+    const prevLine = lineThrough(pts[(drop + 4) % 5], pts[drop]);
+    const nextLine = lineThrough(pts[(drop + 2) % 5], pts[(drop + 1) % 5]);
+    const x = lineIntersect(prevLine, nextLine);
+    if (!x || !isFinite(x.x) || !isFinite(x.y)) continue;
+    const q = orderCorners([x, pts[(drop + 2) % 5], pts[(drop + 3) % 5], pts[(drop + 4) % 5]]);
+    if (!q) continue;
+    const angles = internalAngles(q);
+    if (angles.some((an) => an < 35 || an > 145)) continue;
+    const par = Math.max(0, 1 -
+      (angDiff(dirOf(q.tl, q.tr), dirOf(q.bl, q.br)) +
+       angDiff(dirOf(q.tl, q.bl), dirOf(q.tr, q.br))) / (30 * Math.PI / 180));
+    const score = shoelaceArea(q) * (0.25 + 0.75 * par);
+    if (score > bestScore) { bestScore = score; best = q; }
+  }
+  return best;
+}
+
+/**
  * Collapses a convex hull to a 4-corner quad by loosening the approxPolyDP
- * epsilon until only 4 vertices remain.
+ * epsilon until only 4 vertices remain; a 5-vertex stage is treated as a
+ * corner-truncated document and reconstructed geometrically.
  */
 function quadFromHull(hull) {
   const peri = cv.arcLength(hull, true);
@@ -100,6 +133,10 @@ function quadFromHull(hull) {
     try {
       cv.approxPolyDP(hull, approx, f * peri, true);
       if (approx.rows === 4) return orderCorners(hullPoints(approx));
+      if (approx.rows === 5) {
+        const q = pentagonToQuad(hullPoints(approx));
+        if (q) return q;
+      }
       if (approx.rows < 4) return null;
     } finally {
       approx.delete();
@@ -264,7 +301,7 @@ function bandMatchesInside(gray, inner, outer, centroid, w, h) {
  * outermost side that shows real cross-edge contrast; sides without contrast
  * (printed tables, merge overshoot through uniform background) lose.
  */
-function fuseQuad(candidates, best, gray, w, h) {
+function fuseQuad(candidates, best, gray, w, h, segments) {
   const bestBox = bboxOf(best.corners);
   const contributors = candidates.filter((c) => !c.rejected &&
     c.score >= 0.25 * best.score && bboxIoU(bboxOf(c.corners), bestBox) >= 0.45);
@@ -273,6 +310,10 @@ function fuseQuad(candidates, best, gray, w, h) {
   const centroid = {
     x: (best.corners.tl.x + best.corners.tr.x + best.corners.br.x + best.corners.bl.x) / 4,
     y: (best.corners.tl.y + best.corners.tr.y + best.corners.br.y + best.corners.bl.y) / 4,
+  };
+  const angDiff = (u, v) => {
+    const d = Math.abs(u - v) % Math.PI;
+    return Math.min(d, Math.PI - d);
   };
   const chosen = [];
   for (let type = 0; type < 4; type++) {
@@ -317,6 +358,33 @@ function fuseQuad(candidates, best, gray, w, h) {
       if (next.outward - pick.outward < 8 ||
           bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
         pick = next;
+      }
+    }
+    // Hough segments as OUTWARD-only extensions: a partially visible edge
+    // (behind an occluder) can push a side out, but interior form lines can
+    // never pull one in.
+    if (segments && segments.length) {
+      const refDir = Math.atan2(pick.s.b.y - pick.s.a.y, pick.s.b.x - pick.s.a.x);
+      const extras = [];
+      for (const seg of segments) {
+        const segDir = Math.atan2(seg.b.y - seg.a.y, seg.b.x - seg.a.x);
+        if (angDiff(segDir, refDir) > (25 * Math.PI) / 180) continue;
+        const mx = (seg.a.x + seg.b.x) / 2, my = (seg.a.y + seg.b.y) / 2;
+        const outward = [-1, 1, 1, -1][type] * (type % 2 === 0 ? my : mx);
+        if (outward <= pick.outward) continue;
+        if (outward - pick.outward > 0.2 * Math.min(w, h)) continue;
+        const contrast = sideContrast(gray, seg.a, seg.b, w, h);
+        if (contrast < 0.35) continue;
+        if (lineContinuesBeyond(gray, seg.a, seg.b, w, h)) continue;
+        extras.push({ s: seg, contrast, outward });
+      }
+      extras.sort((a, b) => a.outward - b.outward);
+      for (const next of extras) {
+        if (next.outward <= pick.outward) continue;
+        if (next.outward - pick.outward < 8 ||
+            bandMatchesInside(gray, pick.s, next.s, centroid, w, h)) {
+          pick = next;
+        }
       }
     }
     chosen.push(pick);
@@ -481,7 +549,7 @@ function validQuadOrNull(pts, w, h) {
  * recovers document strips that every candidate mask missed.
  */
 function snapSidesOutward(gray, q, w, h) {
-  const maxMarch = 0.06 * Math.min(w, h);
+  const maxMarch = 0.1 * Math.min(w, h);
   const origArea = shoelaceArea(q);
   const lines = [];
   let moved = false;
@@ -642,7 +710,24 @@ function detect({ width, height, buffer, debug }) {
 
     // Edge-based candidates: contrast-independent paper outline. The soft
     // pass catches low-contrast paper edges in shadow.
+    const segments = [];
     cv.Canny(gray, bin, 50, 150);
+    // Harvest straight segments BEFORE dilation — partial document edges
+    // (behind occluders, soft seams) become usable side candidates even
+    // when no mask isolates a full quad from them.
+    const linesMat = new cv.Mat();
+    try {
+      cv.HoughLinesP(bin, linesMat, 1, Math.PI / 180, 50,
+        0.12 * Math.min(width, height), 10);
+      for (let i = 0; i < Math.min(linesMat.rows, 80); i++) {
+        segments.push({
+          a: { x: linesMat.data32S[i * 4], y: linesMat.data32S[i * 4 + 1] },
+          b: { x: linesMat.data32S[i * 4 + 2], y: linesMat.data32S[i * 4 + 3] },
+        });
+      }
+    } finally {
+      linesMat.delete();
+    }
     cv.dilate(bin, bin, kDilate);
     candidatesFromMask(bin, width, height, candidates, "canny");
     cv.Canny(gray, bin, 25, 80);
@@ -660,7 +745,7 @@ function detect({ width, height, buffer, debug }) {
     // to the raw best quad if fusion fails.
     let corners = null;
     if (best) {
-      corners = fuseQuad(candidates, best, gray, width, height) ||
+      corners = fuseQuad(candidates, best, gray, width, height, segments) ||
         refineQuadEdges(best.corners, best.hullPts, width, height);
       corners = snapSidesOutward(gray, corners, width, height);
       corners = expandQuad(corners, 0.004 * Math.min(width, height), width, height);
