@@ -1,6 +1,6 @@
 /* editor.js — corner-drag editor, rotation controls, and the scan render
- * pipeline (perspective warp → fine rotation → quarter rotation).
- * Exposes window.Editor.
+ * pipeline (a single perspective warp; quarter rotation is folded into the
+ * corner mapping). Exposes window.Editor.
  */
 (function () {
   "use strict";
@@ -9,64 +9,26 @@
   // Render pipeline (geometric transforms only — never any filter)
   // ---------------------------------------------------------------
 
-  /**
-   * Largest axis-aligned w×h box that fits inside a w0×h0 rectangle
-   * rotated by `angleRad` (rotatedRectWithMaxArea).
-   */
-  function inscribedRect(w, h, angleRad) {
-    const a = Math.abs(angleRad) % Math.PI;
-    const ang = a > Math.PI / 2 ? Math.PI - a : a;
-    if (ang < 1e-6 || w <= 0 || h <= 0) return { w, h };
-    const sinA = Math.sin(ang), cosA = Math.cos(ang);
-    const longer = Math.max(w, h), shorter = Math.min(w, h);
-    let cw, ch;
-    if (shorter <= 2 * sinA * cosA * longer || Math.abs(sinA - cosA) < 1e-10) {
-      const x = 0.5 * shorter;
-      if (w >= h) { cw = x / sinA; ch = x / cosA; }
-      else { cw = x / cosA; ch = x / sinA; }
-    } else {
-      const cos2a = cosA * cosA - sinA * sinA;
-      cw = (w * cosA - h * sinA) / cos2a;
-      ch = (h * cosA - w * sinA) / cos2a;
-    }
-    return { w: Math.max(1, Math.floor(cw)), h: Math.max(1, Math.floor(ch)) };
-  }
-
-  /** Rotates by a small angle (degrees) and crops away the empty wedges. */
-  function fineRotate(canvas, angleDeg) {
-    if (!angleDeg) return canvas;
-    const rad = (angleDeg * Math.PI) / 180;
-    const { w, h } = inscribedRect(canvas.width, canvas.height, rad);
-    const out = document.createElement("canvas");
-    out.width = w;
-    out.height = h;
-    const ctx = out.getContext("2d");
-    ctx.translate(w / 2, h / 2);
-    ctx.rotate(rad);
-    ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
-    return out;
-  }
-
-  /** Rotates by quarter turns (0–3, clockwise). */
-  function quarterRotate(canvas, quarter) {
-    const q = ((quarter % 4) + 4) % 4;
-    if (q === 0) return canvas;
-    const out = document.createElement("canvas");
-    if (q % 2) { out.width = canvas.height; out.height = canvas.width; }
-    else { out.width = canvas.width; out.height = canvas.height; }
-    const ctx = out.getContext("2d");
-    ctx.translate(out.width / 2, out.height / 2);
-    ctx.rotate((q * Math.PI) / 2);
-    ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
-    return out;
-  }
+  // Which source-quad corner lands at the OUTPUT's tl/tr/br/bl for each
+  // clockwise quarter turn. Rotating the labels instead of the pixels makes
+  // the warp itself produce the rotated scan — one resample, no extra
+  // full-res canvas pass.
+  const QUARTER_MAP = [
+    null,
+    { tl: "bl", tr: "tl", br: "tr", bl: "br" }, // 90° CW
+    { tl: "br", tr: "bl", br: "tl", bl: "tr" }, // 180°
+    { tl: "tr", tr: "br", br: "bl", bl: "tl" }, // 90° CCW
+  ];
 
   /** Full pipeline: source canvas + edits → final scan canvas. */
-  async function renderScan(sourceCanvas, corners, quarter, fineAngle) {
-    let c = await Detect.warpPerspective(sourceCanvas, corners);
-    c = fineRotate(c, fineAngle);
-    c = quarterRotate(c, quarter);
-    return c;
+  async function renderScan(sourceCanvas, corners, quarter) {
+    const q = ((quarter % 4) + 4) % 4;
+    const map = QUARTER_MAP[q];
+    const c = map
+      ? { tl: corners[map.tl], tr: corners[map.tr],
+          br: corners[map.br], bl: corners[map.bl] }
+      : corners;
+    return Detect.warpPerspective(sourceCanvas, c);
   }
 
   // ---------------------------------------------------------------
@@ -74,7 +36,7 @@
   // ---------------------------------------------------------------
 
   const els = {};
-  let state = null; // { source, corners, quarter, fineAngle, scale, onDone, onCancel }
+  let state = null; // { source, corners, quarter, scale, resolve }
   let previewTimer = null;
   let previewBusy = false;
   let previewDirty = false;
@@ -89,8 +51,6 @@
     els.loupe = $("loupe");
     els.loupeCanvas = $("loupeCanvas");
     els.preview = $("previewCanvas");
-    els.slider = $("fineSlider");
-    els.fineValue = $("fineValue");
     els.handles = {};
     document.querySelectorAll(".corner-handle").forEach((h) => {
       els.handles[h.dataset.corner] = h;
@@ -107,17 +67,6 @@
       state.corners = await Detect.detectCorners(state.source);
       positionHandles(); schedulePreview();
     });
-    els.slider.addEventListener("input", () => {
-      state.fineAngle = parseFloat(els.slider.value);
-      els.fineValue.textContent = state.fineAngle.toFixed(1) + "°";
-      schedulePreview();
-    });
-    $("fineResetBtn").addEventListener("click", () => {
-      els.slider.value = "0";
-      state.fineAngle = 0;
-      els.fineValue.textContent = "0°";
-      schedulePreview();
-    });
     $("cancelEditBtn").addEventListener("click", () => close(false));
     $("doneEditBtn").addEventListener("click", () => close(true));
     $("editPrevBtn").addEventListener("click", () => close(true, -1));
@@ -127,10 +76,10 @@
   /**
    * Opens the editor.
    * @param source   full-res normalized canvas of the original photo
-   * @param settings { corners, quarter, fineAngle }
+   * @param settings { corners, quarter }
    * @param nav      { hasPrev, hasNext } — enables the ◀/▶ page buttons
-   * @returns Promise<null | {corners, quarter, fineAngle, nav}> — null on
-   *          cancel; nav is -1/+1 when a page arrow closed the editor, else 0
+   * @returns Promise<null | {corners, quarter, nav}> — null on cancel;
+   *          nav is -1/+1 when a page arrow closed the editor, else 0
    */
   function open(source, settings, nav) {
     nav = nav || { hasPrev: false, hasNext: false };
@@ -139,12 +88,9 @@
         source,
         corners: JSON.parse(JSON.stringify(settings.corners)),
         quarter: settings.quarter || 0,
-        fineAngle: settings.fineAngle || 0,
         scale: 1,
         resolve,
       };
-      els.slider.value = String(state.fineAngle);
-      els.fineValue.textContent = state.fineAngle.toFixed(1) + "°";
       $("editPrevBtn").disabled = !nav.hasPrev;
       $("editNextBtn").disabled = !nav.hasNext;
 
@@ -160,8 +106,7 @@
     $("listView").hidden = false;
     const r = state.resolve;
     const result = apply
-      ? { corners: state.corners, quarter: state.quarter,
-          fineAngle: state.fineAngle, nav: navDelta || 0 }
+      ? { corners: state.corners, quarter: state.quarter, nav: navDelta || 0 }
       : null;
     state = null;
     r(result);
@@ -280,7 +225,7 @@
       const { canvas: small, scale } = Detect.scaledCanvas(state.source, 500);
       const sc = (p) => ({ x: p.x * scale, y: p.y * scale });
       const corners = { tl: sc(state.corners.tl), tr: sc(state.corners.tr), br: sc(state.corners.br), bl: sc(state.corners.bl) };
-      const result = await renderScan(small, corners, state.quarter, state.fineAngle);
+      const result = await renderScan(small, corners, state.quarter);
       if (!state) return;
       els.preview.width = result.width;
       els.preview.height = result.height;
@@ -295,5 +240,5 @@
 
   window.addEventListener("resize", () => { if (state) layoutStage(); });
 
-  window.Editor = { init, open, renderScan, quarterRotate, fineRotate };
+  window.Editor = { init, open, renderScan };
 })();

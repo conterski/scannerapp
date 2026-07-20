@@ -7,7 +7,7 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 - Add photos from the library or shoot with the camera (iPhone-friendly)
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters** — pixel colors are never altered, only geometric transforms
-- Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps, fine-straighten with a ±15° slider
+- Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps
 - Reorder pages by dragging the ≡ grip or with the ◀ ▶ buttons
 - Export:
   - **Download PDF** — all pages in order, one PDF

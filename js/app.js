@@ -9,7 +9,7 @@
   const MAX_DIM = 2500;
 
   /** @type {Array<{id:number, blob:Blob, corners:Object, quarter:number,
-   *  fineAngle:number, outputBlob:Blob, outputURL:string}>} */
+   *  outputBlob:Blob, outputURL:string}>} */
   const pages = [];
   let nextId = 1;
   let dragSrcIndex = -1;
@@ -67,31 +67,44 @@
     if (!files.length) return;
     showBusy(`Processing 1 / ${files.length}…`);
     setStatus("Loading OpenCV…");
+    // Pipelined: detection in the worker is the long pole, so the next
+    // photo's decode and the previous page's warp+encode run on the main
+    // thread while the worker detects — their cost hides almost entirely.
+    const safeDecode = (f) => decodeNormalized(f).catch((err) => err);
+    const renders = [];
     try {
       await Detect.ensureOpenCV();
       setStatus("");
+      let nextDecode = safeDecode(files[0]);
       for (let i = 0; i < files.length; i++) {
         showBusy(`Processing ${i + 1} / ${files.length}…`);
+        const source = await nextDecode;
+        if (i + 1 < files.length) nextDecode = safeDecode(files[i + 1]);
         try {
-          const source = await decodeNormalized(files[i]);
+          if (source instanceof Error) throw source;
           const corners = await Detect.detectCorners(source);
           const page = {
             id: nextId++,
             blob: files[i],
             corners,
             quarter: 0,
-            fineAngle: 0,
             outputBlob: null,
             outputURL: null,
           };
-          await regenerateOutput(page, source);
           pages.push(page);
-          renderList();
+          renders.push(regenerateOutput(page, source).then(renderList, (err) => {
+            console.error("Failed to render page:", err);
+            const at = pages.indexOf(page);
+            if (at >= 0) pages.splice(at, 1);
+            renderList();
+            alert(`Couldn't process "${files[i].name || "photo"}": ${err.message}`);
+          }));
         } catch (err) {
           console.error("Failed to add photo:", err);
           alert(`Couldn't process "${files[i].name || "photo"}": ${err.message}`);
         }
       }
+      await Promise.all(renders);
     } catch (err) {
       console.error(err);
       setStatus("");
@@ -133,7 +146,7 @@
   /** Re-runs the render pipeline for a page and refreshes its JPEG output. */
   async function regenerateOutput(page, sourceCanvas) {
     const source = sourceCanvas || (await decodeNormalized(page.blob));
-    const result = await Editor.renderScan(source, page.corners, page.quarter, page.fineAngle);
+    const result = await Editor.renderScan(source, page.corners, page.quarter);
     const blob = await canvasToJpeg(result);
     if (page.outputURL) URL.revokeObjectURL(page.outputURL);
     page.outputBlob = blob;
@@ -164,7 +177,6 @@
         if (!result) return;
         page.corners = result.corners;
         page.quarter = result.quarter;
-        page.fineAngle = result.fineAngle;
         showBusy("Rendering…");
         try {
           await regenerateOutput(page, source);
@@ -280,7 +292,7 @@
       const thumbWrap = document.createElement("div");
       thumbWrap.className = "page-thumb-wrap";
       const img = document.createElement("img");
-      img.src = page.outputURL;
+      if (page.outputURL) img.src = page.outputURL; // render may still be in flight
       img.alt = `Page ${i + 1}`;
       img.draggable = false;
       thumbWrap.appendChild(img);

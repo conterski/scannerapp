@@ -258,11 +258,6 @@ html, body {
 .control-row .btn { flex: 1; }
 .control-row .btn-nav { flex: 0 0 52px; }
 
-.slider-row { align-items: center; gap: 10px; }
-.slider-row label { font-size: 13px; color: var(--text-dim); white-space: nowrap; }
-.slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
-.slider-row output { font-size: 13px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
-
 .preview-row {
   display: flex;
   align-items: center;

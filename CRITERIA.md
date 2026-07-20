@@ -11,7 +11,7 @@ to count as correct.
 | 2 | **Tight crop** | Background (desk/floor) visible around the document edges | A thin border is by design (~0.5%); more than ~3% of the page width on any side is a fail |
 | 3 | **Crops at the paper edge** | Each edge of the scan runs along the paper's physical edge — never along a printed table line, a form border box, a shadow line, or a desk edge | The edge line must sit on the paper/background boundary |
 | 4 | **Occlusion handled** | If another object (paper, hand, cable) overlaps the document: the crop still follows the *document's* edges, extrapolated behind the occluder. A fragment of the occluder visible inside the scan is **correct** | Cropping along the occluder's edge (diagonal cut through the document) is a fail |
-| 5 | **Deskewed** | Paper edges appear as the straight borders of the output; text rows look level | Residual tilt ≤ ~1°; use the Straighten slider if more |
+| 5 | **Deskewed** | Paper edges appear as the straight borders of the output; text rows look level | Residual tilt ≤ ~1°; fix by dragging the corners onto the paper edges |
 | 6 | **Natural proportions** | The page doesn't look stretched or squashed compared to the real paper | Aspect ratio visually plausible |
 | 7 | **No filters** | Colors, brightness, and shadows in the scan match the photo exactly (a gray photo gives a gray scan — that's correct) | Pixel colors must be untouched |
 
