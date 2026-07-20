@@ -13,6 +13,10 @@
   const pages = [];
   let nextId = 1;
   let dragSrcIndex = -1;
+  const pendingShots = [];      // camera shots awaiting batch processing
+  let captureThumbURL = null;   // object URL of the capture overlay thumbnail
+  let selectMode = false;
+  const selectedIds = new Set(); // page.id — stable across re-renders
 
   const $ = (id) => document.getElementById(id);
 
@@ -97,6 +101,35 @@
     }
   }
 
+  // ---------------------------------------------------------------
+  // Continuous camera capture: shots pile up in pendingShots and are
+  // processed as one batch when the user taps Done — detection is the
+  // slow step, so it must never block between shots.
+  // ---------------------------------------------------------------
+
+  function showCaptureOverlay(lastBlob) {
+    if (captureThumbURL) URL.revokeObjectURL(captureThumbURL);
+    captureThumbURL = URL.createObjectURL(lastBlob);
+    $("captureThumb").src = captureThumbURL;
+    $("captureCount").textContent =
+      `${pendingShots.length} page${pendingShots.length === 1 ? "" : "s"} captured`;
+    $("captureOverlay").hidden = false;
+  }
+
+  function hideCaptureOverlay() {
+    $("captureOverlay").hidden = true;
+    if (captureThumbURL) {
+      URL.revokeObjectURL(captureThumbURL);
+      captureThumbURL = null;
+    }
+  }
+
+  async function finishCapture() {
+    hideCaptureOverlay();
+    const shots = pendingShots.splice(0);
+    if (shots.length) await addFiles(shots);
+  }
+
   /** Re-runs the render pipeline for a page and refreshes its JPEG output. */
   async function regenerateOutput(page, sourceCanvas) {
     const source = sourceCanvas || (await decodeNormalized(page.blob));
@@ -108,30 +141,42 @@
   }
 
   async function editPage(index) {
-    const page = pages[index];
-    showBusy("Opening editor…");
-    let source;
+    // The editor's ◀/▶ page arrows loop here: navigating applies the current
+    // page's edits (same as Done) and opens the adjacent page. Indices are
+    // stable mid-session — the list UI is hidden while the editor is open.
+    let i = index;
     try {
-      source = await decodeNormalized(page.blob);
-      await Detect.ensureOpenCV();
-    } catch (err) {
-      hideBusy();
-      alert("Couldn't open this page: " + err.message);
-      return;
-    }
-    hideBusy();
-    const result = await Editor.open(source, page);
-    if (!result) return;
-    page.corners = result.corners;
-    page.quarter = result.quarter;
-    page.fineAngle = result.fineAngle;
-    showBusy("Rendering…");
-    try {
-      await regenerateOutput(page, source);
-    } catch (err) {
-      alert("Rendering failed: " + err.message);
+      while (true) {
+        const page = pages[i];
+        showBusy("Opening editor…");
+        let source;
+        try {
+          source = await decodeNormalized(page.blob);
+          await Detect.ensureOpenCV();
+        } catch (err) {
+          hideBusy();
+          alert("Couldn't open this page: " + err.message);
+          return;
+        }
+        hideBusy();
+        const result = await Editor.open(source, page,
+          { hasPrev: i > 0, hasNext: i < pages.length - 1 });
+        if (!result) return;
+        page.corners = result.corners;
+        page.quarter = result.quarter;
+        page.fineAngle = result.fineAngle;
+        showBusy("Rendering…");
+        try {
+          await regenerateOutput(page, source);
+        } catch (err) {
+          alert("Rendering failed: " + err.message);
+        } finally {
+          hideBusy();
+        }
+        if (!result.nav) return;
+        i += result.nav;
+      }
     } finally {
-      hideBusy();
       renderList();
     }
   }
@@ -152,6 +197,65 @@
   }
 
   // ---------------------------------------------------------------
+  // Select mode (bulk delete) and clear all
+  // ---------------------------------------------------------------
+
+  function enterSelectMode() {
+    selectMode = true;
+    selectedIds.clear();
+    renderList();
+  }
+
+  function exitSelectMode() {
+    selectMode = false;
+    selectedIds.clear();
+    renderList();
+  }
+
+  function updateSelectBar() {
+    const n = selectedIds.size;
+    const btn = $("deleteSelectedBtn");
+    btn.textContent = `Delete (${n})`;
+    btn.disabled = n === 0;
+  }
+
+  function toggleSelected(page, card) {
+    // Direct class toggle keeps taps instant — no re-render per selection.
+    if (selectedIds.has(page.id)) {
+      selectedIds.delete(page.id);
+      card.classList.remove("selected");
+    } else {
+      selectedIds.add(page.id);
+      card.classList.add("selected");
+    }
+    updateSelectBar();
+  }
+
+  function deleteSelected() {
+    const n = selectedIds.size;
+    if (!n || !confirm(`Delete ${n} page${n === 1 ? "" : "s"}?`)) return;
+    for (let i = pages.length - 1; i >= 0; i--) {
+      if (selectedIds.has(pages[i].id)) {
+        if (pages[i].outputURL) URL.revokeObjectURL(pages[i].outputURL);
+        pages.splice(i, 1);
+      }
+    }
+    exitSelectMode();
+  }
+
+  function clearAll() {
+    if (!pages.length ||
+        !confirm(`Delete all ${pages.length} pages? This can't be undone.`)) return;
+    for (const p of pages) {
+      if (p.outputURL) URL.revokeObjectURL(p.outputURL);
+    }
+    pages.length = 0;
+    selectMode = false;
+    selectedIds.clear();
+    renderList();
+  }
+
+  // ---------------------------------------------------------------
   // Page list UI
   // ---------------------------------------------------------------
 
@@ -161,6 +265,12 @@
     $("emptyState").hidden = pages.length > 0;
     $("pdfBtn").disabled = pages.length === 0;
     $("photosBtn").disabled = pages.length === 0;
+    $("listToolbar").hidden = pages.length === 0 || selectMode;
+    $("addBar").hidden = selectMode;
+    $("exportBar").hidden = selectMode;
+    $("exportHint").hidden = selectMode;
+    $("selectBar").hidden = !selectMode;
+    if (selectMode) updateSelectBar();
 
     pages.forEach((page, i) => {
       const card = document.createElement("div");
@@ -174,11 +284,23 @@
       img.alt = `Page ${i + 1}`;
       img.draggable = false;
       thumbWrap.appendChild(img);
-      thumbWrap.addEventListener("click", () => editPage(i));
 
       const num = document.createElement("span");
       num.className = "page-num";
       num.textContent = String(i + 1);
+
+      if (selectMode) {
+        thumbWrap.addEventListener("click", () => toggleSelected(page, card));
+        card.classList.toggle("selected", selectedIds.has(page.id));
+        const badge = document.createElement("span");
+        badge.className = "select-badge";
+        badge.textContent = "✓";
+        card.append(thumbWrap, num, badge);
+        grid.appendChild(card);
+        return;
+      }
+
+      thumbWrap.addEventListener("click", () => editPage(i));
 
       const grip = document.createElement("div");
       grip.className = "drag-grip";
@@ -276,9 +398,27 @@
       fileInput.value = "";
     });
     cameraInput.addEventListener("change", () => {
-      addFiles(cameraInput.files);
+      const file = cameraInput.files[0]; // grab ref BEFORE resetting value
       cameraInput.value = "";
+      if (!file) return;
+      pendingShots.push(file);
+      showCaptureOverlay(file);
     });
+    // Camera dismissed without a shot: keep the overlay if shots are
+    // pending (Continue/Done still available), otherwise nothing to do.
+    // Browsers without the cancel event just land back on the overlay,
+    // which is never hidden while the camera is open.
+    cameraInput.addEventListener("cancel", () => {
+      if (pendingShots.length) $("captureOverlay").hidden = false;
+      else hideCaptureOverlay();
+    });
+    $("captureMoreBtn").addEventListener("click", () => cameraInput.click());
+    $("captureDoneBtn").addEventListener("click", finishCapture);
+
+    $("selectBtn").addEventListener("click", enterSelectMode);
+    $("cancelSelectBtn").addEventListener("click", exitSelectMode);
+    $("deleteSelectedBtn").addEventListener("click", deleteSelected);
+    $("clearAllBtn").addEventListener("click", clearAll);
 
     $("pdfBtn").addEventListener("click", async () => {
       showBusy("Building PDF…");
@@ -319,5 +459,5 @@
   });
 
   // Exposed for debugging/testing.
-  window.Scanner = { pages, addFiles, movePage, renderList };
+  window.Scanner = { pages, pendingShots, addFiles, movePage, renderList, clearAll };
 })();

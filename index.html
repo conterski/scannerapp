@@ -26,18 +26,28 @@
     <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped &mdash; no filters are applied.</p>
   </div>
 
+  <div id="listToolbar" class="list-toolbar" hidden>
+    <button id="selectBtn" class="btn btn-tiny">&#9745; Select</button>
+    <button id="clearAllBtn" class="btn btn-tiny btn-danger-ghost">Clear all</button>
+  </div>
+
   <div id="pageGrid" class="page-grid"></div>
 
-  <div class="add-bar">
+  <div class="add-bar" id="addBar">
     <button id="addPhotosBtn" class="btn btn-secondary">&#128247; Add photos</button>
     <button id="cameraBtn" class="btn btn-secondary">&#128248; Camera</button>
   </div>
 
-  <div class="export-bar">
+  <div class="export-bar" id="exportBar">
     <button id="pdfBtn" class="btn btn-primary" disabled>&#11015;&#65039; Download PDF</button>
     <button id="photosBtn" class="btn btn-primary" disabled>&#128190; Save to Photos</button>
   </div>
   <p class="export-hint" id="exportHint">On iPhone, &ldquo;Save to Photos&rdquo; opens the share sheet &mdash; tap <b>Save Images</b> there.</p>
+
+  <div id="selectBar" class="select-bar" hidden>
+    <button id="cancelSelectBtn" class="btn btn-secondary">Cancel</button>
+    <button id="deleteSelectedBtn" class="btn btn-danger" disabled>Delete (0)</button>
+  </div>
 
   <input type="file" id="fileInput" accept="image/*" multiple hidden>
   <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
@@ -73,8 +83,10 @@
       <canvas id="previewCanvas"></canvas>
     </div>
     <div class="control-row">
+      <button id="editPrevBtn" class="btn btn-small btn-nav" title="Previous page">&#9664;</button>
       <button id="cancelEditBtn" class="btn btn-secondary">Cancel</button>
       <button id="doneEditBtn" class="btn btn-primary">Done</button>
+      <button id="editNextBtn" class="btn btn-small btn-nav" title="Next page">&#9654;</button>
     </div>
   </div>
 </section>
@@ -82,6 +94,15 @@
 <div id="busyOverlay" class="busy-overlay" hidden>
   <div class="spinner"></div>
   <p id="busyText">Working&hellip;</p>
+</div>
+
+<div id="captureOverlay" class="busy-overlay capture-overlay" hidden>
+  <img id="captureThumb" class="capture-thumb" alt="Last shot">
+  <p id="captureCount">1 page captured</p>
+  <div class="capture-actions">
+    <button id="captureMoreBtn" class="btn btn-secondary">&#128248; Continue</button>
+    <button id="captureDoneBtn" class="btn btn-primary">Done</button>
+  </div>
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>

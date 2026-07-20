@@ -120,15 +120,20 @@
     });
     $("cancelEditBtn").addEventListener("click", () => close(false));
     $("doneEditBtn").addEventListener("click", () => close(true));
+    $("editPrevBtn").addEventListener("click", () => close(true, -1));
+    $("editNextBtn").addEventListener("click", () => close(true, +1));
   }
 
   /**
    * Opens the editor.
    * @param source   full-res normalized canvas of the original photo
    * @param settings { corners, quarter, fineAngle }
-   * @returns Promise<null | {corners, quarter, fineAngle}> — null on cancel
+   * @param nav      { hasPrev, hasNext } — enables the ◀/▶ page buttons
+   * @returns Promise<null | {corners, quarter, fineAngle, nav}> — null on
+   *          cancel; nav is -1/+1 when a page arrow closed the editor, else 0
    */
-  function open(source, settings) {
+  function open(source, settings, nav) {
+    nav = nav || { hasPrev: false, hasNext: false };
     return new Promise((resolve) => {
       state = {
         source,
@@ -140,6 +145,8 @@
       };
       els.slider.value = String(state.fineAngle);
       els.fineValue.textContent = state.fineAngle.toFixed(1) + "°";
+      $("editPrevBtn").disabled = !nav.hasPrev;
+      $("editNextBtn").disabled = !nav.hasNext;
 
       $("listView").hidden = true;
       els.view.hidden = false;
@@ -148,12 +155,13 @@
     });
   }
 
-  function close(apply) {
+  function close(apply, navDelta) {
     els.view.hidden = true;
     $("listView").hidden = false;
     const r = state.resolve;
     const result = apply
-      ? { corners: state.corners, quarter: state.quarter, fineAngle: state.fineAngle }
+      ? { corners: state.corners, quarter: state.quarter,
+          fineAngle: state.fineAngle, nav: navDelta || 0 }
       : null;
     state = null;
     r(result);

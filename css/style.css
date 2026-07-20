@@ -75,6 +75,14 @@ html, body {
 .add-bar .btn, .export-bar .btn { flex: 1; }
 .export-hint { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 8px; }
 
+.btn-danger { background: var(--danger); }
+.btn-danger:not(:disabled):active { background: #dc2626; }
+.btn-danger-ghost { background: var(--surface-2); color: var(--danger); }
+
+.list-toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 8px 0 2px; }
+.select-bar { display: flex; gap: 10px; margin-top: 14px; }
+.select-bar .btn { flex: 1; }
+
 /* ---------- Page grid ---------- */
 .page-grid {
   display: grid;
@@ -92,6 +100,26 @@ html, body {
 }
 .page-card.drag-source { opacity: 0.4; }
 .page-card.drag-over { border-color: var(--accent); }
+.page-card.selected { border-color: var(--accent); }
+
+.select-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.55);
+  border: 2px solid #fff;
+  color: transparent;
+  font-size: 14px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.page-card.selected .select-badge { background: var(--accent); color: #fff; }
 
 .page-thumb-wrap {
   width: 100%;
@@ -228,6 +256,7 @@ html, body {
 .editor-controls { display: flex; flex-direction: column; gap: 12px; }
 .control-row { display: flex; gap: 8px; }
 .control-row .btn { flex: 1; }
+.control-row .btn-nav { flex: 0 0 52px; }
 
 .slider-row { align-items: center; gap: 10px; }
 .slider-row label { font-size: 13px; color: var(--text-dim); white-space: nowrap; }
@@ -273,3 +302,14 @@ html, body {
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Capture overlay ---------- */
+.capture-overlay { background: rgba(10, 12, 16, 0.92); padding: 24px; }
+.capture-thumb {
+  max-width: 70%;
+  max-height: 45vh;
+  border-radius: var(--radius);
+  border: 2px solid var(--surface-2);
+}
+.capture-actions { display: flex; gap: 10px; width: min(400px, 90%); }
+.capture-actions .btn { flex: 1; }
