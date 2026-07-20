@@ -199,6 +199,51 @@ function bboxIoU(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
+/** Shoelace area of an arbitrary point-array polygon. */
+function polyAreaPts(p) {
+  let a = 0;
+  for (let i = 0; i < p.length; i++) {
+    const q = p[(i + 1) % p.length];
+    a += p[i].x * q.y - q.x * p[i].y;
+  }
+  return Math.abs(a) / 2;
+}
+
+/** Sutherland–Hodgman clip of polygon `poly` against convex quad `q`.
+ *  Inside-sign per edge comes from the quad centroid, so winding order
+ *  never matters. Returns the clipped point array (empty if disjoint). */
+function clipPolyToQuad(poly, q) {
+  const cx = (q.tl.x + q.tr.x + q.br.x + q.bl.x) / 4;
+  const cy = (q.tl.y + q.tr.y + q.br.y + q.bl.y) / 4;
+  const edges = [[q.tl, q.tr], [q.tr, q.br], [q.br, q.bl], [q.bl, q.tl]];
+  let pts = poly;
+  for (const [a, b] of edges) {
+    const cross = (p) => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    const sign = cross({ x: cx, y: cy }) >= 0 ? 1 : -1;
+    const next = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], nxt = pts[(i + 1) % pts.length];
+      const cCur = sign * cross(cur), cNxt = sign * cross(nxt);
+      if (cCur >= 0) next.push(cur);
+      if ((cCur >= 0) !== (cNxt >= 0)) {
+        const t = cCur / (cCur - cNxt);
+        next.push({ x: cur.x + t * (nxt.x - cur.x), y: cur.y + t * (nxt.y - cur.y) });
+      }
+    }
+    pts = next;
+    if (!pts.length) break;
+  }
+  return pts;
+}
+
+/** Fraction of polygon `pts`'s area lying OUTSIDE quad `q` (0..1). */
+function fracOutsideQuad(pts, q) {
+  const total = polyAreaPts(pts);
+  if (total <= 0) return 1;
+  const inside = polyAreaPts(clipPolyToQuad(pts, q));
+  return Math.min(1, Math.max(0, 1 - inside / total));
+}
+
 // ---- Edge fusion: build the quad from the best individual EDGES ----
 
 /** Sides in order: 0 top (tl→tr), 1 right (tr→br), 2 bottom (br→bl), 3 left (bl→tl). */
@@ -301,7 +346,7 @@ function bandMatchesInside(gray, inner, outer, centroid, w, h) {
  * outermost side that shows real cross-edge contrast; sides without contrast
  * (printed tables, merge overshoot through uniform background) lose.
  */
-function fuseQuad(candidates, best, gray, w, h, segments, trace) {
+function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes) {
   const bestBox = bboxOf(best.corners);
   // Split parts (other than a winning one) are excluded: their cut chords
   // are interior lines that would poison the side pools.
@@ -392,6 +437,18 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace) {
   const sidesByType = [];
   const chosen = [];
   for (let type = 0; type < 4; type++) {
+    // A locked side (the cut chord of a winning safe split) is the
+    // doc/occluder seam — no pool, no outward walk, no Hough extension.
+    if (lockedTypes && lockedTypes.has(type)) {
+      const s = sideOf(best.corners, type);
+      const mid = type % 2 === 0 ? (s.a.y + s.b.y) / 2 : (s.a.x + s.b.x) / 2;
+      sidesByType.push([]);
+      chosen.push({
+        s, contrast: sideContrast(gray, s.a, s.b, w, h),
+        outward: [-1, 1, 1, -1][type] * mid, locked: true,
+      });
+      continue;
+    }
     const sides = contributors.map((c) => {
       const s = sideOf(c.corners, type);
       const mid = type % 2 === 0 ? (s.a.y + s.b.y) / 2 : (s.a.x + s.b.x) / 2;
@@ -445,6 +502,7 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace) {
       const pick = chosen[type];
       trace.push({
         type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
+        locked: !!pick.locked,
         a: { x: Math.round(pick.s.a.x), y: Math.round(pick.s.a.y) },
         b: { x: Math.round(pick.s.b.x), y: Math.round(pick.s.b.y) },
       });
@@ -470,28 +528,61 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace) {
   return q;
 }
 
+/**
+ * Grow-only cover: shifts each side of `q` outward until every point in
+ * `pts` is inside. Hull simplification can drop an occluded-corner vertex,
+ * leaving a diagonal that slices the paper — covering repairs that so a
+ * split part's quad can never cut its own content. Falls back to `q`.
+ */
+function coverQuad(q, pts, w, h) {
+  const lines = [];
+  for (let type = 0; type < 4; type++) {
+    const s = sideOf(q, type);
+    const { nx, ny } = outwardNormal(q, s);
+    let over = 0;
+    for (const p of pts) {
+      const d = nx * (p.x - s.a.x) + ny * (p.y - s.a.y);
+      if (d > over) over = d;
+    }
+    const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 1;
+    lines.push({
+      px: s.a.x + nx * over, py: s.a.y + ny * over,
+      dx: (s.b.x - s.a.x) / len, dy: (s.b.y - s.a.y) / len,
+    });
+  }
+  return validQuadOrNull([
+    lineIntersect(lines[3], lines[0]),
+    lineIntersect(lines[0], lines[1]),
+    lineIntersect(lines[1], lines[2]),
+    lineIntersect(lines[2], lines[3]),
+  ], w, h) || q;
+}
+
 /** Quad-fits an arbitrary point list (via its convex hull) into `out`. */
 function candidateFromPoints(pts, w, h, out, maskName) {
-  if (pts.length < 8) return;
+  if (pts.length < 8) return null;
   const flat = [];
   for (const p of pts) { flat.push(p.x, p.y); }
   const mat = cv.matFromArray(pts.length, 1, cv.CV_32SC2, flat);
   const hull = new cv.Mat();
   try {
     cv.convexHull(mat, hull, false, true);
-    const q = quadFromHull(hull);
-    if (!q) return;
+    let q = quadFromHull(hull);
+    if (!q) return null;
+    q = coverQuad(q, hullPoints(hull), w, h);
     const area = cv.contourArea(mat);
     const m = quadMetrics(q, Math.max(area, cv.contourArea(hull) * 0.8),
       cv.contourArea(hull), w, h);
     // Lightly penalized: a declumped part should win over a genuinely bad
     // merged quad but not over a decent one. Marked `split` so its cut
     // chord never joins side pools.
-    out.push({
-      corners: q, score: m.score * 0.85, quadArea: m.quadArea,
+    const cand = {
+      corners: q, score: m.score * 0.85, baseScore: m.score, quadArea: m.quadArea,
       borderCorners: m.borderCorners, rejected: m.score <= 0,
       hullPts: hullPoints(hull), mask: maskName, split: true,
-    });
+    };
+    out.push(cand);
+    return cand;
   } finally {
     mat.delete(); hull.delete();
   }
@@ -529,19 +620,58 @@ function splitCandidates(contour, w, h, out, maskName) {
       // A true two-paper merge splits into two SUBSTANTIAL parts. If one
       // part is a sliver, this is just an irregular outline — splitting it
       // would shave a strip off the document.
-      const polyArea = (p) => {
-        let a = 0;
-        for (let i = 0; i < p.length; i++) {
-          const q2 = p[(i + 1) % p.length];
-          a += p[i].x * q2.y - q2.x * p[i].y;
-        }
-        return Math.abs(a) / 2;
-      };
-      const areaA = polyArea(partA), areaB = polyArea(partB);
+      const areaA = polyAreaPts(partA), areaB = polyAreaPts(partB);
       const total = areaA + areaB;
       if (total > 0 && Math.min(areaA, areaB) / total >= 0.15) {
-        candidateFromPoints(partA, w, h, out, maskName + "-split");
-        candidateFromPoints(partB, w, h, out, maskName + "-split");
+        const candA = candidateFromPoints(partA, w, h, out, maskName + "-split");
+        const candB = candidateFromPoints(partB, w, h, out, maskName + "-split");
+        // Safe-split test: the parts belong to two SEPARATE objects only if
+        // each part's contour lies mostly OUTSIDE the other part's quad. A
+        // notch in a single paper fails one direction hard (the big part's
+        // hull-derived quad swallows the small lobe), so preferring the
+        // split can never cut content there. MUTUAL by design: a one-sided
+        // test would mark the small part of any notch "safe".
+        if (candA && candB && !candA.rejected && !candB.rejected) {
+          const outBgivenA = fracOutsideQuad(partB, candA.corners);
+          const outAgivenB = fracOutsideQuad(partA, candB.corners);
+          // 0.6: true stacks measure ≥0.64 both ways; single-paper notches
+          // fail one direction at ≤0.35 (receipt3) — 2x margin either side.
+          const mutual = outBgivenA >= 0.6 && outAgivenB >= 0.6;
+          // Self-containment: a part whose own quad fails to cover its own
+          // contour (hull simplification dropped an occluded-corner vertex,
+          // leaving a diagonal that slices the paper) must never win — the
+          // crop would cut visible content.
+          const selfOutA = fracOutsideQuad(partA, candA.corners);
+          const selfOutB = fracOutsideQuad(partB, candB.corners);
+          let x0 = pts[0].x, y0 = pts[0].y, x1 = x0, y1 = y0;
+          for (const p of pts) {
+            if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+            if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+          }
+          const chord = { a: pts[cuts[0]], b: pts[cuts[1]] };
+          const chordMid = { x: (chord.a.x + chord.b.x) / 2, y: (chord.a.y + chord.b.y) / 2 };
+          for (const [cand, fracOut, fracIn, selfOut] of [
+            [candA, outBgivenA, outAgivenB, selfOutA],
+            [candB, outAgivenB, outBgivenA, selfOutB],
+          ]) {
+            const safe = mutual && selfOut <= 0.03;
+            cand.safe = safe;
+            cand.protrusionOut = fracOut;
+            cand.protrusionIn = fracIn;
+            cand.selfOut = selfOut;
+            cand.parentBBox = { x0, y0, x1, y1 };
+            let bestType = 0, bestD = Infinity;
+            for (let t = 0; t < 4; t++) {
+              const s = sideOf(cand.corners, t);
+              const d = (distToSegLine(chord.a, s.a, s.b) +
+                distToSegLine(chord.b, s.a, s.b) +
+                distToSegLine(chordMid, s.a, s.b)) / 3;
+              if (d < bestD) { bestD = d; bestType = t; }
+            }
+            cand.cutSides = [bestType];
+            if (safe) cand.score = cand.baseScore;
+          }
+        }
       }
     }
   } catch (e) {
@@ -700,13 +830,19 @@ function validQuadOrNull(pts, w, h) {
  * line fitted through those stop points. Works from the pixels, so it
  * recovers document strips that every candidate mask missed.
  */
-function snapSidesOutward(gray, q, w, h) {
+function snapSidesOutward(gray, q, w, h, lockedTypes) {
   const maxMarch = 0.1 * Math.min(w, h);
   const origArea = shoelaceArea(q);
   const lines = [];
   let moved = false;
   for (let type = 0; type < 4; type++) {
     const s = sideOf(q, type);
+    // Locked seam side (safe-split cut chord): never march outward across
+    // the occluder.
+    if (lockedTypes && lockedTypes.has(type)) {
+      lines.push(lineThrough(s.a, s.b));
+      continue;
+    }
     const { nx, ny } = outwardNormal(q, s);
     // A side already sitting on a strong real edge must not move — marching
     // outward from it would climb across a merged occluding paper.
@@ -904,12 +1040,36 @@ function detect({ width, height, buffer, debug }) {
     let corners = null;
     const trace = debug ? [] : null;
     let fusedOk = false;
+    // Safe-split override: when the merged best is essentially the union a
+    // safe split decomposed (parent-blob bbox ≈ best's bbox), prefer the
+    // best safe part — its lobe protrudes outside the kept quad, so cropping
+    // to it cuts nothing. Unsafe splits never reach here.
+    if (best && !best.split) {
+      const bestBox = bboxOf(best.corners);
+      const linked = candidates.filter((c) => c.safe && !c.rejected &&
+        bboxIoU(c.parentBBox, bestBox) >= 0.6);
+      if (linked.length) {
+        const cand = linked.reduce((a, b) => (b.score > a.score ? b : a));
+        if (cand.score >= 0.5 * best.score) {
+          if (trace) {
+            trace.push({ safeOverride: true, mask: cand.mask,
+              fromScore: +best.score.toFixed(4), toScore: +cand.score.toFixed(4) });
+          }
+          best = cand;
+        }
+      }
+    }
     if (best) {
-      const fused = fuseQuad(candidates, best, gray, width, height, segments, trace);
+      // The cut chord of a winning safe split is the doc/occluder seam:
+      // locked against outward fusion walks and snap marches, which would
+      // climb across the (often paper-like) occluder.
+      const locked = best.split && best.safe && best.cutSides
+        ? new Set(best.cutSides) : null;
+      const fused = fuseQuad(candidates, best, gray, width, height, segments, trace, locked);
       fusedOk = !!fused;
       corners = fused ||
         refineQuadEdges(best.corners, best.hullPts, width, height);
-      corners = snapSidesOutward(gray, corners, width, height);
+      corners = snapSidesOutward(gray, corners, width, height, locked);
       corners = expandQuad(corners, 0.004 * Math.min(width, height), width, height);
     }
     if (debug) {
@@ -921,6 +1081,11 @@ function detect({ width, height, buffer, debug }) {
         debug: candidates.map((c) => ({
           mask: c.mask, score: +c.score.toFixed(4), rejected: !!c.rejected,
           noQuad: !!c.noQuad, areaFrac: c.areaFrac,
+          split: !!c.split, safe: !!c.safe,
+          protrusionOut: c.protrusionOut !== undefined ? +c.protrusionOut.toFixed(3) : undefined,
+          protrusionIn: c.protrusionIn !== undefined ? +c.protrusionIn.toFixed(3) : undefined,
+          selfOut: c.selfOut !== undefined ? +c.selfOut.toFixed(3) : undefined,
+          cutSides: c.cutSides,
           corners: c.corners && {
             tl: c.corners.tl, tr: c.corners.tr, br: c.corners.br, bl: c.corners.bl,
           },
