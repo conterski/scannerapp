@@ -33,6 +33,12 @@ to count as correct.
    paper edge.
 3. **Fully hidden edge**: if an occluder covers an entire edge of the document
    (no part of that edge visible), the edge position is a guess.
+4. **Contiguous same-colour neighbour**: when another white paper touches the
+   document edge with no visible seam (a folded page or hand-held slip against
+   the top edge), the crop may run loose into the neighbour. Nothing is cut —
+   the neighbour fragment sits inside the scan (acceptable per rule 4). The
+   crop is tightened where any detection mask isolates the document from the
+   neighbour, but a truly seamless join cannot be split safely.
 
 ## When a photo fails
 

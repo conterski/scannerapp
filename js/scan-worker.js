@@ -266,6 +266,72 @@ function fracCutBySide(pts, q, type) {
   return Math.min(1, Math.max(0, 1 - polyAreaPts(kept) / total));
 }
 
+/** True if point `p` is inside convex quad `q` (centroid-sign test). */
+function pointInQuad(p, q) {
+  const cx = (q.tl.x + q.tr.x + q.br.x + q.bl.x) / 4;
+  const cy = (q.tl.y + q.tr.y + q.br.y + q.bl.y) / 4;
+  const edges = [[q.tl, q.tr], [q.tr, q.br], [q.br, q.bl], [q.bl, q.tl]];
+  for (const [a, b] of edges) {
+    const cross = (px, py) => (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+    const sign = cross(cx, cy) >= 0 ? 1 : -1;
+    if (sign * cross(p.x, p.y) < 0) return false;
+  }
+  return true;
+}
+
+/**
+ * The region the hull-cut net is allowed to protect: `best.hullPts` clipped
+ * down to the DOCUMENT part when other evidence isolates it from a merged
+ * neighbor. Without such evidence returns the hull unchanged (identity), so
+ * the net keeps its calibrated behavior. Clippers must contain the fused
+ * quad's center (rejecting the neighbor lobe) and either be a
+ * protrusion-verified split part of best's own blob (tier 1) or a
+ * cross-mask-corroborated contributor quad (tier 2).
+ */
+function consensusHull(best, corners, candidates, contributors, w, h, info) {
+  if (!best.hullPts || best.hullPts.length < 3) return best.hullPts;
+  const center = {
+    x: (corners.tl.x + corners.tr.x + corners.br.x + corners.bl.x) / 4,
+    y: (corners.tl.y + corners.tr.y + corners.br.y + corners.bl.y) / 4,
+  };
+  const bestBox = bboxOf(best.corners);
+  const clippers = [];
+  // Tier 1: protrusion-verified doc part of best's own blob.
+  for (const c of candidates) {
+    if (c.safe && !c.rejected && c !== best && c.corners &&
+        c.score >= 0.3 * best.score &&
+        c.parentBBox && bboxIoU(c.parentBBox, bestBox) >= 0.6 &&
+        pointInQuad(center, c.corners)) {
+      clippers.push({ q: c.corners, tier: 1, mask: c.mask });
+    }
+  }
+  // Tier 2: a contributor quad corroborated by a different-mask twin. A lone
+  // interior fragment (e.g. a below-table-line quad) can pass the center and
+  // area tests by happenstance; requiring a cross-mask twin blocks it.
+  const pool = (contributors || []).filter((c) => c !== best && !c.split &&
+    c.corners && c.quadArea >= 0.7 * best.quadArea && pointInQuad(center, c.corners));
+  for (const c of pool) {
+    const twin = pool.some((d) => d !== c && d.mask !== c.mask &&
+      bboxIoU(bboxOf(d.corners), bboxOf(c.corners)) >= 0.8);
+    if (twin) clippers.push({ q: c.corners, tier: 2, mask: c.mask });
+  }
+  let pts = best.hullPts;
+  const origArea = polyAreaPts(pts);
+  const used = [];
+  for (const cl of clippers) {
+    const next = clipPolyToQuad(pts, cl.q);
+    if (next.length < 3) continue;
+    const a = polyAreaPts(next);
+    if (a < 0.55 * polyAreaPts(pts)) continue; // one clipper removing >45%
+    pts = next;
+    used.push(cl.tier + ":" + cl.mask);
+  }
+  if (polyAreaPts(pts) < 0.45 * origArea) return best.hullPts; // global floor
+  if (info) { info.keptFrac = origArea > 0 ? +(polyAreaPts(pts) / origArea).toFixed(3) : 1;
+    info.clippers = used; }
+  return pts;
+}
+
 /** Pushes ONE side of `q` outward until it clears every point in `pts`. */
 function coverSide(q, pts, type, w, h) {
   const lines = [];
@@ -405,6 +471,7 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes, me
     (c === best || !c.split) &&
     c.score >= 0.25 * best.score && bboxIoU(bboxOf(c.corners), bestBox) >= 0.45);
   if (!contributors.length) return null;
+  if (meta) meta.contributors = contributors;
 
   const centroid = {
     x: (best.corners.tl.x + best.corners.tr.x + best.corners.br.x + best.corners.bl.x) / 4,
@@ -566,6 +633,8 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes, me
       }
     }
     if (!pick) pick = eligible[0];
+    const walkFrom = pick.outward;
+    let houghExt = false;
     if (rule !== "bestfb") {
       pick = walkOutward(pick, eligible);
       // Hough segments as OUTWARD-only extensions: a partially visible edge
@@ -576,12 +645,16 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes, me
           .filter((x) => x.outward > pick.outward &&
                          x.outward - pick.outward <= 0.2 * Math.min(w, h))
           .sort((a, b) => a.outward - b.outward);
+        const before = pick;
         pick = walkOutward(pick, extras);
+        houghExt = pick !== before;
       }
     }
     pick.rule = rule;
     pick.bestOutward = bestEntry.outward;
     pick.vetoedBest = !!bestEntry.continues;
+    pick.walkFrom = walkFrom;
+    pick.houghExt = houghExt;
     chosen.push(pick);
   }
 
@@ -594,6 +667,8 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes, me
         locked: !!pick.locked, rule: pick.locked ? "locked" : pick.rule,
         bLike: pick.bLike, vetoedBest: !!pick.vetoedBest,
         bestOutward: pick.bestOutward !== undefined ? Math.round(pick.bestOutward) : undefined,
+        walkFrom: pick.walkFrom !== undefined ? Math.round(pick.walkFrom) : undefined,
+        houghExt: !!pick.houghExt,
         a: { x: Math.round(pick.s.a.x), y: Math.round(pick.s.a.y) },
         b: { x: Math.round(pick.s.b.x), y: Math.round(pick.s.b.y) },
       });
@@ -685,7 +760,7 @@ function candidateFromPoints(pts, w, h, out, maskName) {
  * convexity defects and quad-fit each part — the document-only part
  * becomes a clean candidate with its true edges.
  */
-function splitCandidates(contour, w, h, out, maskName) {
+function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag) {
   const hullIdx = new cv.Mat();
   const defects = new cv.Mat();
   try {
@@ -698,6 +773,19 @@ function splitCandidates(contour, w, h, out, maskName) {
       const depth = defects.data32S[i * 4 + 3] / 256;
       if (depth > 0.08 * Math.min(w, h)) deep.push({ far, depth });
     }
+    // Split only a deeply notched blob whose own quad is BAD. Widening this
+    // to admit rectangle-ish merges was tried and reverted: a genuine paper
+    // FOLD (hard2) makes a deep mid-document crease whose two halves each
+    // protrude outside the other's quad, passing the mutual-protrusion
+    // safety and cutting the document in half.
+    const attempt = solidity < 0.88 && ownScore < 0.55;
+    if (diag) {
+      diag.push({ mask: maskName, solidity: +solidity.toFixed(3),
+        ownScore: +ownScore.toFixed(3), nDeep: deep.length,
+        depths: deep.slice(0, 3).map((d) => +(d.depth / Math.min(w, h)).toFixed(3)),
+        attempt });
+    }
+    if (!attempt) return;
     if (!deep.length) return;
     deep.sort((a, b) => b.depth - a.depth);
     const pts = [];
@@ -773,7 +861,7 @@ function splitCandidates(contour, w, h, out, maskName) {
 }
 
 /** Collects scored quad candidates from every sizable outer contour of a mask. */
-function candidatesFromMask(bin, w, h, out, maskName) {
+function candidatesFromMask(bin, w, h, out, maskName, diag) {
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
   try {
@@ -802,13 +890,12 @@ function candidatesFromMask(bin, w, h, out, maskName) {
             noQuad: true, areaFrac: area / (w * h) });
         }
         // Deeply notched blob whose own quad is BAD: probably two merged
-        // papers — offer the declumped parts as candidates. When the whole
-        // blob already yields a decent quad, splitting only lets crisp
-        // partial-document quads hijack the selection.
+        // papers — offer the declumped parts as candidates. The split
+        // gate lives inside splitCandidates.
         const ownScore = out.length && out[out.length - 1].mask === maskName
           ? out[out.length - 1].score : 0;
         if (hullArea > 0 && area / hullArea < 0.88 && ownScore < 0.55) {
-          splitCandidates(contours.get(i), w, h, out, maskName);
+          splitCandidates(contours.get(i), w, h, out, maskName, ownScore, area / hullArea, diag);
         }
       } finally {
         hull.delete();
@@ -1052,6 +1139,7 @@ function detect({ width, height, buffer, debug }) {
   const kClose = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
   const kDilate = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
   const candidates = [];
+  const splitDiag = debug ? [] : null;
   try {
     cv.cvtColor(img, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
@@ -1060,7 +1148,7 @@ function detect({ width, height, buffer, debug }) {
       cv.threshold(gray, bin, 0, 255, type);
       cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
       cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-      candidatesFromMask(bin, width, height, candidates, name);
+      candidatesFromMask(bin, width, height, candidates, name, splitDiag);
     };
     thresholdMask(cv.THRESH_BINARY + cv.THRESH_OTSU, "otsu");
     thresholdMask(cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
@@ -1071,7 +1159,7 @@ function detect({ width, height, buffer, debug }) {
       cv.THRESH_BINARY, block % 2 ? block : block + 1, -4);
     cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
     cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-    candidatesFromMask(bin, width, height, candidates, "adaptive");
+    candidatesFromMask(bin, width, height, candidates, "adaptive", splitDiag);
 
     // Saturation mask: paper is colorless even in shadow, wood/desks are
     // saturated — survives brightness gradients that break gray thresholds.
@@ -1087,7 +1175,7 @@ function detect({ width, height, buffer, debug }) {
       cv.threshold(sat, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
       cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-      candidatesFromMask(bin, width, height, candidates, "saturation");
+      candidatesFromMask(bin, width, height, candidates, "saturation", splitDiag);
       sat.delete();
     } finally {
       rgb.delete(); hsv.delete(); chans.delete();
@@ -1114,10 +1202,10 @@ function detect({ width, height, buffer, debug }) {
       linesMat.delete();
     }
     cv.dilate(bin, bin, kDilate);
-    candidatesFromMask(bin, width, height, candidates, "canny");
+    candidatesFromMask(bin, width, height, candidates, "canny", splitDiag);
     cv.Canny(gray, bin, 25, 80);
     cv.dilate(bin, bin, kDilate);
-    candidatesFromMask(bin, width, height, candidates, "canny-soft");
+    candidatesFromMask(bin, width, height, candidates, "canny-soft", splitDiag);
 
     let best = null;
     for (const c of candidates) {
@@ -1169,16 +1257,27 @@ function detect({ width, height, buffer, debug }) {
       // content cuts (interior table line winning a side) measure ≥ 0.104.
       // A false positive only loosens the crop, which is the accepted bias.
       if (fusedOk && best.hullPts && best.hullPts.length >= 3) {
+        // The net triggers on a cut of best's HULL (calibrated 0.09) but
+        // recovers only to the CONSENSUS region — the doc part when another
+        // mask isolates it from a merged neighbor. This tightens the loose
+        // merge case (fail3) while still covering true content cuts, and is
+        // identity when no evidence isolates the doc (degenerate = today).
+        const cinfo = trace ? {} : null;
+        const prot = consensusHull(best, corners, candidates, fuseMeta.contributors,
+          width, height, cinfo);
+        if (trace) trace.push({ consensus: true, keptFrac: cinfo && cinfo.keptFrac,
+          clippers: cinfo && cinfo.clippers });
         for (let t = 0; t < 4; t++) {
           if (locked && locked.has(t)) continue;
           const f = fracCutBySide(best.hullPts, corners, t);
+          const fCons = fracCutBySide(prot, corners, t);
           if (trace) {
-            trace.push({ hullCut: t, frac: +f.toFixed(3),
+            trace.push({ hullCut: t, frac: +f.toFixed(3), fracCons: +fCons.toFixed(3),
               rule: fuseMeta.rules ? fuseMeta.rules[t] : undefined,
               covered: f > 0.09 });
           }
           if (f > 0.09) {
-            corners = coverSide(corners, best.hullPts, t, width, height);
+            corners = coverSide(corners, prot, t, width, height);
           }
         }
       }
@@ -1190,6 +1289,7 @@ function detect({ width, height, buffer, debug }) {
         fusedOk,
         trace,
         segments,
+        splitDiag,
         debug: candidates.map((c) => ({
           mask: c.mask, score: +c.score.toFixed(4), rejected: !!c.rejected,
           noQuad: !!c.noQuad, areaFrac: c.areaFrac,
@@ -1240,7 +1340,8 @@ self.onmessage = async (e) => {
       await ensureInit();
       const res = detect(e.data);
       self.postMessage({ id, ok: true, corners: res.corners, debug: res.debug,
-        fusedOk: res.fusedOk, trace: res.trace, segments: res.segments });
+        fusedOk: res.fusedOk, trace: res.trace, segments: res.segments,
+        splitDiag: res.splitDiag });
     } else if (type === "warp") {
       await ensureInit();
       const buffer = warp(e.data);

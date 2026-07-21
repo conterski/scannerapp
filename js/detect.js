@@ -158,7 +158,8 @@
       { width: img.width, height: img.height, buffer: img.data.buffer, debug: true },
       [img.data.buffer]);
     return { corners: res.corners, debug: res.debug, scale,
-      fusedOk: res.fusedOk, trace: res.trace, segments: res.segments };
+      fusedOk: res.fusedOk, trace: res.trace, segments: res.segments,
+      splitDiag: res.splitDiag };
   }
 
   window.Detect = { ensureOpenCV, detectCorners, warpPerspective, fullImageCorners, scaledCanvas, detectDebug };
