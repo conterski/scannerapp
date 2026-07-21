@@ -244,6 +244,57 @@ function fracOutsideQuad(pts, q) {
   return Math.min(1, Math.max(0, 1 - inside / total));
 }
 
+/** Fraction of polygon `pts`'s area cut off by ONE side of quad `q`. */
+function fracCutBySide(pts, q, type) {
+  const total = polyAreaPts(pts);
+  if (total <= 0) return 0;
+  const cx = (q.tl.x + q.tr.x + q.br.x + q.bl.x) / 4;
+  const cy = (q.tl.y + q.tr.y + q.br.y + q.bl.y) / 4;
+  const { a, b } = sideOf(q, type);
+  const cross = (p) => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+  const sign = cross({ x: cx, y: cy }) >= 0 ? 1 : -1;
+  const kept = [];
+  for (let i = 0; i < pts.length; i++) {
+    const cur = pts[i], nxt = pts[(i + 1) % pts.length];
+    const cCur = sign * cross(cur), cNxt = sign * cross(nxt);
+    if (cCur >= 0) kept.push(cur);
+    if ((cCur >= 0) !== (cNxt >= 0)) {
+      const t = cCur / (cCur - cNxt);
+      kept.push({ x: cur.x + t * (nxt.x - cur.x), y: cur.y + t * (nxt.y - cur.y) });
+    }
+  }
+  return Math.min(1, Math.max(0, 1 - polyAreaPts(kept) / total));
+}
+
+/** Pushes ONE side of `q` outward until it clears every point in `pts`. */
+function coverSide(q, pts, type, w, h) {
+  const lines = [];
+  for (let t = 0; t < 4; t++) {
+    const s = sideOf(q, t);
+    if (t !== type) {
+      lines.push(lineThrough(s.a, s.b));
+      continue;
+    }
+    const { nx, ny } = outwardNormal(q, s);
+    let over = 0;
+    for (const p of pts) {
+      const d = nx * (p.x - s.a.x) + ny * (p.y - s.a.y);
+      if (d > over) over = d;
+    }
+    const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 1;
+    lines.push({
+      px: s.a.x + nx * over, py: s.a.y + ny * over,
+      dx: (s.b.x - s.a.x) / len, dy: (s.b.y - s.a.y) / len,
+    });
+  }
+  return validQuadOrNull([
+    lineIntersect(lines[3], lines[0]),
+    lineIntersect(lines[0], lines[1]),
+    lineIntersect(lines[1], lines[2]),
+    lineIntersect(lines[2], lines[3]),
+  ], w, h) || q;
+}
+
 // ---- Edge fusion: build the quad from the best individual EDGES ----
 
 /** Sides in order: 0 top (tl→tr), 1 right (tr→br), 2 bottom (br→bl), 3 left (bl→tl). */
@@ -346,7 +397,7 @@ function bandMatchesInside(gray, inner, outer, centroid, w, h) {
  * outermost side that shows real cross-edge contrast; sides without contrast
  * (printed tables, merge overshoot through uniform background) lose.
  */
-function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes) {
+function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes, meta) {
   const bestBox = bboxOf(best.corners);
   // Split parts (other than a winning one) are excluded: their cut chords
   // are interior lines that would poison the side pools.
@@ -456,6 +507,7 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes) {
         s,
         contrast: sideContrast(gray, s.a, s.b, w, h),
         outward: [-1, 1, 1, -1][type] * mid,
+        isBest: c === best,
       };
     });
     sidesByType.push(sides);
@@ -469,40 +521,79 @@ function fuseQuad(candidates, best, gray, w, h, segments, trace, lockedTypes) {
       x.continues = x.contrast >= 0.15 &&
         lineContinuesBeyond(gray, x.s.a, x.s.b, w, h);
     }
-    let eligible = sides.filter((x) => x.contrast >= gate && !x.continues)
+    const bestEntry = sides.find((x) => x.isBest);
+    const tol = Math.max(8, 0.01 * Math.min(w, h));
+    const likeBoundary = (x) => {
+      if (x.bLike === undefined) x.bLike = boundaryLike(x.s);
+      return x.bLike;
+    };
+    // An interior printed line (banner, table border, handwriting baseline)
+    // can pass the contrast gate when the true edge is vetoed as continuing
+    // into an ADJACENT PAPER. A side moving INWARD of best's own side must
+    // therefore also look like a document boundary — interior lines have
+    // paper on both sides and fail.
+    let eligible = sides.filter((x) => x.contrast >= gate && !x.continues &&
+        (x.outward >= bestEntry.outward - tol || likeBoundary(x)))
       .sort((a, b) => a.outward - b.outward);
-    let pick;
+    let pick, rule = "strict";
     if (!eligible.length) {
-      // Low-contrast scene (e.g. white paper on a white floor): start from
-      // the strongest side, but still walk outward over sides with at least
-      // weak edge evidence — a printed form border must not win outright.
-      const nonContinuing = sides.filter((x) => !x.continues);
-      const pool = nonContinuing.length ? nonContinuing : sides;
-      pick = pool.reduce((a, b) => (b.contrast > a.contrast ? b : a));
-      eligible = pool.filter((x) => x.contrast >= 0.15 && x.outward >= pick.outward)
+      // Outermost boundary-verified side with real edge evidence: a true
+      // edge vetoed only because its step continues into a neighboring
+      // object. Veto bypassed — an overshoot shadow line fails the
+      // inside-check and stays out.
+      const bLike = sides.filter((x) => x.contrast >= 0.35 && likeBoundary(x))
         .sort((a, b) => a.outward - b.outward);
+      if (bLike.length) {
+        pick = bLike[bLike.length - 1];
+        rule = "blike";
+      } else if (bestEntry.continues && bestEntry.contrast >= 0.35) {
+        // The veto killed a genuinely contrasty best side — best's own
+        // boundary is the safest anti-cut default (verbatim: no walk, no
+        // Hough extension). Bland-background overshoot has ~0 contrast and
+        // routes to the low-contrast branch instead.
+        pick = bestEntry;
+        rule = "bestfb";
+      } else {
+        // Low-contrast scene (e.g. white paper on a white floor): start from
+        // the strongest side, but still walk outward over sides with at least
+        // weak edge evidence — a printed form border must not win outright.
+        const nonContinuing = sides.filter((x) => !x.continues);
+        const pool = nonContinuing.length ? nonContinuing : sides;
+        pick = pool.reduce((a, b) => (b.contrast > a.contrast ? b : a));
+        eligible = pool.filter((x) => x.contrast >= 0.15 && x.outward >= pick.outward)
+          .sort((a, b) => a.outward - b.outward);
+        rule = "lowc";
+      }
     }
     if (!pick) pick = eligible[0];
-    pick = walkOutward(pick, eligible);
-    // Hough segments as OUTWARD-only extensions: a partially visible edge
-    // (behind an occluder) can push a side out, but interior form lines can
-    // never pull one in.
-    if (segments && segments.length && pick.contrast < 0.6) {
-      const extras = segSides(type, dirOf(pick.s), 0.35)
-        .filter((x) => x.outward > pick.outward &&
-                       x.outward - pick.outward <= 0.2 * Math.min(w, h))
-        .sort((a, b) => a.outward - b.outward);
-      pick = walkOutward(pick, extras);
+    if (rule !== "bestfb") {
+      pick = walkOutward(pick, eligible);
+      // Hough segments as OUTWARD-only extensions: a partially visible edge
+      // (behind an occluder) can push a side out, but interior form lines can
+      // never pull one in.
+      if (segments && segments.length && pick.contrast < 0.6) {
+        const extras = segSides(type, dirOf(pick.s), 0.35)
+          .filter((x) => x.outward > pick.outward &&
+                         x.outward - pick.outward <= 0.2 * Math.min(w, h))
+          .sort((a, b) => a.outward - b.outward);
+        pick = walkOutward(pick, extras);
+      }
     }
+    pick.rule = rule;
+    pick.bestOutward = bestEntry.outward;
+    pick.vetoedBest = !!bestEntry.continues;
     chosen.push(pick);
   }
 
+  if (meta) meta.rules = chosen.map((p) => p.locked ? "locked" : p.rule);
   if (trace) {
     for (let type = 0; type < 4; type++) {
       const pick = chosen[type];
       trace.push({
         type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
-        locked: !!pick.locked,
+        locked: !!pick.locked, rule: pick.locked ? "locked" : pick.rule,
+        bLike: pick.bLike, vetoedBest: !!pick.vetoedBest,
+        bestOutward: pick.bestOutward !== undefined ? Math.round(pick.bestOutward) : undefined,
         a: { x: Math.round(pick.s.a.x), y: Math.round(pick.s.a.y) },
         b: { x: Math.round(pick.s.b.x), y: Math.round(pick.s.b.y) },
       });
@@ -1065,11 +1156,32 @@ function detect({ width, height, buffer, debug }) {
       // climb across the (often paper-like) occluder.
       const locked = best.split && best.safe && best.cutSides
         ? new Set(best.cutSides) : null;
-      const fused = fuseQuad(candidates, best, gray, width, height, segments, trace, locked);
+      const fuseMeta = {};
+      const fused = fuseQuad(candidates, best, gray, width, height, segments, trace, locked, fuseMeta);
       fusedOk = !!fused;
       corners = fused ||
         refineQuadEdges(best.corners, best.hullPts, width, height);
       corners = snapSidesOutward(gray, corners, width, height, locked);
+      // Hull-cut safety net: a final side slicing deep into the best blob's
+      // hull is cutting probable content — push it back out to the hull.
+      // Threshold calibrated on the full test set: legitimate fusion
+      // pull-ins (trimming blob overshoot) measure ≤ 0.072 of hull area;
+      // content cuts (interior table line winning a side) measure ≥ 0.104.
+      // A false positive only loosens the crop, which is the accepted bias.
+      if (fusedOk && best.hullPts && best.hullPts.length >= 3) {
+        for (let t = 0; t < 4; t++) {
+          if (locked && locked.has(t)) continue;
+          const f = fracCutBySide(best.hullPts, corners, t);
+          if (trace) {
+            trace.push({ hullCut: t, frac: +f.toFixed(3),
+              rule: fuseMeta.rules ? fuseMeta.rules[t] : undefined,
+              covered: f > 0.09 });
+          }
+          if (f > 0.09) {
+            corners = coverSide(corners, best.hullPts, t, width, height);
+          }
+        }
+      }
       corners = expandQuad(corners, 0.004 * Math.min(width, height), width, height);
     }
     if (debug) {
