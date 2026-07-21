@@ -1212,12 +1212,59 @@ function detect({ width, height, buffer, debug }) {
       if (c.rejected) continue;
       if (!best || c.score > best.score) best = c;
     }
+    const trace = debug ? [] : null;
+    // Reunite a severed document section: a dark internal band (a coloured
+    // receipt header, a fold shadow) can sever the document TOP into its own
+    // blob under the morphology, so the cleaner BODY sub-rectangle outscores
+    // the whole document. If best sits almost entirely inside a substantially
+    // larger, still-plausible candidate, prefer that fuller one — cropping to
+    // the body would cut the severed section's content. Split winners are
+    // exempt (their tightness is intentional, per the stack fixes).
+    let reuniteLock = null;
+    if (best && !best.split && best.hullPts) {
+      let ext = null;
+      for (const c of candidates) {
+        if (c === best || c.rejected || c.split || !c.corners) continue;
+        if (c.quadArea < best.quadArea * 1.25) continue;
+        if (c.score < 0.45) continue;
+        if (fracOutsideQuad(best.hullPts, c.corners) > 0.12) continue;
+        if (!ext || c.score > ext.score) ext = c;
+      }
+      if (ext) {
+        // Which side(s) ext extends beyond the body. The severing band is a
+        // strong interior edge fusion/snap/net would re-select as the
+        // boundary, undoing the reunion — those sides get locked to ext.
+        const margin = 0.04 * Math.min(width, height);
+        const outw = (q, t) => {
+          const s = sideOf(q, t);
+          const mid = t % 2 === 0 ? (s.a.y + s.b.y) / 2 : (s.a.x + s.b.x) / 2;
+          return [-1, 1, 1, -1][t] * mid;
+        };
+        const lock = new Set();
+        for (let t = 0; t < 4; t++) {
+          if (outw(ext.corners, t) > outw(best.corners, t) + margin) lock.add(t);
+        }
+        // A genuine severed section is a single edge or one adjacent corner.
+        // Extending an OPPOSITE pair (top+bottom / left+right) is a general
+        // enlargement (a looser mask), not a reunion — reject it.
+        const opposite = (lock.has(0) && lock.has(2)) || (lock.has(1) && lock.has(3));
+        // ext must be a well-formed quad: a corner far off-image means a
+        // distorted blob (e.g. a paper fold), not the true document.
+        const cs = [ext.corners.tl, ext.corners.tr, ext.corners.br, ext.corners.bl];
+        const inBounds = cs.every((p) => p.x >= -0.15 * width && p.x <= 1.15 * width &&
+          p.y >= -0.15 * height && p.y <= 1.15 * height);
+        if (lock.size && !opposite && inBounds) {
+          if (trace) trace.push({ reunite: true, from: best.mask, to: ext.mask, lock: [...lock] });
+          best = ext;
+          reuniteLock = lock;
+        }
+      }
+    }
     // A rectangle PRINTED ON the document (a table, a stamp box) can outscore
     // the paper itself, and threshold blobs can overshoot into background.
     // Fuse the four edges across candidates by cross-edge contrast; fall back
     // to the raw best quad if fusion fails.
     let corners = null;
-    const trace = debug ? [] : null;
     let fusedOk = false;
     // Safe-split override: when the merged best is essentially the union a
     // safe split decomposed (parent-blob bbox ≈ best's bbox), prefer the
@@ -1242,8 +1289,9 @@ function detect({ width, height, buffer, debug }) {
       // The cut chord of a winning safe split is the doc/occluder seam:
       // locked against outward fusion walks and snap marches, which would
       // climb across the (often paper-like) occluder.
-      const locked = best.split && best.safe && best.cutSides
+      let locked = best.split && best.safe && best.cutSides
         ? new Set(best.cutSides) : null;
+      if (reuniteLock) locked = new Set([...(locked || []), ...reuniteLock]);
       const fuseMeta = {};
       const fused = fuseQuad(candidates, best, gray, width, height, segments, trace, locked, fuseMeta);
       fusedOk = !!fused;
