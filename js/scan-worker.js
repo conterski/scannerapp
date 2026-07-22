@@ -760,7 +760,7 @@ function candidateFromPoints(pts, w, h, out, maskName) {
  * convexity defects and quad-fit each part — the document-only part
  * becomes a clean candidate with its true edges.
  */
-function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag) {
+function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag, gray) {
   const hullIdx = new cv.Mat();
   const defects = new cv.Mat();
   try {
@@ -813,9 +813,16 @@ function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag)
         if (candA && candB && !candA.rejected && !candB.rejected) {
           const outBgivenA = fracOutsideQuad(partB, candA.corners);
           const outAgivenB = fracOutsideQuad(partA, candB.corners);
-          // 0.6: true stacks measure ≥0.64 both ways; single-paper notches
-          // fail one direction at ≤0.35 (receipt3) — 2x margin either side.
-          const mutual = outBgivenA >= 0.6 && outAgivenB >= 0.6;
+          const chordContrast = gray ? sideContrast(gray, pts[cuts[0]], pts[cuts[1]], w, h) : 0;
+          // Two safe paths. Strong geometric separation (both parts ≥0.6
+          // outside each other): true stacks measure ≥0.64; single-paper
+          // notches fail at ≤0.35 (receipt3). OR moderate separation (≥0.5)
+          // corroborated by a real EDGE along the cut chord (≥0.3) — an
+          // occluding paper on top has a visible seam/shadow there (fail15
+          // slip-on-note: 0.56 / 0.52), while a notch or fold is same-paper
+          // on both sides with no edge (receipt3 0.04, hard2 ≤0.08).
+          const mutual = (outBgivenA >= 0.6 && outAgivenB >= 0.6) ||
+            (outBgivenA >= 0.5 && outAgivenB >= 0.5 && chordContrast >= 0.3);
           // Self-containment: a part whose own quad fails to cover its own
           // contour (hull simplification dropped an occluded-corner vertex,
           // leaving a diagonal that slices the paper) must never win — the
@@ -829,6 +836,12 @@ function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag)
           }
           const chord = { a: pts[cuts[0]], b: pts[cuts[1]] };
           const chordMid = { x: (chord.a.x + chord.b.x) / 2, y: (chord.a.y + chord.b.y) / 2 };
+          if (diag) {
+            diag.push({ split: maskName, mutual: +Math.min(outBgivenA, outAgivenB).toFixed(2),
+              selfMax: +Math.max(selfOutA, selfOutB).toFixed(3),
+              chordContrast: +chordContrast.toFixed(2),
+              safe: mutual && Math.max(selfOutA, selfOutB) <= 0.03 });
+          }
           for (const [cand, fracOut, fracIn, selfOut] of [
             [candA, outBgivenA, outAgivenB, selfOutA],
             [candB, outAgivenB, outBgivenA, selfOutB],
@@ -861,7 +874,7 @@ function splitCandidates(contour, w, h, out, maskName, ownScore, solidity, diag)
 }
 
 /** Collects scored quad candidates from every sizable outer contour of a mask. */
-function candidatesFromMask(bin, w, h, out, maskName, diag) {
+function candidatesFromMask(bin, w, h, out, maskName, diag, gray) {
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
   try {
@@ -895,7 +908,7 @@ function candidatesFromMask(bin, w, h, out, maskName, diag) {
         const ownScore = out.length && out[out.length - 1].mask === maskName
           ? out[out.length - 1].score : 0;
         if (hullArea > 0 && area / hullArea < 0.88 && ownScore < 0.55) {
-          splitCandidates(contours.get(i), w, h, out, maskName, ownScore, area / hullArea, diag);
+          splitCandidates(contours.get(i), w, h, out, maskName, ownScore, area / hullArea, diag, gray);
         }
       } finally {
         hull.delete();
@@ -1148,7 +1161,7 @@ function detect({ width, height, buffer, debug }) {
       cv.threshold(gray, bin, 0, 255, type);
       cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
       cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-      candidatesFromMask(bin, width, height, candidates, name, splitDiag);
+      candidatesFromMask(bin, width, height, candidates, name, splitDiag, gray);
     };
     thresholdMask(cv.THRESH_BINARY + cv.THRESH_OTSU, "otsu");
     thresholdMask(cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
@@ -1159,7 +1172,7 @@ function detect({ width, height, buffer, debug }) {
       cv.THRESH_BINARY, block % 2 ? block : block + 1, -4);
     cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
     cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-    candidatesFromMask(bin, width, height, candidates, "adaptive", splitDiag);
+    candidatesFromMask(bin, width, height, candidates, "adaptive", splitDiag, gray);
 
     // Saturation mask: paper is colorless even in shadow, wood/desks are
     // saturated — survives brightness gradients that break gray thresholds.
@@ -1175,7 +1188,7 @@ function detect({ width, height, buffer, debug }) {
       cv.threshold(sat, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
       cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kClose);
-      candidatesFromMask(bin, width, height, candidates, "saturation", splitDiag);
+      candidatesFromMask(bin, width, height, candidates, "saturation", splitDiag, gray);
       sat.delete();
     } finally {
       rgb.delete(); hsv.delete(); chans.delete();
@@ -1202,10 +1215,10 @@ function detect({ width, height, buffer, debug }) {
       linesMat.delete();
     }
     cv.dilate(bin, bin, kDilate);
-    candidatesFromMask(bin, width, height, candidates, "canny", splitDiag);
+    candidatesFromMask(bin, width, height, candidates, "canny", splitDiag, gray);
     cv.Canny(gray, bin, 25, 80);
     cv.dilate(bin, bin, kDilate);
-    candidatesFromMask(bin, width, height, candidates, "canny-soft", splitDiag);
+    candidatesFromMask(bin, width, height, candidates, "canny-soft", splitDiag, gray);
 
     let best = null;
     for (const c of candidates) {
