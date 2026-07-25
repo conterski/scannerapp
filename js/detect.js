@@ -124,13 +124,20 @@
    * Perspective-warps `sourceCanvas` using corners {tl,tr,br,bl} (source px).
    * Returns a new canvas with the deskewed document. Geometric transform
    * only — pixel values are untouched apart from bilinear resampling.
+   * `maxDim` (optional) caps the output's longest side (OpenCV downsamples
+   * into the smaller target) — used by Compact mode to shrink saved scans.
    */
-  async function warpPerspective(sourceCanvas, corners) {
+  async function warpPerspective(sourceCanvas, corners, maxDim) {
     await ensureOpenCV();
     const { tl, tr, br, bl } = corners;
     const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    const dstW = Math.max(8, Math.round((dist(tl, tr) + dist(bl, br)) / 2));
-    const dstH = Math.max(8, Math.round((dist(tl, bl) + dist(tr, br)) / 2));
+    let dstW = Math.max(8, Math.round((dist(tl, tr) + dist(bl, br)) / 2));
+    let dstH = Math.max(8, Math.round((dist(tl, bl) + dist(tr, br)) / 2));
+    if (maxDim && Math.max(dstW, dstH) > maxDim) {
+      const s = maxDim / Math.max(dstW, dstH);
+      dstW = Math.max(8, Math.round(dstW * s));
+      dstH = Math.max(8, Math.round(dstH * s));
+    }
 
     const img = imageDataOf(sourceCanvas);
     const res = await call("warp", {

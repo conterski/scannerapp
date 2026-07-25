@@ -16,6 +16,10 @@
 <header class="app-header">
   <h1>ScannerApp</h1>
   <span id="statusText" class="status" hidden></span>
+  <div id="listToolbar" class="list-toolbar" hidden>
+    <button id="selectBtn" class="btn btn-tiny">&#9745; Select</button>
+    <button id="clearAllBtn" class="btn btn-tiny btn-danger-ghost">Clear all</button>
+  </div>
 </header>
 
 <!-- ============ PAGE LIST VIEW ============ -->
@@ -24,11 +28,6 @@
     <div class="empty-icon">&#128196;</div>
     <p>Photograph documents and turn them into clean scans.</p>
     <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped &mdash; no filters are applied.</p>
-  </div>
-
-  <div id="listToolbar" class="list-toolbar" hidden>
-    <button id="selectBtn" class="btn btn-tiny">&#9745; Select</button>
-    <button id="clearAllBtn" class="btn btn-tiny btn-danger-ghost">Clear all</button>
   </div>
 
   <div id="pageGrid" class="page-grid"></div>
@@ -43,6 +42,14 @@
     <button id="photosBtn" class="btn btn-primary" disabled>&#128190; Save to Photos</button>
   </div>
   <p class="export-hint" id="exportHint">On iPhone, &ldquo;Save to Photos&rdquo; opens the share sheet &mdash; tap <b>Save Images</b> there.</p>
+
+  <label class="compact-toggle" id="compactToggle">
+    <input type="checkbox" id="compactCheck">
+    <span class="compact-text">
+      <span class="compact-title">Compact scans</span>
+      <span class="compact-sub">Smaller saved files &mdash; lower resolution &amp; quality</span>
+    </span>
+  </label>
 
   <div id="selectBar" class="select-bar" hidden>
     <button id="cancelSelectBtn" class="btn btn-secondary">Cancel</button>
@@ -107,6 +114,7 @@
 <script src="js/detect.js"></script>
 <script src="js/editor.js"></script>
 <script src="js/export.js"></script>
+<script src="js/store.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

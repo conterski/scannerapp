@@ -20,15 +20,16 @@
     { tl: "tr", tr: "br", br: "bl", bl: "tl" }, // 90° CCW
   ];
 
-  /** Full pipeline: source canvas + edits → final scan canvas. */
-  async function renderScan(sourceCanvas, corners, quarter) {
+  /** Full pipeline: source canvas + edits → final scan canvas.
+   *  opts.maxDim (optional) caps the output's longest side (Compact mode). */
+  async function renderScan(sourceCanvas, corners, quarter, opts) {
     const q = ((quarter % 4) + 4) % 4;
     const map = QUARTER_MAP[q];
     const c = map
       ? { tl: corners[map.tl], tr: corners[map.tr],
           br: corners[map.br], bl: corners[map.bl] }
       : corners;
-    return Detect.warpPerspective(sourceCanvas, c);
+    return Detect.warpPerspective(sourceCanvas, c, opts && opts.maxDim);
   }
 
   // ---------------------------------------------------------------

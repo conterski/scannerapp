@@ -8,6 +8,21 @@
   // memory with many 12 MP photos.
   const MAX_DIM = 2500;
 
+  // "Compact scans" storage mode (off by default, persisted). Compact trades
+  // resolution/quality for much smaller saved files: output scans render at a
+  // lower cap + quality, and stored originals are re-encoded at low quality
+  // (kept at full resolution so their crop coordinates stay valid).
+  const OUTPUT = {
+    standard: { maxDim: MAX_DIM, quality: 0.92 },
+    compact:  { maxDim: 1600, quality: 0.72 },
+  };
+  const COMPACT_ORIGINAL_QUALITY = 0.6; // re-encode quality for stored originals
+  const COMPACT_KEY = "scannerapp:compact";
+  let compact = false;
+  function loadCompact() { try { compact = localStorage.getItem(COMPACT_KEY) === "1"; } catch (e) {} }
+  function saveCompact() { try { localStorage.setItem(COMPACT_KEY, compact ? "1" : "0"); } catch (e) {} }
+  function outputProfile() { return compact ? OUTPUT.compact : OUTPUT.standard; }
+
   /** @type {Array<{id:number, blob:Blob, corners:Object, quarter:number,
    *  outputBlob:Blob, outputURL:string}>} */
   const pages = [];
@@ -50,11 +65,11 @@
     return canvas;
   }
 
-  function canvasToJpeg(canvas) {
+  function canvasToJpeg(canvas, quality) {
     return new Promise((resolve, reject) => {
       canvas.toBlob(
         (b) => (b ? resolve(b) : reject(new Error("JPEG encoding failed"))),
-        "image/jpeg", Exporter.JPEG_QUALITY);
+        "image/jpeg", quality != null ? quality : Exporter.JPEG_QUALITY);
     });
   }
 
@@ -109,6 +124,19 @@
   }
   function whenRendersSettle() { return Promise.allSettled([...inFlightRenders]); }
 
+  // Fire-and-forget persistence: never let a storage hiccup break the app.
+  function persist(op) {
+    if (Store && Store.available) op.catch((e) => console.warn("Persist failed:", e));
+  }
+  function persistOrder() { persist(Store.saveOrder(pages)); }
+
+  // Signature of a page's geometry — lets us skip a re-warp when nothing
+  // actually changed (e.g. paging through scans to review them).
+  function renderSig(page) {
+    const c = page.corners;
+    return JSON.stringify([c.tl, c.tr, c.br, c.bl, page.quarter]);
+  }
+
   // ---------------------------------------------------------------
   // Page lifecycle
   // ---------------------------------------------------------------
@@ -134,16 +162,25 @@
         try {
           if (source instanceof Error) throw source;
           const corners = await Detect.detectCorners(source);
+          // Compact mode stores a re-encoded (smaller) original; standard keeps
+          // the raw file. Resolution is unchanged either way, so the detected
+          // corners stay valid against the stored blob.
+          const storedBlob = compact
+            ? await canvasToJpeg(source, COMPACT_ORIGINAL_QUALITY)
+            : files[i];
           const page = {
             id: nextId++,
-            blob: files[i],
+            blob: storedBlob,
             corners,
             quarter: 0,
             outputBlob: null,
             outputURL: null,
           };
           pages.push(page);
-          renders.push(regenerateOutput(page, source).then(renderList, (err) => {
+          renders.push(regenerateOutput(page, source).then(() => {
+            persist(Store.addPage(page)); // blob + rendered output survive reload
+            renderList();
+          }, (err) => {
             console.error("Failed to render page:", err);
             const at = pages.indexOf(page);
             if (at >= 0) pages.splice(at, 1);
@@ -156,6 +193,7 @@
         }
       }
       await Promise.all(renders);
+      persistOrder();
     } catch (err) {
       console.error(err);
       setStatus("");
@@ -202,13 +240,15 @@
     const seq = (renderSeq.get(page.id) || 0) + 1;
     renderSeq.set(page.id, seq);
     const source = sourceCanvas || (await getSource(page));
-    const result = await Editor.renderScan(source, page.corners, page.quarter);
+    const prof = outputProfile();
+    const result = await Editor.renderScan(source, page.corners, page.quarter, { maxDim: prof.maxDim });
     if (renderSeq.get(page.id) !== seq) return; // superseded by a newer edit
-    const blob = await canvasToJpeg(result);
+    const blob = await canvasToJpeg(result, prof.quality);
     if (renderSeq.get(page.id) !== seq) return;
     if (page.outputURL) URL.revokeObjectURL(page.outputURL);
     page.outputBlob = blob;
     page.outputURL = URL.createObjectURL(blob);
+    page.renderedSig = renderSig(page);
   }
 
   async function editPage(index) {
@@ -220,6 +260,7 @@
     // you leave is re-rendered in the background (no blocking overlay), and
     // the next page opens instantly from cache.
     let i = index;
+    $("listToolbar").hidden = true; // header actions don't apply while editing
     try {
       while (true) {
         const page = pages[i];
@@ -244,11 +285,14 @@
         if (!result) return;
         page.corners = result.corners;
         page.quarter = result.quarter;
-        // Render off the critical path so the next page opens immediately.
-        trackRender(
-          regenerateOutput(page, source).then(
-            () => refreshThumb(page),
-            (err) => console.error("Rendering failed:", err)));
+        // Skip the warp entirely when nothing changed (e.g. paging through to
+        // review scans); otherwise render off the critical path and persist.
+        if (!page.outputBlob || page.renderedSig !== renderSig(page)) {
+          trackRender(
+            regenerateOutput(page, source).then(
+              () => { refreshThumb(page); persist(Store.savePage(page)); },
+              (err) => console.error("Rendering failed:", err)));
+        }
         if (!result.nav) return;
         i += result.nav;
       }
@@ -270,6 +314,8 @@
     if (!confirm(`Delete page ${index + 1}?`)) return;
     if (page.outputURL) URL.revokeObjectURL(page.outputURL);
     pages.splice(index, 1);
+    persist(Store.removePage(page.id));
+    persistOrder();
     renderList();
   }
 
@@ -277,6 +323,7 @@
     if (to < 0 || to >= pages.length || from === to) return;
     const [p] = pages.splice(from, 1);
     pages.splice(to, 0, p);
+    persistOrder();
     renderList();
   }
 
@@ -321,9 +368,11 @@
     for (let i = pages.length - 1; i >= 0; i--) {
       if (selectedIds.has(pages[i].id)) {
         if (pages[i].outputURL) URL.revokeObjectURL(pages[i].outputURL);
+        persist(Store.removePage(pages[i].id));
         pages.splice(i, 1);
       }
     }
+    persistOrder();
     exitSelectMode();
   }
 
@@ -336,7 +385,48 @@
     pages.length = 0;
     selectMode = false;
     selectedIds.clear();
+    persist(Store.clear());
     renderList();
+  }
+
+  // ---------------------------------------------------------------
+  // Compact scans (storage saver)
+  // ---------------------------------------------------------------
+
+  /** Switches compact mode; turning it on re-compresses existing scans. */
+  async function setCompact(on) {
+    if (on === compact) return;
+    // Turning it on is lossy for existing scans and can't be undone — confirm.
+    if (on && pages.length &&
+        !confirm(`Compress ${pages.length} saved scan${pages.length === 1 ? "" : "s"} to save space?\n\nThis lowers their resolution and can't be undone.`)) {
+      return;
+    }
+    compact = on;
+    saveCompact();
+    if (on && pages.length) await recompressAll();
+  }
+
+  /** Re-encodes every page's original + output at the current mode. */
+  async function recompressAll() {
+    showBusy("Compressing…");
+    try {
+      await Detect.ensureOpenCV();
+      for (let idx = 0; idx < pages.length; idx++) {
+        const page = pages[idx];
+        showBusy(`Compressing ${idx + 1} / ${pages.length}…`);
+        const source = await decodeNormalized(page.blob);
+        page.blob = await canvasToJpeg(source, COMPACT_ORIGINAL_QUALITY);
+        await regenerateOutput(page, source); // uses the compact profile now
+        persist(Store.addPage(page)); // blob changed → rewrite the full record
+      }
+      persistOrder();
+    } catch (err) {
+      console.error("Compression failed:", err);
+      alert("Couldn't compress scans: " + err.message);
+    } finally {
+      hideBusy();
+      renderList();
+    }
   }
 
   // ---------------------------------------------------------------
@@ -353,6 +443,7 @@
     $("addBar").hidden = selectMode;
     $("exportBar").hidden = selectMode;
     $("exportHint").hidden = selectMode;
+    $("compactToggle").hidden = selectMode;
     $("selectBar").hidden = !selectMode;
     if (selectMode) updateSelectBar();
 
@@ -505,6 +596,11 @@
     $("deleteSelectedBtn").addEventListener("click", deleteSelected);
     $("clearAllBtn").addEventListener("click", clearAll);
 
+    $("compactCheck").addEventListener("change", async (e) => {
+      await setCompact(e.target.checked);
+      e.target.checked = compact; // reflect the real state (reverts on cancel)
+    });
+
     $("pdfBtn").addEventListener("click", async () => {
       showBusy("Building PDF…");
       try {
@@ -539,9 +635,56 @@
     }
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  // ---------------------------------------------------------------
+  // Session restore — rebuild pages saved to IndexedDB on a prior visit.
+  // ---------------------------------------------------------------
+
+  async function restoreSession() {
+    if (!Store || !Store.available) return;
+    let saved = [];
+    try {
+      saved = await Store.loadAll();
+    } catch (e) {
+      console.warn("Session restore failed:", e);
+      return;
+    }
+    let maxId = 0;
+    for (const s of saved) {
+      if (!s.corners) continue;
+      const page = {
+        id: s.id,
+        blob: s.blob,
+        corners: s.corners,
+        quarter: s.quarter || 0,
+        outputBlob: s.outputBlob || null,
+        outputURL: s.outputBlob ? URL.createObjectURL(s.outputBlob) : null,
+      };
+      if (page.outputBlob) page.renderedSig = renderSig(page);
+      pages.push(page);
+      if (s.id > maxId) maxId = s.id;
+    }
+    if (pages.length) nextId = maxId + 1;
+
+    // Best-effort: re-render any page whose output never got persisted
+    // (e.g. the tab was closed mid-render on the prior visit).
+    const missing = pages.filter((p) => !p.outputBlob);
+    if (missing.length) {
+      Detect.ensureOpenCV().then(() => {
+        for (const page of missing) {
+          trackRender(regenerateOutput(page).then(
+            () => { refreshThumb(page); persist(Store.savePage(page)); },
+            (err) => console.error("Re-render failed:", err)));
+        }
+      }).catch((e) => console.warn(e));
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", async () => {
     Editor.init();
+    loadCompact();
+    $("compactCheck").checked = compact;
     initInputs();
+    await restoreSession(); // repopulate pages before the first paint
     renderList();
   });
 

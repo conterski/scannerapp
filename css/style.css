@@ -25,7 +25,7 @@ html, body {
 
 .app-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   padding: max(12px, env(safe-area-inset-top)) 16px 12px;
   position: sticky;
@@ -75,11 +75,35 @@ html, body {
 .add-bar .btn, .export-bar .btn { flex: 1; }
 .export-hint { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 8px; }
 
+/* Compact scans storage toggle */
+.compact-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.compact-toggle input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.compact-text { display: flex; flex-direction: column; gap: 2px; }
+.compact-title { font-size: 15px; font-weight: 600; }
+.compact-sub { font-size: 12px; color: var(--text-dim); }
+
 .btn-danger { background: var(--danger); }
 .btn-danger:not(:disabled):active { background: #dc2626; }
 .btn-danger-ghost { background: var(--surface-2); color: var(--danger); }
 
-.list-toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 8px 0 2px; }
+.list-toolbar { display: flex; gap: 8px; margin-left: auto; }
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 
