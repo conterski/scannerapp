@@ -59,6 +59,57 @@
   }
 
   // ---------------------------------------------------------------
+  // Decode cache + neighbor prefetch — the slow part of opening a page
+  // is decoding its full-res photo, so during an editing session we keep
+  // the current page and its two neighbors decoded and ready. Bounded to
+  // 3 large canvases so iOS Safari's canvas memory stays comfortable.
+  // ---------------------------------------------------------------
+
+  const sourceCache = new Map(); // page.id -> { promise, canvas|null, error|null }
+
+  function getSourceEntry(page) {
+    let e = sourceCache.get(page.id);
+    if (e) {
+      sourceCache.delete(page.id);   // refresh LRU order
+      sourceCache.set(page.id, e);
+      return e;
+    }
+    e = { promise: null, canvas: null, error: null };
+    e.promise = decodeNormalized(page.blob).then(
+      (cv) => { e.canvas = cv; return cv; },
+      (err) => { e.error = err; throw err; });
+    e.promise.catch(() => {}); // prefetched neighbors are never awaited
+    sourceCache.set(page.id, e);
+    return e;
+  }
+
+  function getSource(page) { return getSourceEntry(page).promise; }
+
+  /** Keeps only pages adjacent to `center` decoded; prefetches those. */
+  function primeSources(center) {
+    const keep = new Set();
+    for (const d of [0, 1, -1]) {
+      const j = center + d;
+      if (j >= 0 && j < pages.length) { keep.add(pages[j].id); getSourceEntry(pages[j]); }
+    }
+    for (const id of [...sourceCache.keys()]) {
+      if (!keep.has(id)) sourceCache.delete(id); // canvas is GC'd once unreferenced
+    }
+  }
+
+  function clearSourceCache() { sourceCache.clear(); }
+
+  // Background renders in flight (page edits regenerated off the critical
+  // path). Export waits on these so it never bundles a stale page.
+  const inFlightRenders = new Set();
+  function trackRender(p) {
+    inFlightRenders.add(p);
+    p.finally(() => inFlightRenders.delete(p));
+    return p;
+  }
+  function whenRendersSettle() { return Promise.allSettled([...inFlightRenders]); }
+
+  // ---------------------------------------------------------------
   // Page lifecycle
   // ---------------------------------------------------------------
 
@@ -143,11 +194,18 @@
     if (shots.length) await addFiles(shots);
   }
 
-  /** Re-runs the render pipeline for a page and refreshes its JPEG output. */
+  const renderSeq = new Map(); // page.id -> latest render token
+
+  /** Re-runs the render pipeline for a page and refreshes its JPEG output.
+   *  Guards against a newer edit landing while this one is mid-flight. */
   async function regenerateOutput(page, sourceCanvas) {
-    const source = sourceCanvas || (await decodeNormalized(page.blob));
+    const seq = (renderSeq.get(page.id) || 0) + 1;
+    renderSeq.set(page.id, seq);
+    const source = sourceCanvas || (await getSource(page));
     const result = await Editor.renderScan(source, page.corners, page.quarter);
+    if (renderSeq.get(page.id) !== seq) return; // superseded by a newer edit
     const blob = await canvasToJpeg(result);
+    if (renderSeq.get(page.id) !== seq) return;
     if (page.outputURL) URL.revokeObjectURL(page.outputURL);
     page.outputBlob = blob;
     page.outputURL = URL.createObjectURL(blob);
@@ -157,40 +215,54 @@
     // The editor's ◀/▶ page arrows loop here: navigating applies the current
     // page's edits (same as Done) and opens the adjacent page. Indices are
     // stable mid-session — the list UI is hidden while the editor is open.
+    //
+    // Navigation is kept seamless: neighbor photos are pre-decoded, the page
+    // you leave is re-rendered in the background (no blocking overlay), and
+    // the next page opens instantly from cache.
     let i = index;
     try {
       while (true) {
         const page = pages[i];
-        showBusy("Opening editor…");
-        let source;
-        try {
-          source = await decodeNormalized(page.blob);
-          await Detect.ensureOpenCV();
-        } catch (err) {
+        primeSources(i); // decode this page + its neighbors ahead of time
+        const entry = getSourceEntry(page);
+        let source = entry.canvas;
+        if (!source) {
+          // Not decoded yet (first open or a fast miss) — wait, with a spinner.
+          showBusy("Opening…");
+          try {
+            source = await entry.promise;
+            await Detect.ensureOpenCV();
+          } catch (err) {
+            hideBusy();
+            alert("Couldn't open this page: " + err.message);
+            return;
+          }
           hideBusy();
-          alert("Couldn't open this page: " + err.message);
-          return;
         }
-        hideBusy();
         const result = await Editor.open(source, page,
           { hasPrev: i > 0, hasNext: i < pages.length - 1 });
         if (!result) return;
         page.corners = result.corners;
         page.quarter = result.quarter;
-        showBusy("Rendering…");
-        try {
-          await regenerateOutput(page, source);
-        } catch (err) {
-          alert("Rendering failed: " + err.message);
-        } finally {
-          hideBusy();
-        }
+        // Render off the critical path so the next page opens immediately.
+        trackRender(
+          regenerateOutput(page, source).then(
+            () => refreshThumb(page),
+            (err) => console.error("Rendering failed:", err)));
         if (!result.nav) return;
         i += result.nav;
       }
     } finally {
+      clearSourceCache();
       renderList();
     }
+  }
+
+  /** Swaps just one page's thumbnail in place — no full grid rebuild. */
+  function refreshThumb(page) {
+    if (!page.outputURL) return;
+    const img = $("pageGrid").querySelector(`img[data-page-id="${page.id}"]`);
+    if (img) img.src = page.outputURL;
   }
 
   function deletePage(index) {
@@ -292,6 +364,7 @@
       const thumbWrap = document.createElement("div");
       thumbWrap.className = "page-thumb-wrap";
       const img = document.createElement("img");
+      img.dataset.pageId = String(page.id);
       if (page.outputURL) img.src = page.outputURL; // render may still be in flight
       img.alt = `Page ${i + 1}`;
       img.draggable = false;
@@ -435,6 +508,7 @@
     $("pdfBtn").addEventListener("click", async () => {
       showBusy("Building PDF…");
       try {
+        await whenRendersSettle(); // don't bundle a page still rendering
         await Exporter.exportPdf(pages.map((p) => p.outputBlob));
       } catch (err) {
         alert("PDF export failed: " + err.message);
@@ -446,6 +520,7 @@
     $("photosBtn").addEventListener("click", async () => {
       showBusy("Preparing images…");
       try {
+        await whenRendersSettle(); // don't bundle a page still rendering
         const res = await Exporter.exportPhotos(pages.map((p) => p.outputBlob));
         if (res.method === "download") {
           setStatus("Sharing unavailable — images downloaded in order instead.");

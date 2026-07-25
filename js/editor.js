@@ -36,10 +36,23 @@
   // ---------------------------------------------------------------
 
   const els = {};
-  let state = null; // { source, corners, quarter, scale, resolve }
+  let state = null; // { source, corners, quarter, scale, resolve, seq }
   let previewTimer = null;
   let previewBusy = false;
   let previewDirty = false;
+  let openSeq = 0;  // bumped each open() so a stale preview never paints
+
+  // Each edge handle moves its two corners together along one axis.
+  // `opp` maps a moving corner to the fixed corner on the far side (used to
+  // stop the edge crossing past it); `sign` −1 = must stay before that corner
+  // (top/left), +1 = must stay after it (bottom/right).
+  const EDGE_DEF = {
+    top:    { keys: ["tl", "tr"], axis: "y", opp: { tl: "bl", tr: "br" }, sign: -1 },
+    bottom: { keys: ["bl", "br"], axis: "y", opp: { bl: "tl", br: "tr" }, sign: +1 },
+    left:   { keys: ["tl", "bl"], axis: "x", opp: { tl: "tr", bl: "br" }, sign: -1 },
+    right:  { keys: ["tr", "br"], axis: "x", opp: { tr: "tl", br: "bl" }, sign: +1 },
+  };
+  const EDGE_MARGIN = 8; // min source-px gap kept between opposite edges
 
   function $(id) { return document.getElementById(id); }
 
@@ -55,6 +68,11 @@
     document.querySelectorAll(".corner-handle").forEach((h) => {
       els.handles[h.dataset.corner] = h;
       attachHandleDrag(h);
+    });
+    els.edgeHandles = {};
+    document.querySelectorAll(".edge-handle").forEach((h) => {
+      els.edgeHandles[h.dataset.edge] = h;
+      attachEdgeDrag(h);
     });
 
     $("rotLeftBtn").addEventListener("click", () => { state.quarter = (state.quarter + 3) % 4; schedulePreview(); });
@@ -90,6 +108,7 @@
         quarter: settings.quarter || 0,
         scale: 1,
         resolve,
+        seq: ++openSeq,
       };
       $("editPrevBtn").disabled = !nav.hasPrev;
       $("editNextBtn").disabled = !nav.hasNext;
@@ -97,13 +116,18 @@
       $("listView").hidden = true;
       els.view.hidden = false;
       layoutStage();
-      schedulePreview();
+      renderPreviewNow();
     });
   }
 
   function close(apply, navDelta) {
-    els.view.hidden = true;
-    $("listView").hidden = false;
+    clearTimeout(previewTimer);
+    // When navigating to an adjacent page the app immediately re-opens the
+    // editor, so don't flip back to the list — that flashes it between pages.
+    if (!(apply && navDelta)) {
+      els.view.hidden = true;
+      $("listView").hidden = false;
+    }
     const r = state.resolve;
     const result = apply
       ? { corners: state.corners, quarter: state.quarter, nav: navDelta || 0 }
@@ -142,6 +166,13 @@
       const h = els.handles[key];
       h.style.left = p.x * s + "px";
       h.style.top = p.y * s + "px";
+    }
+    for (const edge in EDGE_DEF) {
+      const [ka, kb] = EDGE_DEF[edge].keys;
+      const a = state.corners[ka], b = state.corners[kb];
+      const h = els.edgeHandles[edge];
+      h.style.left = ((a.x + b.x) / 2) * s + "px";
+      h.style.top = ((a.y + b.y) / 2) * s + "px";
     }
     drawQuad();
   }
@@ -189,6 +220,64 @@
     updateLoupe(x, y);
   }
 
+  /** Clamps a rigid edge shift to the image and short of the opposite edge. */
+  function clampEdgeDelta(def, start, d) {
+    const max = def.axis === "x" ? state.source.width : state.source.height;
+    let lo = -Infinity, hi = Infinity;
+    for (const k of def.keys) {
+      const v0 = start[k][def.axis];
+      const opp = state.corners[def.opp[k]][def.axis];
+      lo = Math.max(lo, -v0);          // stay within the image (≥ 0)
+      hi = Math.min(hi, max - v0);     // stay within the image (≤ max)
+      if (def.sign < 0) hi = Math.min(hi, opp - EDGE_MARGIN - v0); // before far edge
+      else lo = Math.max(lo, opp + EDGE_MARGIN - v0);              // after far edge
+    }
+    return Math.min(Math.max(d, lo), hi);
+  }
+
+  function attachEdgeDrag(handle) {
+    const def = EDGE_DEF[handle.dataset.edge];
+    handle.addEventListener("pointerdown", (e) => {
+      if (!state) return;
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add("active");
+      els.loupe.hidden = false;
+      const origin = { x: e.clientX, y: e.clientY };
+      const start = {};
+      for (const k of def.keys) start[k] = { x: state.corners[k].x, y: state.corners[k].y };
+
+      const onMove = (ev) => {
+        const s = state.scale;
+        const raw = def.axis === "x"
+          ? (ev.clientX - origin.x) / s
+          : (ev.clientY - origin.y) / s;
+        const d = clampEdgeDelta(def, start, raw);
+        for (const k of def.keys) {
+          state.corners[k] = def.axis === "x"
+            ? { x: start[k].x + d, y: start[k].y }
+            : { x: start[k].x, y: start[k].y + d };
+        }
+        positionHandles();
+        const a = state.corners[def.keys[0]], b = state.corners[def.keys[1]];
+        updateLoupe((a.x + b.x) / 2, (a.y + b.y) / 2);
+      };
+      onMove(e);
+
+      const onUp = () => {
+        handle.classList.remove("active");
+        els.loupe.hidden = true;
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+        schedulePreview();
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    });
+  }
+
   function updateLoupe(imgX, imgY) {
     const s = state.scale;
     const lc = els.loupeCanvas;
@@ -217,16 +306,24 @@
     previewTimer = setTimeout(runPreview, 120);
   }
 
+  /** Regenerate the preview immediately (used on open/nav — no debounce lag). */
+  function renderPreviewNow() {
+    clearTimeout(previewTimer);
+    runPreview();
+  }
+
   async function runPreview() {
     if (!state) return;
     if (previewBusy) { previewDirty = true; return; }
     previewBusy = true;
+    const seq = state.seq;
     try {
       const { canvas: small, scale } = Detect.scaledCanvas(state.source, 500);
       const sc = (p) => ({ x: p.x * scale, y: p.y * scale });
       const corners = { tl: sc(state.corners.tl), tr: sc(state.corners.tr), br: sc(state.corners.br), bl: sc(state.corners.bl) };
       const result = await renderScan(small, corners, state.quarter);
-      if (!state) return;
+      // A page nav (or close) may have superseded this warp while it ran.
+      if (!state || state.seq !== seq) return;
       els.preview.width = result.width;
       els.preview.height = result.height;
       els.preview.getContext("2d").drawImage(result, 0, 0);
@@ -234,7 +331,7 @@
       console.warn("Preview failed:", err);
     } finally {
       previewBusy = false;
-      if (previewDirty) { previewDirty = false; schedulePreview(); }
+      if (previewDirty) { previewDirty = false; if (state) schedulePreview(); }
     }
   }
 

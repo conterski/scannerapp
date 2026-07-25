@@ -216,6 +216,32 @@ html, body {
 }
 .corner-handle.active::after { background: #f59e0b; }
 
+/* Edge midpoint handles — drag a whole side in/out. Top/bottom move
+   vertically, left/right horizontally; the bar shows the drag axis. */
+.edge-handle {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  touch-action: none;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.edge-handle::after {
+  content: "";
+  background: var(--accent);
+  border: 2.5px solid #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.5);
+}
+.edge-handle[data-edge="top"]::after,
+.edge-handle[data-edge="bottom"]::after { width: 28px; height: 12px; }
+.edge-handle[data-edge="left"]::after,
+.edge-handle[data-edge="right"]::after { width: 12px; height: 28px; }
+.edge-handle.active::after { background: #f59e0b; }
+
 .quad-overlay {
   position: absolute;
   inset: 0;
