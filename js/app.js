@@ -296,7 +296,7 @@
   function deletePage(index) {
     if (!confirm(`Delete page ${index + 1}?`)) return;
     const [page] = pages.splice(index, 1);
-    releasePageURL(page);
+    forgetPage(page);
     persist(Store.removePage(page.id));
     persistPageOrder();
     renderPageList();
@@ -317,7 +317,7 @@
     if (!confirm(`Delete ${selectedCount} page${selectedCount === 1 ? "" : "s"}?`)) return;
     for (let index = pages.length - 1; index >= 0; index--) {
       if (!selectedIds.has(pages[index].id)) continue;
-      releasePageURL(pages[index]);
+      forgetPage(pages[index]);
       persist(Store.removePage(pages[index].id));
       pages.splice(index, 1);
     }
@@ -328,7 +328,7 @@
   function clearAllPages() {
     if (!pages.length) return;
     if (!confirm(`Delete all ${pages.length} pages? This can't be undone.`)) return;
-    pages.forEach(releasePageURL);
+    pages.forEach(forgetPage);
     pages.length = 0;
     persist(Store.clear());
     PageListView.exitSelectMode();
@@ -337,11 +337,20 @@
   function discardPage(page) {
     const index = pages.indexOf(page);
     if (index >= 0) pages.splice(index, 1);
+    forgetPage(page);
     renderPageList();
   }
 
   function releasePageURL(page) {
     if (page.outputURL) URL.revokeObjectURL(page.outputURL);
+  }
+
+  /** Releases a page for good. Distinct from releasePageURL, which
+   *  regenerateOutput uses to swap a URL and must keep the render token it is
+   *  currently guarding. */
+  function forgetPage(page) {
+    releasePageURL(page);
+    renderTokens.delete(page.id);
   }
 
   function renderPageList() { PageListView.render(pages); }
@@ -370,9 +379,12 @@
     showBusy("Compressing…");
     try {
       await Detect.ensureOpenCV();
+      let nextDecode = pages.length ? prefetchOriginal(pages[0]) : null;
       for (let index = 0; index < pages.length; index++) {
         showBusy(`Compressing ${index + 1} / ${pages.length}…`);
-        await recompressPage(pages[index]);
+        const source = await nextDecode;
+        if (index + 1 < pages.length) nextDecode = prefetchOriginal(pages[index + 1]);
+        await recompressPage(pages[index], source);
       }
       persistPageOrder();
     } catch (error) {
@@ -384,8 +396,16 @@
     }
   }
 
-  async function recompressPage(page) {
-    const source = await ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE);
+  /** Decodes the next page's original while the current one warps and encodes,
+   *  the same overlap addPhotoBatch uses. Marking the rejection handled keeps a
+   *  prefetch abandoned by an earlier failure quiet; awaiting it later still
+   *  throws, so one unreadable page aborts the run exactly as before. */
+  function prefetchOriginal(page) {
+    return markRejectionHandled(
+      ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
+  }
+
+  async function recompressPage(page, source) {
     page.blob = await ImageUtils.encodeCanvasToJpeg(source, ScanQuality.COMPACT_ORIGINAL_QUALITY);
     await regenerateOutput(page, source);
     persist(Store.addPage(page)); // the blob changed → rewrite the full record
@@ -563,10 +583,24 @@
     // so an export during restore waits instead of seeing an empty in-flight
     // set and bundling pages that have no output yet.
     trackRender(Detect.ensureOpenCV().then(
-      () => Promise.allSettled(missing.map((page) => regenerateOutput(page).then(
-        () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
-        (error) => console.error("Re-render failed:", error)))),
+      () => rerenderInTurn(missing),
       (error) => console.warn("Couldn't re-render restored pages:", error)));
+  }
+
+  /** One at a time on purpose: every re-render decodes a full-resolution
+   *  original, so starting them all at once would hold one large canvas per
+   *  restored page. The warps queue in the worker either way, so this bounds
+   *  memory without costing time. A page that fails is skipped, not fatal. */
+  async function rerenderInTurn(pagesToRender) {
+    for (const page of pagesToRender) {
+      try {
+        await regenerateOutput(page);
+        PageListView.refreshThumbnail(page);
+        persist(Store.savePage(page));
+      } catch (error) {
+        console.error("Re-render failed:", error);
+      }
+    }
   }
 
   // ---------------------------------------------------------------
