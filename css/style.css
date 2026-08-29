@@ -398,20 +398,27 @@ html, body {
   font-weight: 600;
 }
 
+/* The shutter is centred on the screen and the side controls float over it,
+   so neither the thumbnail strip nor a growing "Done (N)" label can shift it. */
 .capture-bottom {
+  position: relative;
   margin-top: auto;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
   padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
   background: linear-gradient(to top, rgba(8, 10, 14, 0.8), transparent);
 }
-.capture-bottom .btn { justify-self: end; }
+.capture-side {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.capture-side-left { left: 16px; }
+.capture-side-right { right: 16px; }
 
 .shutter {
   appearance: none;
-  justify-self: center;
   width: 76px;
   height: 76px;
   padding: 4px;
@@ -429,7 +436,6 @@ html, body {
 /* Overlapping stack of the most recent shots — tap to review. */
 .shot-strip {
   appearance: none;
-  justify-self: start;
   display: flex;
   align-items: center;
   border: none;
@@ -438,7 +444,7 @@ html, body {
   cursor: pointer;
   touch-action: manipulation;
 }
-.shot-strip:active { transform: scale(0.95); }
+.shot-strip:active { transform: translateY(-50%) scale(0.95); }
 .shot-strip img {
   width: 48px;
   height: 48px;
@@ -447,7 +453,7 @@ html, body {
   border: 2px solid rgba(255, 255, 255, 0.9);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
-.shot-strip img + img { margin-left: -26px; }
+.shot-strip img + img { margin-left: -30px; }
 
 /* ---------- Review gallery ---------- */
 .gallery {

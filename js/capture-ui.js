@@ -55,9 +55,10 @@
 
       function renderCount() {
         const n = store.count();
+        // The count lives in the pill only: a label that grows with it would
+        // widen the Done button and push the shutter off centre.
         els.shotCount.textContent = photoLabel(n);
         els.galleryCount.textContent = photoLabel(n);
-        els.captureDoneBtn.textContent = n ? `Done (${n})` : "Done";
       }
 
       function renderStrip() {
@@ -167,7 +168,6 @@
         els.captureControls.hidden = false;
         els.shutterBtn.disabled = false;
         els.captureDoneBtn.disabled = false;
-        els.captureDoneBtn.textContent = "Done";
         els.galleryGrid.innerHTML = "";
         els.shotStrip.innerHTML = "";
       }
