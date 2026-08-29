@@ -101,16 +101,43 @@
   <p id="busyText">Working&hellip;</p>
 </div>
 
-<div id="captureOverlay" class="busy-overlay capture-overlay" hidden>
-  <img id="captureThumb" class="capture-thumb" alt="Last shot">
-  <p id="captureCount">1 page captured</p>
-  <div class="capture-actions">
-    <button id="captureMoreBtn" class="btn btn-secondary">&#128248; Continue</button>
-    <button id="captureDoneBtn" class="btn btn-primary">Done</button>
+<!-- ============ RAPID CAPTURE (in-page camera) ============ -->
+<div id="captureView" class="capture-view" hidden>
+  <video id="captureVideo" class="capture-video" playsinline webkit-playsinline muted autoplay></video>
+  <div id="captureFlash" class="capture-flash" hidden></div>
+
+  <div id="captureControls" class="capture-controls">
+    <div class="capture-top">
+      <span id="shotCount" class="shot-count">0 photos</span>
+    </div>
+    <div class="capture-bottom">
+      <button id="shotStrip" class="shot-strip" type="button" title="Review photos" hidden></button>
+      <button id="shutterBtn" class="shutter" type="button" title="Take photo"></button>
+      <button id="captureDoneBtn" class="btn btn-primary" type="button">Done</button>
+    </div>
+  </div>
+
+  <div id="galleryView" class="gallery" hidden>
+    <div class="gallery-bar">
+      <span id="galleryCount" class="shot-count">0 photos</span>
+      <button id="galleryCloseBtn" class="btn btn-small btn-primary" type="button">Back to camera</button>
+    </div>
+    <p id="galleryEmpty" class="gallery-empty" hidden>No photos yet &mdash; tap the shutter to start.</p>
+    <div id="galleryGrid" class="gallery-grid"></div>
+  </div>
+
+  <div id="captureError" class="capture-error" hidden>
+    <div class="empty-icon">&#128247;</div>
+    <p id="captureErrorText"></p>
+    <button id="captureFallbackBtn" class="btn btn-primary" type="button">Use the system camera</button>
+    <button id="captureCancelBtn" class="btn btn-secondary" type="button">Cancel</button>
   </div>
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/photo-store.js"></script>
+<script src="js/capture-ui.js"></script>
 <script src="js/detect.js"></script>
 <script src="js/editor.js"></script>
 <script src="js/export.js"></script>

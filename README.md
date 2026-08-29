@@ -4,7 +4,7 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 
 **Features**
 
-- Add photos from the library or shoot with the camera (iPhone-friendly)
+- Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters** — pixel colors are never altered, only geometric transforms
 - Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps
@@ -27,4 +27,4 @@ npx http-server -p 8123 .
 
 **iPhone use**
 
-Open the deployed URL in Safari. For an app-like experience use Share → **Add to Home Screen**. "Save to Photos" requires HTTPS (the Web Share API needs a secure context).
+Open the deployed URL in Safari. For an app-like experience use Share → **Add to Home Screen**. The in-page camera needs HTTPS and camera permission; if either is missing the Camera button falls back to the system camera picker. "Save to Photos" requires HTTPS (the Web Share API needs a secure context).

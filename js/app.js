@@ -28,8 +28,6 @@
   const pages = [];
   let nextId = 1;
   let dragSrcIndex = -1;
-  const pendingShots = [];      // camera shots awaiting batch processing
-  let captureThumbURL = null;   // object URL of the capture overlay thumbnail
   let selectMode = false;
   const selectedIds = new Set(); // page.id — stable across re-renders
 
@@ -204,32 +202,17 @@
   }
 
   // ---------------------------------------------------------------
-  // Continuous camera capture: shots pile up in pendingShots and are
-  // processed as one batch when the user taps Done — detection is the
-  // slow step, so it must never block between shots.
+  // Rapid capture: the in-page camera (CaptureUI) runs the whole session and
+  // hands back the shots in one go; detection is the slow step, so it never
+  // runs between shots.
   // ---------------------------------------------------------------
 
-  function showCaptureOverlay(lastBlob) {
-    if (captureThumbURL) URL.revokeObjectURL(captureThumbURL);
-    captureThumbURL = URL.createObjectURL(lastBlob);
-    $("captureThumb").src = captureThumbURL;
-    $("captureCount").textContent =
-      `${pendingShots.length} page${pendingShots.length === 1 ? "" : "s"} captured`;
-    $("captureOverlay").hidden = false;
-  }
-
-  function hideCaptureOverlay() {
-    $("captureOverlay").hidden = true;
-    if (captureThumbURL) {
-      URL.revokeObjectURL(captureThumbURL);
-      captureThumbURL = null;
-    }
-  }
-
-  async function finishCapture() {
-    hideCaptureOverlay();
-    const shots = pendingShots.splice(0);
-    if (shots.length) await addFiles(shots);
+  /** Opens the in-page camera. Must be called straight from a user gesture —
+   *  both getUserMedia and the native-input fallback require one. */
+  function startCapture(cameraInput) {
+    if (!CameraStream.isSupported()) { cameraInput.click(); return; }
+    CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
+      .then((files) => { if (files.length) addFiles(files); });
   }
 
   const renderSeq = new Map(); // page.id -> latest render token
@@ -568,28 +551,18 @@
     const fileInput = $("fileInput");
     const cameraInput = $("cameraInput");
     $("addPhotosBtn").addEventListener("click", () => fileInput.click());
-    $("cameraBtn").addEventListener("click", () => cameraInput.click());
+    $("cameraBtn").addEventListener("click", () => startCapture(cameraInput));
     fileInput.addEventListener("change", () => {
       addFiles(fileInput.files);
       fileInput.value = "";
     });
+    // Fallback path only (no in-page camera): the system camera returns one
+    // photo per trip, with its own Retake/Use Photo confirmation.
     cameraInput.addEventListener("change", () => {
       const file = cameraInput.files[0]; // grab ref BEFORE resetting value
       cameraInput.value = "";
-      if (!file) return;
-      pendingShots.push(file);
-      showCaptureOverlay(file);
+      if (file) addFiles([file]);
     });
-    // Camera dismissed without a shot: keep the overlay if shots are
-    // pending (Continue/Done still available), otherwise nothing to do.
-    // Browsers without the cancel event just land back on the overlay,
-    // which is never hidden while the camera is open.
-    cameraInput.addEventListener("cancel", () => {
-      if (pendingShots.length) $("captureOverlay").hidden = false;
-      else hideCaptureOverlay();
-    });
-    $("captureMoreBtn").addEventListener("click", () => cameraInput.click());
-    $("captureDoneBtn").addEventListener("click", finishCapture);
 
     $("selectBtn").addEventListener("click", enterSelectMode);
     $("cancelSelectBtn").addEventListener("click", exitSelectMode);
@@ -689,5 +662,5 @@
   });
 
   // Exposed for debugging/testing.
-  window.Scanner = { pages, pendingShots, addFiles, movePage, renderList, clearAll };
+  window.Scanner = { pages, addFiles, startCapture, movePage, renderList, clearAll };
 })();
