@@ -517,11 +517,30 @@
 
   function outputBlobs() { return pages.map((page) => page.outputBlob); }
 
+  /** Pages that have no rendered scan. Once renders have settled these are the
+   *  ones that never will, so exporting them would put a hole in the file. */
+  function unexportablePages() { return pages.filter((page) => !page.outputBlob); }
+
+  function describeUnexportable(count) {
+    const pageWord = count === 1 ? "page" : "pages";
+    const themWord = count === 1 ? "it" : "them";
+    return `${count} ${pageWord} couldn't be processed, so the export was ` +
+      `cancelled.\n\nRemove ${themWord} from the list and try again.`;
+  }
+
   /** @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
     showBusy(options.busyText);
     try {
       await whenRendersSettle(); // never bundle a page that is still rendering
+      // A page with no scan would reach the exporter as a null blob: the PDF
+      // path throws, and Save to Photos silently writes a 4-byte file named
+      // like a real scan. Refuse instead.
+      const unexportable = unexportablePages();
+      if (unexportable.length) {
+        alert(describeUnexportable(unexportable.length));
+        return;
+      }
       const result = await options.exportBlobs();
       if (result.method === "download" && options.onDownloadFallback) {
         options.onDownloadFallback();
@@ -598,6 +617,11 @@
         PageListView.refreshThumbnail(page);
         persist(Store.savePage(page));
       } catch (error) {
+        // The original can't be decoded, so this page will never render. Mark
+        // it so the grid shows why, and so export refuses rather than writing
+        // a hole into the file.
+        page.renderFailed = true;
+        renderPageList();
         console.error("Re-render failed:", error);
       }
     }

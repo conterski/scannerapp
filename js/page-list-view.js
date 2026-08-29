@@ -7,6 +7,8 @@
 (function () {
   "use strict";
 
+  const FAILED_PAGE_NOTICE = "Couldn't process this photo";
+
   const GLYPH = {
     moveEarlier: "◀",
     moveLater: "▶",
@@ -100,9 +102,10 @@
   // Cards
   // ---------------------------------------------------------------
 
-  function createCardShell(index) {
+  function createCardShell(page, index) {
     const card = document.createElement("div");
     card.className = "page-card";
+    if (page.renderFailed) card.classList.add("page-card--failed");
     card.dataset.index = String(index);
     return card;
   }
@@ -110,13 +113,28 @@
   function createThumbnail(page, index) {
     const thumbnailWrap = document.createElement("div");
     thumbnailWrap.className = "page-thumb-wrap";
+    thumbnailWrap.appendChild(page.renderFailed
+      ? createFailureNotice()
+      : createThumbnailImage(page, index));
+    return thumbnailWrap;
+  }
+
+  /** Added even before the render lands, so refreshThumbnail can find it by
+   *  page id and swap the source in. */
+  function createThumbnailImage(page, index) {
     const image = document.createElement("img");
     image.dataset.pageId = String(page.id);
     if (page.outputURL) image.src = page.outputURL; // a render may still be in flight
     image.alt = `Page ${index + 1}`;
     image.draggable = false;
-    thumbnailWrap.appendChild(image);
-    return thumbnailWrap;
+    return image;
+  }
+
+  function createFailureNotice() {
+    const notice = document.createElement("p");
+    notice.className = "page-failed";
+    notice.textContent = FAILED_PAGE_NOTICE;
+    return notice;
   }
 
   function createPageNumber(index) {
@@ -127,7 +145,7 @@
   }
 
   function createSelectableCard(page, index) {
-    const card = createCardShell(index);
+    const card = createCardShell(page, index);
     const thumbnailWrap = createThumbnail(page, index);
     thumbnailWrap.addEventListener("click", () => toggleSelected(page, card));
     card.classList.toggle("selected", selectedPageIds.has(page.id));
@@ -141,7 +159,7 @@
   }
 
   function createEditableCard(page, index, pageCount) {
-    const card = createCardShell(index);
+    const card = createCardShell(page, index);
     const thumbnailWrap = createThumbnail(page, index);
     thumbnailWrap.addEventListener("click", () => handlers.onEditPage(index));
 

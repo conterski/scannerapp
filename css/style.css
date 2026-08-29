@@ -122,6 +122,15 @@ html, body {
   position: relative;
   border: 2px solid transparent;
 }
+.page-card--failed { border-color: var(--danger); }
+.page-failed {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--danger);
+  text-align: center;
+  padding: 0 10px;
+}
+
 .page-card.drag-source { opacity: 0.4; }
 .page-card.drag-over { border-color: var(--accent); }
 .page-card.selected { border-color: var(--accent); }
