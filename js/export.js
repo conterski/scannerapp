@@ -1,87 +1,30 @@
-/* export.js — PDF download and "Save to Photos" via the Web Share API.
+/* export.js — PDF download and "Save to Photos", both routed through the Web
+ * Share API when it is available and through plain downloads when it isn't.
  * Exposes window.Exporter.
  */
 (function () {
   "use strict";
 
-  const JPEG_QUALITY = 0.92;
+  // Each PDF page matches its image's aspect ratio, with the longest side
+  // normalized to A4's long edge in points.
+  const A4_LONG_EDGE_PT = 842;
 
-  function blobToDataURL(blob) {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result);
-      r.onerror = () => reject(r.error);
-      r.readAsDataURL(blob);
-    });
-  }
+  // Safari drops downloads fired back-to-back, so the fallback paces them.
+  const DOWNLOAD_STAGGER_MS = 350;
+  const OBJECT_URL_LIFETIME_MS = 30000;
 
-  function dataURLDims(dataURL) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-      img.onerror = () => reject(new Error("Bad image"));
-      img.src = dataURL;
-    });
-  }
+  const FILENAME_INDEX_DIGITS = 2;
 
-  function timestamp() {
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
-  }
+  // ---------------------------------------------------------------
+  // Public exports
+  // ---------------------------------------------------------------
 
-  function triggerDownload(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-  }
-
-  /**
-   * Builds a PDF from ordered JPEG blobs; each PDF page matches its image's
-   * aspect ratio (longest side normalized to A4's 842 pt).
-   */
-  async function buildPdf(blobs) {
-    const { jsPDF } = window.jspdf;
-    let doc = null;
-    for (const blob of blobs) {
-      const dataURL = await blobToDataURL(blob);
-      const { w, h } = await dataURLDims(dataURL);
-      const scale = 842 / Math.max(w, h);
-      const pw = w * scale, ph = h * scale;
-      const orientation = ph >= pw ? "p" : "l";
-      if (!doc) {
-        doc = new jsPDF({ unit: "pt", format: [pw, ph], orientation, compress: true });
-      } else {
-        doc.addPage([pw, ph], orientation);
-      }
-      doc.addImage(dataURL, "JPEG", 0, 0, pw, ph);
-    }
-    return doc.output("blob");
-  }
-
-  /** Downloads all pages as a single PDF; offers the share sheet on iOS. */
-  async function exportPdf(blobs) {
-    const pdfBlob = await buildPdf(blobs);
+  /** Saves all pages as one PDF; offers the share sheet first on iOS. */
+  async function exportPdf(scanBlobs) {
+    const pdfBlob = await buildPdf(scanBlobs);
     const filename = `scan-${timestamp()}.pdf`;
-    const file = new File([pdfBlob], filename, { type: "application/pdf" });
-    // On iOS the share sheet is far more useful than a Safari download
-    // (lets the user pick Files, Mail, print, etc.).
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file] });
-        return { method: "share" };
-      } catch (err) {
-        if (err.name === "AbortError") return { method: "cancelled" };
-        // Fall through to a plain download on any other share failure.
-      }
-    }
-    triggerDownload(pdfBlob, filename);
-    return { method: "download" };
+    const pdfFile = new File([pdfBlob], filename, { type: "application/pdf" });
+    return shareOrDownload([pdfFile], () => triggerDownload(pdfBlob, filename));
   }
 
   /**
@@ -89,26 +32,123 @@
    * ("Save Images"). Array order and zero-padded filenames preserve page
    * order. Falls back to sequential downloads when sharing isn't available.
    */
-  async function exportPhotos(blobs) {
-    const ts = timestamp();
-    const files = blobs.map((blob, i) =>
-      new File([blob], `scan-${ts}-${String(i + 1).padStart(2, "0")}.jpg`, { type: "image/jpeg" }));
+  async function exportPhotos(scanBlobs) {
+    const imageFiles = toNumberedImageFiles(scanBlobs);
+    return shareOrDownload(imageFiles, () => downloadInOrder(imageFiles));
+  }
 
+  // ---------------------------------------------------------------
+  // Delivery
+  // ---------------------------------------------------------------
+
+  /**
+   * On iOS the share sheet is far more useful than a Safari download (it lets
+   * the user pick Files, Mail, print). Anything other than the user cancelling
+   * falls back to downloading.
+   * @returns {method: "share" | "cancelled" | "download"}
+   */
+  async function shareOrDownload(files, downloadAll) {
     if (navigator.canShare && navigator.canShare({ files })) {
       try {
         await navigator.share({ files });
         return { method: "share" };
-      } catch (err) {
-        if (err.name === "AbortError") return { method: "cancelled" };
+      } catch (error) {
+        if (error.name === "AbortError") return { method: "cancelled" };
+        console.warn("Sharing failed, downloading instead:", error);
       }
     }
-    // Fallback: ordered individual downloads.
-    for (const f of files) {
-      triggerDownload(f, f.name);
-      await new Promise((r) => setTimeout(r, 350));
-    }
+    await downloadAll();
     return { method: "download" };
   }
 
-  window.Exporter = { exportPdf, exportPhotos, JPEG_QUALITY };
+  function triggerDownload(blob, filename) {
+    const objectURL = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectURL;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectURL), OBJECT_URL_LIFETIME_MS);
+  }
+
+  async function downloadInOrder(files) {
+    for (const file of files) {
+      triggerDownload(file, file.name);
+      await delay(DOWNLOAD_STAGGER_MS);
+    }
+  }
+
+  function delay(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  function toNumberedImageFiles(scanBlobs) {
+    const sessionTimestamp = timestamp();
+    return scanBlobs.map((blob, index) => {
+      const pageNumber = String(index + 1).padStart(FILENAME_INDEX_DIGITS, "0");
+      return new File([blob], `scan-${sessionTimestamp}-${pageNumber}.jpg`,
+        { type: "image/jpeg" });
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // PDF assembly
+  // ---------------------------------------------------------------
+
+  async function buildPdf(scanBlobs) {
+    const { jsPDF } = window.jspdf;
+    let pdf = null;
+    for (const blob of scanBlobs) {
+      const dataURL = await blobToDataURL(blob);
+      const page = await pageSizeFor(dataURL);
+      const orientation = page.height >= page.width ? "p" : "l";
+      if (pdf) {
+        pdf.addPage([page.width, page.height], orientation);
+      } else {
+        pdf = new jsPDF({
+          unit: "pt", format: [page.width, page.height], orientation, compress: true,
+        });
+      }
+      pdf.addImage(dataURL, "JPEG", 0, 0, page.width, page.height);
+    }
+    return pdf.output("blob");
+  }
+
+  async function pageSizeFor(dataURL) {
+    const { width, height } = await imageDimensions(dataURL);
+    const scale = A4_LONG_EDGE_PT / Math.max(width, height);
+    return { width: width * scale, height: height * scale };
+  }
+
+  // ---------------------------------------------------------------
+  // Small helpers
+  // ---------------------------------------------------------------
+
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function imageDimensions(dataURL) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      image.onerror = () => reject(new Error("Bad image"));
+      image.src = dataURL;
+    });
+  }
+
+  function timestamp() {
+    const now = new Date();
+    const padTwo = (value) => String(value).padStart(2, "0");
+    return `${now.getFullYear()}${padTwo(now.getMonth() + 1)}${padTwo(now.getDate())}` +
+      `-${padTwo(now.getHours())}${padTwo(now.getMinutes())}`;
+  }
+
+  window.Exporter = { exportPdf, exportPhotos };
 })();

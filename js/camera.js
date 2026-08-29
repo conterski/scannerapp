@@ -75,23 +75,18 @@
    *  Returns null while the stream has no frame yet. Synchronous, so a tap
    *  captures the frame the user actually saw. */
   function grabFrame(video) {
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    if (!w || !h) return null;
-    const scale = Math.min(1, MAX_EDGE / Math.max(w, h));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(w * scale));
-    canvas.height = Math.max(1, Math.round(h * scale));
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas;
+    const { width, height } = ImageUtils.sourceDimensions(video);
+    if (!width || !height) return null;
+    return ImageUtils.createScaledCanvas(video, MAX_EDGE).canvas;
   }
 
   function encodeJpeg(canvas) {
-    return new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("JPEG encoding failed"))),
-        "image/jpeg", JPEG_QUALITY);
-    });
+    return ImageUtils.encodeCanvasToJpeg(canvas, JPEG_QUALITY);
+  }
+
+  function markRejectionHandled(promise) {
+    if (promise && typeof promise.catch === "function") promise.catch(() => {});
+    return promise;
   }
 
   function create() {
@@ -106,8 +101,9 @@
         video.srcObject = s;
         // iOS needs the inline attributes in the markup *and* an explicit
         // play() — autoplay alone is unreliable when the screen re-opens.
-        const played = video.play();
-        if (played && played.catch) played.catch(() => {});
+        // The autoplay attribute covers the case where this play() is refused,
+        // so its rejection is deliberately ignored rather than surfaced.
+        markRejectionHandled(video.play());
         return whenSized(video);
       });
     }

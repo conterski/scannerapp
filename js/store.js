@@ -1,123 +1,184 @@
-/* store.js — IndexedDB persistence of the scanning session so pages survive
- * a reload, an accidental close, or iOS Safari evicting the backgrounded tab.
+/* store.js — IndexedDB persistence of the scanning session, so pages survive a
+ * reload, an accidental close, or iOS Safari evicting the backgrounded tab.
  *
  * Layout (three stores, keyed by page id):
  *   blobs {id, blob}                              — the original photo, written
  *                                                   once and never rewritten
- *   pages {id, corners, quarter, outputBlob}      — lightweight edit state +
+ *   pages {id, corners, quarter, outputBlob}      — lightweight edit state plus
  *                                                   the rendered scan
  *   meta  {key:"order", ids:[...]}                — page order
  *
- * Every method resolves/rejects a promise; callers fire-and-forget and swallow
- * errors so persistence can never break the app (private mode, quota, etc.).
+ * Every method returns a promise; callers fire-and-forget and swallow failures
+ * so persistence can never break the app (private mode, quota, and so on).
  * Exposes window.Store.
  */
 (function () {
   "use strict";
 
   const DB_NAME = "scannerapp";
-  const VERSION = 1;
-  let dbPromise = null;
+  const DB_VERSION = 1;
 
-  function openDB() {
-    if (dbPromise) return dbPromise;
-    dbPromise = new Promise((resolve, reject) => {
-      let req;
-      try {
-        req = indexedDB.open(DB_NAME, VERSION);
-      } catch (e) { reject(e); return; }
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains("blobs")) db.createObjectStore("blobs", { keyPath: "id" });
-        if (!db.objectStoreNames.contains("pages")) db.createObjectStore("pages", { keyPath: "id" });
-        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    dbPromise.catch(() => { dbPromise = null; }); // allow a later retry
-    return dbPromise;
-  }
+  const BLOB_STORE = "blobs";
+  const PAGE_STORE = "pages";
+  const META_STORE = "meta";
+  const ORDER_KEY = "order";
+  const ALL_STORES = [BLOB_STORE, PAGE_STORE, META_STORE];
 
-  function reqP(r) {
-    return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-  }
-  function txDone(t) {
-    return new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
-  }
-  function pageRecord(page) {
-    return { id: page.id, corners: page.corners, quarter: page.quarter, outputBlob: page.outputBlob };
-  }
+  let databasePromise = null;
+
+  // ---------------------------------------------------------------
+  // Session records
+  // ---------------------------------------------------------------
 
   /** New page: store its original blob (once) plus its edit/output state. */
-  async function addPage(page) {
-    const db = await openDB();
-    const t = db.transaction(["blobs", "pages"], "readwrite");
-    t.objectStore("blobs").put({ id: page.id, blob: page.blob });
-    t.objectStore("pages").put(pageRecord(page));
-    await txDone(t);
+  function addPage(page) {
+    return runTransaction([BLOB_STORE, PAGE_STORE], "readwrite", (transaction) => {
+      transaction.objectStore(BLOB_STORE).put({ id: page.id, blob: page.blob });
+      transaction.objectStore(PAGE_STORE).put(pageRecord(page));
+    });
   }
 
-  /** Edit landed (corners/quarter/outputBlob) — the original blob is untouched. */
-  async function savePage(page) {
-    const db = await openDB();
-    const t = db.transaction(["pages"], "readwrite");
-    t.objectStore("pages").put(pageRecord(page));
-    await txDone(t);
+  /** An edit landed (corners/rotation/output) — the original blob is untouched. */
+  function savePage(page) {
+    return runTransaction([PAGE_STORE], "readwrite", (transaction) => {
+      transaction.objectStore(PAGE_STORE).put(pageRecord(page));
+    });
   }
 
-  /** Persist the current page order (call after add/remove/reorder). */
-  async function saveOrder(pages) {
-    const db = await openDB();
-    const t = db.transaction(["meta"], "readwrite");
-    t.objectStore("meta").put({ key: "order", ids: pages.map((p) => p.id) });
-    await txDone(t);
+  /** Persists the current page order (call after add/remove/reorder). */
+  function saveOrder(pages) {
+    return runTransaction([META_STORE], "readwrite", (transaction) => {
+      transaction.objectStore(META_STORE).put({
+        key: ORDER_KEY, ids: pages.map((page) => page.id),
+      });
+    });
   }
 
-  async function removePage(id) {
-    const db = await openDB();
-    const t = db.transaction(["blobs", "pages"], "readwrite");
-    t.objectStore("blobs").delete(id);
-    t.objectStore("pages").delete(id);
-    await txDone(t);
+  function removePage(id) {
+    return runTransaction([BLOB_STORE, PAGE_STORE], "readwrite", (transaction) => {
+      transaction.objectStore(BLOB_STORE).delete(id);
+      transaction.objectStore(PAGE_STORE).delete(id);
+    });
   }
 
-  async function clear() {
-    const db = await openDB();
-    const t = db.transaction(["blobs", "pages", "meta"], "readwrite");
-    t.objectStore("blobs").clear();
-    t.objectStore("pages").clear();
-    t.objectStore("meta").clear();
-    await txDone(t);
+  function clear() {
+    return runTransaction(ALL_STORES, "readwrite", (transaction) => {
+      for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
+    });
   }
 
   /**
    * Loads the saved session in page order. A record is skipped unless BOTH its
-   * blob and its metadata are present, which makes partial/racing writes
+   * blob and its metadata are present, which makes partial or racing writes
    * self-healing rather than corrupting.
    * @returns Promise<Array<{id, blob, corners, quarter, outputBlob}>>
    */
-  async function loadAll() {
-    const db = await openDB();
-    const t = db.transaction(["blobs", "pages", "meta"], "readonly");
-    const [pages, blobs, orderRec] = await Promise.all([
-      reqP(t.objectStore("pages").getAll()),
-      reqP(t.objectStore("blobs").getAll()),
-      reqP(t.objectStore("meta").get("order")),
-    ]);
-    const pageById = new Map(pages.map((p) => [p.id, p]));
-    const blobById = new Map(blobs.map((b) => [b.id, b.blob]));
-    const ids = (orderRec && orderRec.ids) || pages.map((p) => p.id);
-    const out = [];
-    for (const id of ids) {
-      const p = pageById.get(id), blob = blobById.get(id);
-      if (p && blob) out.push({ id, blob, corners: p.corners, quarter: p.quarter, outputBlob: p.outputBlob });
+  function loadAll() {
+    return runTransaction(ALL_STORES, "readonly", async (transaction) => {
+      const [pageRecords, blobRecords, orderRecord] = await Promise.all([
+        requestToPromise(transaction.objectStore(PAGE_STORE).getAll()),
+        requestToPromise(transaction.objectStore(BLOB_STORE).getAll()),
+        requestToPromise(transaction.objectStore(META_STORE).get(ORDER_KEY)),
+      ]);
+      return joinRecordsInOrder(pageRecords, blobRecords, orderRecord);
+    });
+  }
+
+  function joinRecordsInOrder(pageRecords, blobRecords, orderRecord) {
+    const pageById = new Map(pageRecords.map((record) => [record.id, record]));
+    const blobById = new Map(blobRecords.map((record) => [record.id, record.blob]));
+    const orderedIds = (orderRecord && orderRecord.ids) ||
+      pageRecords.map((record) => record.id);
+
+    const restored = [];
+    for (const id of orderedIds) {
+      const page = pageById.get(id);
+      const blob = blobById.get(id);
+      if (page && blob) {
+        restored.push({
+          id, blob, corners: page.corners,
+          quarter: page.quarter, outputBlob: page.outputBlob,
+        });
+      }
     }
-    return out;
+    return restored;
+  }
+
+  /** The stored schema calls it `quarter`; the app calls it `quarterTurns`.
+   *  Renaming the stored key would orphan every already-saved session. */
+  function pageRecord(page) {
+    return {
+      id: page.id,
+      corners: page.corners,
+      quarter: page.quarterTurns,
+      outputBlob: page.outputBlob,
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // IndexedDB plumbing
+  // ---------------------------------------------------------------
+
+  function openDB() {
+    if (databasePromise) return databasePromise;
+    databasePromise = new Promise((resolve, reject) => {
+      let request;
+      try {
+        request = indexedDB.open(DB_NAME, DB_VERSION);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      request.onupgradeneeded = () => createStores(request.result);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    databasePromise.catch(() => { databasePromise = null; }); // allow a later retry
+    return databasePromise;
+  }
+
+  function createStores(database) {
+    for (const storeName of ALL_STORES) {
+      if (database.objectStoreNames.contains(storeName)) continue;
+      database.createObjectStore(storeName, { keyPath: storeName === META_STORE ? "key" : "id" });
+    }
+  }
+
+  /** `work` must issue all of its requests synchronously — an IndexedDB
+   *  transaction auto-commits as soon as it goes idle. */
+  async function runTransaction(storeNames, mode, work) {
+    const database = await openDB();
+    const transaction = database.transaction(storeNames, mode);
+    const result = await work(transaction);
+    await whenTransactionCompletes(transaction);
+    return result;
+  }
+
+  function requestToPromise(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function whenTransactionCompletes(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  }
+
+  function detectIndexedDBSupport() {
+    try {
+      return Boolean(self.indexedDB);
+    } catch (error) {
+      return false; // some privacy modes throw on the mere property access
+    }
   }
 
   window.Store = {
-    available: (function () { try { return !!self.indexedDB; } catch (e) { return false; } })(),
+    isAvailable: detectIndexedDBSupport(),
     addPage, savePage, saveOrder, removePage, clear, loadAll,
   };
 })();

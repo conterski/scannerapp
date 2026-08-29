@@ -1,553 +1,50 @@
-/* app.js — state, photo input (EXIF-safe decode), page list UI, reordering,
- * and wiring between Detect / Editor / Exporter.
+/* app.js — orchestration: the add-photos pipeline, the editor navigation loop,
+ * the capture hand-off, export wiring and session restore. Image work lives in
+ * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
+ * warp in ScanRenderer, persistence in Store.
  */
 (function () {
   "use strict";
 
-  // Keep decoded images bounded so iOS Safari doesn't run out of canvas
-  // memory with many 12 MP photos.
-  const MAX_DIM = 2500;
+  // Bounds decoded photos so iOS Safari doesn't run out of canvas memory with
+  // many 12 MP originals. Standard-quality scans are capped at the same size,
+  // which makes the output cap a no-op unless Compact is on.
+  const DECODE_MAX_EDGE = 2500;
 
-  // "Compact scans" storage mode (off by default, persisted). Compact trades
-  // resolution/quality for much smaller saved files: output scans render at a
-  // lower cap + quality, and stored originals are re-encoded at low quality
-  // (kept at full resolution so their crop coordinates stay valid).
-  const OUTPUT = {
-    standard: { maxDim: MAX_DIM, quality: 0.92 },
-    compact:  { maxDim: 1600, quality: 0.72 },
-  };
-  const COMPACT_ORIGINAL_QUALITY = 0.6; // re-encode quality for stored originals
-  const COMPACT_KEY = "scannerapp:compact";
-  let compact = false;
-  function loadCompact() { try { compact = localStorage.getItem(COMPACT_KEY) === "1"; } catch (e) {} }
-  function saveCompact() { try { localStorage.setItem(COMPACT_KEY, compact ? "1" : "0"); } catch (e) {} }
-  function outputProfile() { return compact ? OUTPUT.compact : OUTPUT.standard; }
+  const STATUS_MESSAGE_MS = 6000;
 
-  /** @type {Array<{id:number, blob:Blob, corners:Object, quarter:number,
-   *  outputBlob:Blob, outputURL:string}>} */
+  /** @type {Array<{id:number, blob:Blob, corners:Object, quarterTurns:number,
+   *  outputBlob:Blob, outputURL:string, renderedSig:string}>}
+   *  Stored as `quarter` on disk — Store's page record maps the name. */
   const pages = [];
-  let nextId = 1;
-  let dragSrcIndex = -1;
-  let selectMode = false;
-  const selectedIds = new Set(); // page.id — stable across re-renders
+  let nextPageId = 1;
 
   const $ = (id) => document.getElementById(id);
 
   // ---------------------------------------------------------------
-  // Image decoding (EXIF orientation applied, downscaled)
+  // Startup
   // ---------------------------------------------------------------
 
-  /** Decodes an image blob into a canvas ≤ MAX_DIM, EXIF orientation applied. */
-  async function decodeNormalized(blob) {
-    let source;
-    try {
-      source = await createImageBitmap(blob, { imageOrientation: "from-image" });
-    } catch (e) {
-      // Fallback: <img> decode — browsers apply EXIF orientation to <img>.
-      source = await new Promise((resolve, reject) => {
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not decode image")); };
-        img.src = url;
-      });
-    }
-    const w = source.naturalWidth || source.width;
-    const h = source.naturalHeight || source.height;
-    const scale = Math.min(1, MAX_DIM / Math.max(w, h));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(w * scale));
-    canvas.height = Math.max(1, Math.round(h * scale));
-    canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
-    source.close?.();
-    return canvas;
-  }
-
-  function canvasToJpeg(canvas, quality) {
-    return new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("JPEG encoding failed"))),
-        "image/jpeg", quality != null ? quality : Exporter.JPEG_QUALITY);
+  document.addEventListener("DOMContentLoaded", async () => {
+    Editor.init();
+    ScanQuality.loadPersistedSetting();
+    $("compactCheck").checked = ScanQuality.isEnabled();
+    PageListView.init({
+      onEditPage: editPage,
+      onDeletePage: deletePage,
+      onMovePage: movePage,
+      onDeleteSelected: deleteSelectedPages,
+      onClearAll: clearAllPages,
+      onSelectModeChanged: renderPageList,
     });
-  }
+    wirePhotoInputs();
+    wireQualityToggle();
+    wireExportControls();
+    await restoreSavedSession(); // repopulate pages before the first paint
+    renderPageList();
+  });
 
-  // ---------------------------------------------------------------
-  // Decode cache + neighbor prefetch — the slow part of opening a page
-  // is decoding its full-res photo, so during an editing session we keep
-  // the current page and its two neighbors decoded and ready. Bounded to
-  // 3 large canvases so iOS Safari's canvas memory stays comfortable.
-  // ---------------------------------------------------------------
-
-  const sourceCache = new Map(); // page.id -> { promise, canvas|null, error|null }
-
-  function getSourceEntry(page) {
-    let e = sourceCache.get(page.id);
-    if (e) {
-      sourceCache.delete(page.id);   // refresh LRU order
-      sourceCache.set(page.id, e);
-      return e;
-    }
-    e = { promise: null, canvas: null, error: null };
-    e.promise = decodeNormalized(page.blob).then(
-      (cv) => { e.canvas = cv; return cv; },
-      (err) => { e.error = err; throw err; });
-    e.promise.catch(() => {}); // prefetched neighbors are never awaited
-    sourceCache.set(page.id, e);
-    return e;
-  }
-
-  function getSource(page) { return getSourceEntry(page).promise; }
-
-  /** Keeps only pages adjacent to `center` decoded; prefetches those. */
-  function primeSources(center) {
-    const keep = new Set();
-    for (const d of [0, 1, -1]) {
-      const j = center + d;
-      if (j >= 0 && j < pages.length) { keep.add(pages[j].id); getSourceEntry(pages[j]); }
-    }
-    for (const id of [...sourceCache.keys()]) {
-      if (!keep.has(id)) sourceCache.delete(id); // canvas is GC'd once unreferenced
-    }
-  }
-
-  function clearSourceCache() { sourceCache.clear(); }
-
-  // Background renders in flight (page edits regenerated off the critical
-  // path). Export waits on these so it never bundles a stale page.
-  const inFlightRenders = new Set();
-  function trackRender(p) {
-    inFlightRenders.add(p);
-    p.finally(() => inFlightRenders.delete(p));
-    return p;
-  }
-  function whenRendersSettle() { return Promise.allSettled([...inFlightRenders]); }
-
-  // Fire-and-forget persistence: never let a storage hiccup break the app.
-  function persist(op) {
-    if (Store && Store.available) op.catch((e) => console.warn("Persist failed:", e));
-  }
-  function persistOrder() { persist(Store.saveOrder(pages)); }
-
-  // Signature of a page's geometry — lets us skip a re-warp when nothing
-  // actually changed (e.g. paging through scans to review them).
-  function renderSig(page) {
-    const c = page.corners;
-    return JSON.stringify([c.tl, c.tr, c.br, c.bl, page.quarter]);
-  }
-
-  // ---------------------------------------------------------------
-  // Page lifecycle
-  // ---------------------------------------------------------------
-
-  async function addFiles(fileList) {
-    const files = Array.from(fileList).filter((f) => f.type.startsWith("image/") || f.name);
-    if (!files.length) return;
-    showBusy(`Processing 1 / ${files.length}…`);
-    setStatus("Loading OpenCV…");
-    // Pipelined: detection in the worker is the long pole, so the next
-    // photo's decode and the previous page's warp+encode run on the main
-    // thread while the worker detects — their cost hides almost entirely.
-    const safeDecode = (f) => decodeNormalized(f).catch((err) => err);
-    const renders = [];
-    try {
-      await Detect.ensureOpenCV();
-      setStatus("");
-      let nextDecode = safeDecode(files[0]);
-      for (let i = 0; i < files.length; i++) {
-        showBusy(`Processing ${i + 1} / ${files.length}…`);
-        const source = await nextDecode;
-        if (i + 1 < files.length) nextDecode = safeDecode(files[i + 1]);
-        try {
-          if (source instanceof Error) throw source;
-          const corners = await Detect.detectCorners(source);
-          // Compact mode stores a re-encoded (smaller) original; standard keeps
-          // the raw file. Resolution is unchanged either way, so the detected
-          // corners stay valid against the stored blob.
-          const storedBlob = compact
-            ? await canvasToJpeg(source, COMPACT_ORIGINAL_QUALITY)
-            : files[i];
-          const page = {
-            id: nextId++,
-            blob: storedBlob,
-            corners,
-            quarter: 0,
-            outputBlob: null,
-            outputURL: null,
-          };
-          pages.push(page);
-          renders.push(regenerateOutput(page, source).then(() => {
-            persist(Store.addPage(page)); // blob + rendered output survive reload
-            renderList();
-          }, (err) => {
-            console.error("Failed to render page:", err);
-            const at = pages.indexOf(page);
-            if (at >= 0) pages.splice(at, 1);
-            renderList();
-            alert(`Couldn't process "${files[i].name || "photo"}": ${err.message}`);
-          }));
-        } catch (err) {
-          console.error("Failed to add photo:", err);
-          alert(`Couldn't process "${files[i].name || "photo"}": ${err.message}`);
-        }
-      }
-      await Promise.all(renders);
-      persistOrder();
-    } catch (err) {
-      console.error(err);
-      setStatus("");
-      alert("Couldn't load the scanner engine (OpenCV). Check your connection and try again.");
-    } finally {
-      hideBusy();
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Rapid capture: the in-page camera (CaptureUI) runs the whole session and
-  // hands back the shots in one go; detection is the slow step, so it never
-  // runs between shots.
-  // ---------------------------------------------------------------
-
-  /** Opens the in-page camera. Must be called straight from a user gesture —
-   *  both getUserMedia and the native-input fallback require one. */
-  function startCapture(cameraInput) {
-    if (!CameraStream.isSupported()) { cameraInput.click(); return; }
-    CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
-      .then((files) => { if (files.length) addFiles(files); });
-  }
-
-  const renderSeq = new Map(); // page.id -> latest render token
-
-  /** Re-runs the render pipeline for a page and refreshes its JPEG output.
-   *  Guards against a newer edit landing while this one is mid-flight. */
-  async function regenerateOutput(page, sourceCanvas) {
-    const seq = (renderSeq.get(page.id) || 0) + 1;
-    renderSeq.set(page.id, seq);
-    const source = sourceCanvas || (await getSource(page));
-    const prof = outputProfile();
-    const result = await Editor.renderScan(source, page.corners, page.quarter, { maxDim: prof.maxDim });
-    if (renderSeq.get(page.id) !== seq) return; // superseded by a newer edit
-    const blob = await canvasToJpeg(result, prof.quality);
-    if (renderSeq.get(page.id) !== seq) return;
-    if (page.outputURL) URL.revokeObjectURL(page.outputURL);
-    page.outputBlob = blob;
-    page.outputURL = URL.createObjectURL(blob);
-    page.renderedSig = renderSig(page);
-  }
-
-  async function editPage(index) {
-    // The editor's ◀/▶ page arrows loop here: navigating applies the current
-    // page's edits (same as Done) and opens the adjacent page. Indices are
-    // stable mid-session — the list UI is hidden while the editor is open.
-    //
-    // Navigation is kept seamless: neighbor photos are pre-decoded, the page
-    // you leave is re-rendered in the background (no blocking overlay), and
-    // the next page opens instantly from cache.
-    let i = index;
-    $("listToolbar").hidden = true; // header actions don't apply while editing
-    try {
-      while (true) {
-        const page = pages[i];
-        primeSources(i); // decode this page + its neighbors ahead of time
-        const entry = getSourceEntry(page);
-        let source = entry.canvas;
-        if (!source) {
-          // Not decoded yet (first open or a fast miss) — wait, with a spinner.
-          showBusy("Opening…");
-          try {
-            source = await entry.promise;
-            await Detect.ensureOpenCV();
-          } catch (err) {
-            hideBusy();
-            alert("Couldn't open this page: " + err.message);
-            return;
-          }
-          hideBusy();
-        }
-        const result = await Editor.open(source, page,
-          { hasPrev: i > 0, hasNext: i < pages.length - 1 });
-        if (!result) return;
-        page.corners = result.corners;
-        page.quarter = result.quarter;
-        // Skip the warp entirely when nothing changed (e.g. paging through to
-        // review scans); otherwise render off the critical path and persist.
-        if (!page.outputBlob || page.renderedSig !== renderSig(page)) {
-          trackRender(
-            regenerateOutput(page, source).then(
-              () => { refreshThumb(page); persist(Store.savePage(page)); },
-              (err) => console.error("Rendering failed:", err)));
-        }
-        if (!result.nav) return;
-        i += result.nav;
-      }
-    } finally {
-      clearSourceCache();
-      renderList();
-    }
-  }
-
-  /** Swaps just one page's thumbnail in place — no full grid rebuild. */
-  function refreshThumb(page) {
-    if (!page.outputURL) return;
-    const img = $("pageGrid").querySelector(`img[data-page-id="${page.id}"]`);
-    if (img) img.src = page.outputURL;
-  }
-
-  function deletePage(index) {
-    const page = pages[index];
-    if (!confirm(`Delete page ${index + 1}?`)) return;
-    if (page.outputURL) URL.revokeObjectURL(page.outputURL);
-    pages.splice(index, 1);
-    persist(Store.removePage(page.id));
-    persistOrder();
-    renderList();
-  }
-
-  function movePage(from, to) {
-    if (to < 0 || to >= pages.length || from === to) return;
-    const [p] = pages.splice(from, 1);
-    pages.splice(to, 0, p);
-    persistOrder();
-    renderList();
-  }
-
-  // ---------------------------------------------------------------
-  // Select mode (bulk delete) and clear all
-  // ---------------------------------------------------------------
-
-  function enterSelectMode() {
-    selectMode = true;
-    selectedIds.clear();
-    renderList();
-  }
-
-  function exitSelectMode() {
-    selectMode = false;
-    selectedIds.clear();
-    renderList();
-  }
-
-  function updateSelectBar() {
-    const n = selectedIds.size;
-    const btn = $("deleteSelectedBtn");
-    btn.textContent = `Delete (${n})`;
-    btn.disabled = n === 0;
-  }
-
-  function toggleSelected(page, card) {
-    // Direct class toggle keeps taps instant — no re-render per selection.
-    if (selectedIds.has(page.id)) {
-      selectedIds.delete(page.id);
-      card.classList.remove("selected");
-    } else {
-      selectedIds.add(page.id);
-      card.classList.add("selected");
-    }
-    updateSelectBar();
-  }
-
-  function deleteSelected() {
-    const n = selectedIds.size;
-    if (!n || !confirm(`Delete ${n} page${n === 1 ? "" : "s"}?`)) return;
-    for (let i = pages.length - 1; i >= 0; i--) {
-      if (selectedIds.has(pages[i].id)) {
-        if (pages[i].outputURL) URL.revokeObjectURL(pages[i].outputURL);
-        persist(Store.removePage(pages[i].id));
-        pages.splice(i, 1);
-      }
-    }
-    persistOrder();
-    exitSelectMode();
-  }
-
-  function clearAll() {
-    if (!pages.length ||
-        !confirm(`Delete all ${pages.length} pages? This can't be undone.`)) return;
-    for (const p of pages) {
-      if (p.outputURL) URL.revokeObjectURL(p.outputURL);
-    }
-    pages.length = 0;
-    selectMode = false;
-    selectedIds.clear();
-    persist(Store.clear());
-    renderList();
-  }
-
-  // ---------------------------------------------------------------
-  // Compact scans (storage saver)
-  // ---------------------------------------------------------------
-
-  /** Switches compact mode; turning it on re-compresses existing scans. */
-  async function setCompact(on) {
-    if (on === compact) return;
-    // Turning it on is lossy for existing scans and can't be undone — confirm.
-    if (on && pages.length &&
-        !confirm(`Compress ${pages.length} saved scan${pages.length === 1 ? "" : "s"} to save space?\n\nThis lowers their resolution and can't be undone.`)) {
-      return;
-    }
-    compact = on;
-    saveCompact();
-    if (on && pages.length) await recompressAll();
-  }
-
-  /** Re-encodes every page's original + output at the current mode. */
-  async function recompressAll() {
-    showBusy("Compressing…");
-    try {
-      await Detect.ensureOpenCV();
-      for (let idx = 0; idx < pages.length; idx++) {
-        const page = pages[idx];
-        showBusy(`Compressing ${idx + 1} / ${pages.length}…`);
-        const source = await decodeNormalized(page.blob);
-        page.blob = await canvasToJpeg(source, COMPACT_ORIGINAL_QUALITY);
-        await regenerateOutput(page, source); // uses the compact profile now
-        persist(Store.addPage(page)); // blob changed → rewrite the full record
-      }
-      persistOrder();
-    } catch (err) {
-      console.error("Compression failed:", err);
-      alert("Couldn't compress scans: " + err.message);
-    } finally {
-      hideBusy();
-      renderList();
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Page list UI
-  // ---------------------------------------------------------------
-
-  function renderList() {
-    const grid = $("pageGrid");
-    grid.innerHTML = "";
-    $("emptyState").hidden = pages.length > 0;
-    $("pdfBtn").disabled = pages.length === 0;
-    $("photosBtn").disabled = pages.length === 0;
-    $("listToolbar").hidden = pages.length === 0 || selectMode;
-    $("addBar").hidden = selectMode;
-    $("exportBar").hidden = selectMode;
-    $("exportHint").hidden = selectMode;
-    $("compactToggle").hidden = selectMode;
-    $("selectBar").hidden = !selectMode;
-    if (selectMode) updateSelectBar();
-
-    pages.forEach((page, i) => {
-      const card = document.createElement("div");
-      card.className = "page-card";
-      card.dataset.index = String(i);
-
-      const thumbWrap = document.createElement("div");
-      thumbWrap.className = "page-thumb-wrap";
-      const img = document.createElement("img");
-      img.dataset.pageId = String(page.id);
-      if (page.outputURL) img.src = page.outputURL; // render may still be in flight
-      img.alt = `Page ${i + 1}`;
-      img.draggable = false;
-      thumbWrap.appendChild(img);
-
-      const num = document.createElement("span");
-      num.className = "page-num";
-      num.textContent = String(i + 1);
-
-      if (selectMode) {
-        thumbWrap.addEventListener("click", () => toggleSelected(page, card));
-        card.classList.toggle("selected", selectedIds.has(page.id));
-        const badge = document.createElement("span");
-        badge.className = "select-badge";
-        badge.textContent = "✓";
-        card.append(thumbWrap, num, badge);
-        grid.appendChild(card);
-        return;
-      }
-
-      thumbWrap.addEventListener("click", () => editPage(i));
-
-      const grip = document.createElement("div");
-      grip.className = "drag-grip";
-      grip.textContent = "≡";
-      attachDrag(grip, card);
-
-      const actions = document.createElement("div");
-      actions.className = "page-actions";
-      const left = document.createElement("button");
-      left.textContent = "◀";
-      left.disabled = i === 0;
-      left.title = "Move earlier";
-      left.addEventListener("click", () => movePage(i, i - 1));
-      const right = document.createElement("button");
-      right.textContent = "▶";
-      right.disabled = i === pages.length - 1;
-      right.title = "Move later";
-      right.addEventListener("click", () => movePage(i, i + 1));
-      const edit = document.createElement("button");
-      edit.textContent = "✂️";
-      edit.title = "Adjust crop";
-      edit.addEventListener("click", () => editPage(i));
-      const del = document.createElement("button");
-      del.className = "del-btn";
-      del.textContent = "🗑";
-      del.title = "Delete page";
-      del.addEventListener("click", () => deletePage(i));
-      actions.append(left, edit, right, del);
-
-      card.append(thumbWrap, num, grip, actions);
-      grid.appendChild(card);
-    });
-  }
-
-  /** Press-drag reordering via the grip (works with touch). */
-  function attachDrag(grip, card) {
-    grip.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      grip.setPointerCapture(e.pointerId);
-      dragSrcIndex = parseInt(card.dataset.index, 10);
-      card.classList.add("drag-source");
-      let overCard = null;
-
-      const onMove = (ev) => {
-        const el = document.elementFromPoint(ev.clientX, ev.clientY);
-        const target = el && el.closest(".page-card");
-        if (overCard && overCard !== target) overCard.classList.remove("drag-over");
-        overCard = target && target !== card ? target : null;
-        if (overCard) overCard.classList.add("drag-over");
-      };
-      const onUp = () => {
-        grip.removeEventListener("pointermove", onMove);
-        grip.removeEventListener("pointerup", onUp);
-        grip.removeEventListener("pointercancel", onUp);
-        card.classList.remove("drag-source");
-        if (overCard) {
-          const to = parseInt(overCard.dataset.index, 10);
-          overCard.classList.remove("drag-over");
-          movePage(dragSrcIndex, to);
-        }
-        dragSrcIndex = -1;
-      };
-      grip.addEventListener("pointermove", onMove);
-      grip.addEventListener("pointerup", onUp);
-      grip.addEventListener("pointercancel", onUp);
-    });
-  }
-
-  // ---------------------------------------------------------------
-  // Busy / status helpers
-  // ---------------------------------------------------------------
-
-  function showBusy(text) {
-    $("busyText").textContent = text;
-    $("busyOverlay").hidden = false;
-  }
-  function hideBusy() { $("busyOverlay").hidden = true; }
-  function setStatus(text) {
-    const el = $("statusText");
-    el.textContent = text;
-    el.hidden = !text;
-  }
-
-  // ---------------------------------------------------------------
-  // Wiring
-  // ---------------------------------------------------------------
-
-  function initInputs() {
+  function wirePhotoInputs() {
     const fileInput = $("fileInput");
     const cameraInput = $("cameraInput");
     $("addPhotosBtn").addEventListener("click", () => fileInput.click());
@@ -559,108 +56,506 @@
     // Fallback path only (no in-page camera): the system camera returns one
     // photo per trip, with its own Retake/Use Photo confirmation.
     cameraInput.addEventListener("change", () => {
-      const file = cameraInput.files[0]; // grab ref BEFORE resetting value
+      const file = cameraInput.files[0]; // grab the ref BEFORE resetting value
       cameraInput.value = "";
       if (file) addFiles([file]);
     });
+  }
 
-    $("selectBtn").addEventListener("click", enterSelectMode);
-    $("cancelSelectBtn").addEventListener("click", exitSelectMode);
-    $("deleteSelectedBtn").addEventListener("click", deleteSelected);
-    $("clearAllBtn").addEventListener("click", clearAll);
-
-    $("compactCheck").addEventListener("change", async (e) => {
-      await setCompact(e.target.checked);
-      e.target.checked = compact; // reflect the real state (reverts on cancel)
+  function wireQualityToggle() {
+    $("compactCheck").addEventListener("change", async (event) => {
+      await setCompactEnabled(event.target.checked);
+      event.target.checked = ScanQuality.isEnabled(); // reverts if cancelled
     });
+  }
 
-    $("pdfBtn").addEventListener("click", async () => {
-      showBusy("Building PDF…");
-      try {
-        await whenRendersSettle(); // don't bundle a page still rendering
-        await Exporter.exportPdf(pages.map((p) => p.outputBlob));
-      } catch (err) {
-        alert("PDF export failed: " + err.message);
-      } finally {
-        hideBusy();
-      }
-    });
+  function wireExportControls() {
+    $("pdfBtn").addEventListener("click", () => runExport({
+      busyText: "Building PDF…",
+      exportBlobs: () => Exporter.exportPdf(outputBlobs()),
+      failurePrefix: "PDF export failed: ",
+    }));
+    $("photosBtn").addEventListener("click", () => runExport({
+      busyText: "Preparing images…",
+      exportBlobs: () => Exporter.exportPhotos(outputBlobs()),
+      failurePrefix: "Export failed: ",
+      onDownloadFallback: () =>
+        showTemporaryStatus("Sharing unavailable — images downloaded in order instead."),
+    }));
 
-    $("photosBtn").addEventListener("click", async () => {
-      showBusy("Preparing images…");
-      try {
-        await whenRendersSettle(); // don't bundle a page still rendering
-        const res = await Exporter.exportPhotos(pages.map((p) => p.outputBlob));
-        if (res.method === "download") {
-          setStatus("Sharing unavailable — images downloaded in order instead.");
-          setTimeout(() => setStatus(""), 6000);
-        }
-      } catch (err) {
-        alert("Export failed: " + err.message);
-      } finally {
-        hideBusy();
-      }
-    });
-
-    // Hide the iOS hint on platforms without file sharing.
     if (!(navigator.canShare && navigator.share)) {
-      $("exportHint").textContent = "Sharing isn't available in this browser — images will download in page order instead.";
+      $("exportHint").textContent =
+        "Sharing isn't available in this browser — images will download in page order instead.";
     }
   }
 
   // ---------------------------------------------------------------
-  // Session restore — rebuild pages saved to IndexedDB on a prior visit.
+  // Adding photos
   // ---------------------------------------------------------------
 
-  async function restoreSession() {
-    if (!Store || !Store.available) return;
-    let saved = [];
+  async function addFiles(fileList) {
+    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || file.name);
+    if (!files.length) return;
+    showBusy(`Processing 1 / ${files.length}…`);
+    setStatus("Loading OpenCV…");
     try {
-      saved = await Store.loadAll();
-    } catch (e) {
-      console.warn("Session restore failed:", e);
+      await Detect.ensureOpenCV();
+    } catch (error) {
+      console.error(error);
+      setStatus("");
+      hideBusy();
+      alert("Couldn't load the scanner engine (OpenCV). Check your connection and try again.");
       return;
     }
-    let maxId = 0;
-    for (const s of saved) {
-      if (!s.corners) continue;
-      const page = {
-        id: s.id,
-        blob: s.blob,
-        corners: s.corners,
-        quarter: s.quarter || 0,
-        outputBlob: s.outputBlob || null,
-        outputURL: s.outputBlob ? URL.createObjectURL(s.outputBlob) : null,
-      };
-      if (page.outputBlob) page.renderedSig = renderSig(page);
-      pages.push(page);
-      if (s.id > maxId) maxId = s.id;
-    }
-    if (pages.length) nextId = maxId + 1;
-
-    // Best-effort: re-render any page whose output never got persisted
-    // (e.g. the tab was closed mid-render on the prior visit).
-    const missing = pages.filter((p) => !p.outputBlob);
-    if (missing.length) {
-      Detect.ensureOpenCV().then(() => {
-        for (const page of missing) {
-          trackRender(regenerateOutput(page).then(
-            () => { refreshThumb(page); persist(Store.savePage(page)); },
-            (err) => console.error("Re-render failed:", err)));
-        }
-      }).catch((e) => console.warn(e));
+    setStatus("");
+    try {
+      await addPhotoBatch(files);
+      persistPageOrder();
+    } finally {
+      hideBusy();
     }
   }
 
-  document.addEventListener("DOMContentLoaded", async () => {
-    Editor.init();
-    loadCompact();
-    $("compactCheck").checked = compact;
-    initInputs();
-    await restoreSession(); // repopulate pages before the first paint
-    renderList();
-  });
+  /** Pipelined: detection in the worker is the long pole, so the next photo's
+   *  decode and the previous page's warp+encode run on the main thread while
+   *  the worker detects — their cost hides almost entirely. */
+  async function addPhotoBatch(files) {
+    const renders = [];
+    let nextDecode = decodeOrCaptureError(files[0]);
+    for (let index = 0; index < files.length; index++) {
+      showBusy(`Processing ${index + 1} / ${files.length}…`);
+      const decoded = await nextDecode;
+      if (index + 1 < files.length) nextDecode = decodeOrCaptureError(files[index + 1]);
+      const page = await detectAndRegisterPage(files[index], decoded);
+      if (page) renders.push(renderAndPersistNewPage(page, decoded, files[index]));
+    }
+    await Promise.all(renders);
+  }
+
+  /** A decode failure travels with the queue rather than rejecting it, so one
+   *  unreadable photo cannot abort the whole batch. */
+  function decodeOrCaptureError(file) {
+    return ImageUtils.decodeImageToCanvas(file, DECODE_MAX_EDGE).catch((error) => error);
+  }
+
+  async function detectAndRegisterPage(file, decoded) {
+    try {
+      if (decoded instanceof Error) throw decoded;
+      const corners = await Detect.detectCorners(decoded);
+      const page = createPage(await blobToStore(file, decoded), corners);
+      pages.push(page);
+      return page;
+    } catch (error) {
+      reportPhotoFailure(file, error);
+      return null;
+    }
+  }
+
+  /** Deliberately not awaited by the batch loop: the render overlaps the next
+   *  photo's detection, which is what makes the pipeline fast. */
+  function renderAndPersistNewPage(page, decoded, file) {
+    return regenerateOutput(page, decoded).then(() => {
+      persist(Store.addPage(page)); // blob + rendered output survive a reload
+      renderPageList();
+    }, (error) => {
+      discardPage(page);
+      reportPhotoFailure(file, error);
+    });
+  }
+
+  /** Compact stores a re-encoded (smaller) original; standard keeps the raw
+   *  file. Resolution is unchanged either way, so the detected corners stay
+   *  valid against the stored blob. */
+  function blobToStore(file, decoded) {
+    if (!ScanQuality.isEnabled()) return Promise.resolve(file);
+    return ImageUtils.encodeCanvasToJpeg(decoded, ScanQuality.COMPACT_ORIGINAL_QUALITY);
+  }
+
+  function createPage(blob, corners) {
+    return {
+      id: nextPageId++,
+      blob,
+      corners,
+      quarterTurns: 0,
+      outputBlob: null,
+      outputURL: null,
+    };
+  }
+
+  function reportPhotoFailure(file, error) {
+    console.error("Couldn't add photo:", error);
+    alert(`Couldn't process "${file.name || "photo"}": ${error.message}`);
+  }
+
+  // ---------------------------------------------------------------
+  // Rapid capture: the in-page camera (CaptureUI) runs the whole session and
+  // hands back the shots in one go, so detection never runs between shots.
+  // ---------------------------------------------------------------
+
+  /** Must be called straight from a user gesture — both getUserMedia and the
+   *  native-input fallback require one. */
+  function startCapture(cameraInput) {
+    if (!CameraStream.isSupported()) { cameraInput.click(); return; }
+    CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
+      .then((files) => { if (files.length) addFiles(files); });
+  }
+
+  // ---------------------------------------------------------------
+  // Editing
+  // ---------------------------------------------------------------
+
+  /** The editor's ◀/▶ arrows loop here: navigating applies the current page's
+   *  edits (same as Done) and opens the adjacent page. Indices stay stable —
+   *  the list is hidden while the editor is open. */
+  async function editPage(startIndex) {
+    PageListView.setToolbarVisible(false); // header actions don't apply while editing
+    try {
+      let index = startIndex;
+      while (index !== null) index = await editOnePage(index);
+    } finally {
+      clearSourceCache();
+      renderPageList();
+    }
+  }
+
+  /** @returns the next index to open, or null when the session ends */
+  async function editOnePage(index) {
+    const page = pages[index];
+    primeSources(index); // decode this page and its neighbours ahead of time
+    const source = await sourceForEditing(page);
+    if (!source) return null;
+    const result = await Editor.open(source, page,
+      { hasPrev: index > 0, hasNext: index < pages.length - 1 });
+    if (!result) return null;
+    applyEditorResult(page, result, source);
+    return result.nav ? index + result.nav : null;
+  }
+
+  /** A cached decode opens instantly; only a miss shows the spinner. */
+  async function sourceForEditing(page) {
+    const entry = getSourceEntry(page);
+    if (entry.canvas) return entry.canvas;
+    showBusy("Opening…");
+    try {
+      const source = await entry.promise;
+      await Detect.ensureOpenCV();
+      hideBusy();
+      return source;
+    } catch (error) {
+      hideBusy();
+      alert("Couldn't open this page: " + error.message);
+      return null;
+    }
+  }
+
+  function applyEditorResult(page, result, source) {
+    page.corners = result.corners;
+    page.quarterTurns = result.quarterTurns;
+    // Skip the warp entirely when nothing changed (e.g. paging through to
+    // review scans); otherwise render off the critical path and persist.
+    if (page.outputBlob && page.renderedSig === renderSig(page)) return;
+    trackRender(regenerateOutput(page, source).then(
+      () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
+      (error) => console.error("Rendering failed:", error)));
+  }
+
+  // ---------------------------------------------------------------
+  // Page operations
+  // ---------------------------------------------------------------
+
+  function deletePage(index) {
+    if (!confirm(`Delete page ${index + 1}?`)) return;
+    const [page] = pages.splice(index, 1);
+    releasePageURL(page);
+    persist(Store.removePage(page.id));
+    persistPageOrder();
+    renderPageList();
+  }
+
+  function movePage(from, to) {
+    if (to < 0 || to >= pages.length || from === to) return;
+    const [page] = pages.splice(from, 1);
+    pages.splice(to, 0, page);
+    persistPageOrder();
+    renderPageList();
+  }
+
+  function deleteSelectedPages() {
+    const selectedIds = PageListView.getSelectedPageIds();
+    const selectedCount = selectedIds.size;
+    if (!selectedCount) return;
+    if (!confirm(`Delete ${selectedCount} page${selectedCount === 1 ? "" : "s"}?`)) return;
+    for (let index = pages.length - 1; index >= 0; index--) {
+      if (!selectedIds.has(pages[index].id)) continue;
+      releasePageURL(pages[index]);
+      persist(Store.removePage(pages[index].id));
+      pages.splice(index, 1);
+    }
+    persistPageOrder();
+    PageListView.exitSelectMode();
+  }
+
+  function clearAllPages() {
+    if (!pages.length) return;
+    if (!confirm(`Delete all ${pages.length} pages? This can't be undone.`)) return;
+    pages.forEach(releasePageURL);
+    pages.length = 0;
+    persist(Store.clear());
+    PageListView.exitSelectMode();
+  }
+
+  function discardPage(page) {
+    const index = pages.indexOf(page);
+    if (index >= 0) pages.splice(index, 1);
+    renderPageList();
+  }
+
+  function releasePageURL(page) {
+    if (page.outputURL) URL.revokeObjectURL(page.outputURL);
+  }
+
+  function renderPageList() { PageListView.render(pages); }
+
+  // ---------------------------------------------------------------
+  // Compact scans (storage saver)
+  // ---------------------------------------------------------------
+
+  async function setCompactEnabled(enabled) {
+    if (enabled === ScanQuality.isEnabled()) return;
+    if (enabled && !confirmLossyCompression()) return;
+    ScanQuality.setEnabled(enabled);
+    // Turning it off only changes future scans — existing ones stay compact
+    // rather than promising a restore that isn't possible.
+    if (enabled && pages.length) await recompressAllPages();
+  }
+
+  function confirmLossyCompression() {
+    if (!pages.length) return true;
+    return confirm(
+      `Compress ${pages.length} saved scan${pages.length === 1 ? "" : "s"} to save space?` +
+      `\n\nThis lowers their resolution and can't be undone.`);
+  }
+
+  async function recompressAllPages() {
+    showBusy("Compressing…");
+    try {
+      await Detect.ensureOpenCV();
+      for (let index = 0; index < pages.length; index++) {
+        showBusy(`Compressing ${index + 1} / ${pages.length}…`);
+        await recompressPage(pages[index]);
+      }
+      persistPageOrder();
+    } catch (error) {
+      console.error("Compression failed:", error);
+      alert("Couldn't compress scans: " + error.message);
+    } finally {
+      hideBusy();
+      renderPageList();
+    }
+  }
+
+  async function recompressPage(page) {
+    const source = await ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE);
+    page.blob = await ImageUtils.encodeCanvasToJpeg(source, ScanQuality.COMPACT_ORIGINAL_QUALITY);
+    await regenerateOutput(page, source);
+    persist(Store.addPage(page)); // the blob changed → rewrite the full record
+  }
+
+  // ---------------------------------------------------------------
+  // Rendering a page's output
+  // ---------------------------------------------------------------
+
+  const renderTokens = new Map(); // page.id -> latest render token
+
+  /** Re-runs the render pipeline for a page and refreshes its JPEG output.
+   *  Guards against a newer edit landing while this one is mid-flight. */
+  async function regenerateOutput(page, sourceCanvas) {
+    const token = (renderTokens.get(page.id) || 0) + 1;
+    renderTokens.set(page.id, token);
+    const source = sourceCanvas || (await getSource(page));
+    const profile = ScanQuality.currentProfile();
+    const scan = await ScanRenderer.renderScan(source, page.corners,
+      { quarterTurns: page.quarterTurns, maxDim: profile.maxDim });
+    if (renderTokens.get(page.id) !== token) return; // superseded by a newer edit
+    const blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
+    if (renderTokens.get(page.id) !== token) return;
+    releasePageURL(page);
+    page.outputBlob = blob;
+    page.outputURL = URL.createObjectURL(blob);
+    page.renderedSig = renderSig(page);
+  }
+
+  /** Signature of a page's geometry — lets us skip a re-warp when nothing
+   *  actually changed (e.g. paging through scans to review them). */
+  function renderSig(page) {
+    const { tl, tr, br, bl } = page.corners;
+    return JSON.stringify([tl, tr, br, bl, page.quarterTurns]);
+  }
+
+  // Background renders in flight (page edits regenerated off the critical
+  // path). Export waits on these so it never bundles a stale page.
+  const inFlightRenders = new Set();
+
+  function trackRender(render) {
+    inFlightRenders.add(render);
+    render.finally(() => inFlightRenders.delete(render));
+    return render;
+  }
+
+  function whenRendersSettle() { return Promise.allSettled([...inFlightRenders]); }
+
+  // ---------------------------------------------------------------
+  // Decode cache + neighbour prefetch — the slow part of opening a page is
+  // decoding its full-res photo, so during an editing session we keep the
+  // current page and its two neighbours decoded and ready. Bounded to 3 large
+  // canvases so iOS Safari's canvas memory stays comfortable.
+  // ---------------------------------------------------------------
+
+  const sourceCache = new Map(); // page.id -> { promise, canvas|null, error|null }
+
+  function getSourceEntry(page) {
+    const cached = sourceCache.get(page.id);
+    if (cached) {
+      sourceCache.delete(page.id); // refresh LRU order
+      sourceCache.set(page.id, cached);
+      return cached;
+    }
+    const entry = { promise: null, canvas: null, error: null };
+    entry.promise = ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE).then(
+      (canvas) => { entry.canvas = canvas; return canvas; },
+      (error) => { entry.error = error; throw error; });
+    markRejectionHandled(entry.promise);
+    sourceCache.set(page.id, entry);
+    return entry;
+  }
+
+  function getSource(page) { return getSourceEntry(page).promise; }
+
+  /** Keeps only pages adjacent to `center` decoded; prefetches those. */
+  function primeSources(center) {
+    const keep = new Set();
+    for (const offset of [0, 1, -1]) {
+      const index = center + offset;
+      if (index < 0 || index >= pages.length) continue;
+      keep.add(pages[index].id);
+      getSourceEntry(pages[index]);
+    }
+    for (const id of [...sourceCache.keys()]) {
+      if (!keep.has(id)) sourceCache.delete(id); // canvas is GC'd once unreferenced
+    }
+  }
+
+  function clearSourceCache() { sourceCache.clear(); }
+
+  /** A prefetched neighbour is never awaited, so its rejection has to be
+   *  marked handled or it surfaces as an unhandled promise rejection. */
+  function markRejectionHandled(promise) {
+    promise.catch(() => {});
+    return promise;
+  }
+
+  // ---------------------------------------------------------------
+  // Export
+  // ---------------------------------------------------------------
+
+  function outputBlobs() { return pages.map((page) => page.outputBlob); }
+
+  /** @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
+  async function runExport(options) {
+    showBusy(options.busyText);
+    try {
+      await whenRendersSettle(); // never bundle a page that is still rendering
+      const result = await options.exportBlobs();
+      if (result.method === "download" && options.onDownloadFallback) {
+        options.onDownloadFallback();
+      }
+    } catch (error) {
+      alert(options.failurePrefix + error.message);
+    } finally {
+      hideBusy();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------
+
+  /** Fire-and-forget: never let a storage hiccup break the app. */
+  function persist(operation) {
+    if (!Store || !Store.isAvailable) return;
+    operation.catch((error) => console.warn("Persist failed:", error));
+  }
+
+  function persistPageOrder() { persist(Store.saveOrder(pages)); }
+
+  async function restoreSavedSession() {
+    if (!Store || !Store.isAvailable) return;
+    let records = [];
+    try {
+      records = await Store.loadAll();
+    } catch (error) {
+      console.warn("Session restore failed:", error);
+      return;
+    }
+    for (const record of records) {
+      if (record.corners) pages.push(pageFromRecord(record));
+    }
+    if (pages.length) nextPageId = Math.max(...pages.map((page) => page.id)) + 1;
+    rerenderPagesMissingOutput();
+  }
+
+  function pageFromRecord(record) {
+    const page = {
+      id: record.id,
+      blob: record.blob,
+      corners: record.corners,
+      quarterTurns: record.quarter || 0,
+      outputBlob: record.outputBlob || null,
+      outputURL: record.outputBlob ? URL.createObjectURL(record.outputBlob) : null,
+    };
+    if (page.outputBlob) page.renderedSig = renderSig(page);
+    return page;
+  }
+
+  /** Best-effort: a page whose output never got persisted (the tab was closed
+   *  mid-render last visit) is re-rendered in the background. */
+  function rerenderPagesMissingOutput() {
+    const missing = pages.filter((page) => !page.outputBlob);
+    if (!missing.length) return;
+    Detect.ensureOpenCV().then(() => {
+      for (const page of missing) {
+        trackRender(regenerateOutput(page).then(
+          () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
+          (error) => console.error("Re-render failed:", error)));
+      }
+    }).catch((error) => console.warn("Couldn't re-render restored pages:", error));
+  }
+
+  // ---------------------------------------------------------------
+  // Busy / status chrome
+  // ---------------------------------------------------------------
+
+  function showBusy(text) {
+    $("busyText").textContent = text;
+    $("busyOverlay").hidden = false;
+  }
+
+  function hideBusy() { $("busyOverlay").hidden = true; }
+
+  function setStatus(text) {
+    const status = $("statusText");
+    status.textContent = text;
+    status.hidden = !text;
+  }
+
+  function showTemporaryStatus(text) {
+    setStatus(text);
+    setTimeout(() => setStatus(""), STATUS_MESSAGE_MS);
+  }
 
   // Exposed for debugging/testing.
-  window.Scanner = { pages, addFiles, startCapture, movePage, renderList, clearAll };
+  window.Scanner = {
+    pages, addFiles, startCapture, movePage,
+    renderList: renderPageList, clearAll: clearAllPages,
+  };
 })();

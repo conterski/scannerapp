@@ -173,8 +173,17 @@
       }
 
       function wire() {
+        wireShutterControls();
+        wireGalleryControls();
+        wireFallbackControls();
+      }
+
+      function wireShutterControls() {
         binder.on(els.shutterBtn, "click", shoot);
         binder.on(els.captureDoneBtn, "click", finish);
+      }
+
+      function wireGalleryControls() {
         binder.on(els.shotStrip, "click", openGallery);
         binder.on(els.galleryCloseBtn, "click", closeGallery);
         // One delegated listener for every delete button, so re-rendering the
@@ -183,6 +192,9 @@
           const btn = e.target.closest(".gallery-del");
           if (btn) deleteShot(Number(btn.dataset.shotId));
         });
+      }
+
+      function wireFallbackControls() {
         binder.on(els.captureFallbackBtn, "click", () => {
           // The native picker must open from this gesture, so hand over
           // before tearing the screen down.

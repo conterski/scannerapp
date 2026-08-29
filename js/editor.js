@@ -1,342 +1,419 @@
-/* editor.js — corner-drag editor, rotation controls, and the scan render
- * pipeline (a single perspective warp; quarter rotation is folded into the
- * corner mapping). Exposes window.Editor.
+/* editor.js — the crop editor UI: the staged photo, its four corner handles
+ * and four edge handles, the magnifier loupe, rotation controls and the live
+ * preview. The warp itself lives in ScanRenderer; this file only decides which
+ * corners to warp with. Exposes window.Editor.
  */
 (function () {
   "use strict";
 
+  const CORNER_KEYS = ["tl", "tr", "br", "bl"];
+  const QUARTER_TURNS_PER_REVOLUTION = 4;
+
+  // Stage layout: how much room the photo may take once the controls below it
+  // have been accounted for.
+  const STAGE_HORIZONTAL_MARGIN = 32;
+  const STAGE_MAX_WIDTH = 688;
+  const CONTROLS_RESERVED_HEIGHT = 330;
+  const STAGE_MIN_HEIGHT = 240;
+  const MAX_DEVICE_PIXEL_RATIO = 2; // beyond this the crispness isn't worth the memory
+
+  const PREVIEW_MAX_EDGE = 500;
+  const PREVIEW_DEBOUNCE_MS = 120;
+
+  const LOUPE_ZOOM = 3;
+  const LOUPE_BACKGROUND = "#0d0f13";
+  const LOUPE_OFFSET_LEFT = 60;
+  const LOUPE_OFFSET_ABOVE = 150;
+  const LOUPE_OFFSET_BELOW = 40;
+  const LOUPE_MIN_LEFT = -20;
+  const LOUPE_RIGHT_INSET = 100;
+  const LOUPE_FLIP_ABOVE_TOP = -30; // above this the loupe would leave the stage
+
+  // Each edge handle moves its two corners together along one axis.
+  // `opposite` maps a moving corner to the fixed corner on the far side (used
+  // to stop the edge crossing past it); `direction` −1 = must stay before that
+  // corner (top/left), +1 = must stay after it (bottom/right).
+  const EDGE_DEFINITIONS = {
+    top:    { corners: ["tl", "tr"], axis: "y", opposite: { tl: "bl", tr: "br" }, direction: -1 },
+    bottom: { corners: ["bl", "br"], axis: "y", opposite: { bl: "tl", br: "tr" }, direction: +1 },
+    left:   { corners: ["tl", "bl"], axis: "x", opposite: { tl: "tr", bl: "br" }, direction: -1 },
+    right:  { corners: ["tr", "br"], axis: "x", opposite: { tr: "tl", br: "bl" }, direction: +1 },
+  };
+  const EDGE_MIN_GAP = 8; // source-px kept between opposite edges, so the quad can't invert
+
+  const $ = (id) => document.getElementById(id);
+
+  const elements = {};
+  let session = null; // { source, corners, quarterTurns, scale, resolve, openId }
+  let previewTimer = null;
+  let isPreviewRendering = false;
+  let isPreviewStale = false;
+  let lastOpenId = 0; // bumped each open() so a stale preview never paints
+
   // ---------------------------------------------------------------
-  // Render pipeline (geometric transforms only — never any filter)
+  // Lifecycle
   // ---------------------------------------------------------------
 
-  // Which source-quad corner lands at the OUTPUT's tl/tr/br/bl for each
-  // clockwise quarter turn. Rotating the labels instead of the pixels makes
-  // the warp itself produce the rotated scan — one resample, no extra
-  // full-res canvas pass.
-  const QUARTER_MAP = [
-    null,
-    { tl: "bl", tr: "tl", br: "tr", bl: "br" }, // 90° CW
-    { tl: "br", tr: "bl", br: "tl", bl: "tr" }, // 180°
-    { tl: "tr", tr: "br", br: "bl", bl: "tl" }, // 90° CCW
-  ];
+  function init() {
+    cacheElements();
+    wireHandles();
+    wireControls();
+    window.addEventListener("resize", () => { if (session) layoutStage(); });
+  }
 
-  /** Full pipeline: source canvas + edits → final scan canvas.
-   *  opts.maxDim (optional) caps the output's longest side (Compact mode). */
-  async function renderScan(sourceCanvas, corners, quarter, opts) {
-    const q = ((quarter % 4) + 4) % 4;
-    const map = QUARTER_MAP[q];
-    const c = map
-      ? { tl: corners[map.tl], tr: corners[map.tr],
-          br: corners[map.br], bl: corners[map.bl] }
-      : corners;
-    return Detect.warpPerspective(sourceCanvas, c, opts && opts.maxDim);
+  /**
+   * Opens the editor on one page.
+   * @param source        full-res normalized canvas of the original photo
+   * @param settings      { corners, quarterTurns }
+   * @param navigation    { hasPrev, hasNext } — enables the ◀/▶ page buttons
+   * @returns Promise<null | {corners, quarterTurns, nav}> — null on cancel;
+   *          nav is -1/+1 when a page arrow closed the editor, else 0
+   */
+  function open(source, settings, navigation) {
+    const pageNavigation = navigation || { hasPrev: false, hasNext: false };
+    return new Promise((resolve) => {
+      session = {
+        source,
+        corners: cloneCorners(settings.corners),
+        quarterTurns: settings.quarterTurns || 0,
+        scale: 1,
+        resolve,
+        openId: ++lastOpenId,
+      };
+      $("editPrevBtn").disabled = !pageNavigation.hasPrev;
+      $("editNextBtn").disabled = !pageNavigation.hasNext;
+
+      $("listView").hidden = true;
+      elements.view.hidden = false;
+      layoutStage();
+      renderPreviewNow();
+    });
+  }
+
+  function close(shouldApply, navDelta) {
+    clearTimeout(previewTimer);
+    // When navigating to an adjacent page the app immediately re-opens the
+    // editor, so don't flip back to the list — that flashes it between pages.
+    if (!(shouldApply && navDelta)) {
+      elements.view.hidden = true;
+      $("listView").hidden = false;
+    }
+    const resolveEditor = session.resolve;
+    const result = shouldApply
+      ? { corners: session.corners, quarterTurns: session.quarterTurns, nav: navDelta || 0 }
+      : null;
+    session = null;
+    resolveEditor(result);
+  }
+
+  function cloneCorners(corners) {
+    return JSON.parse(JSON.stringify(corners));
   }
 
   // ---------------------------------------------------------------
-  // Editor UI
+  // Wiring
   // ---------------------------------------------------------------
 
-  const els = {};
-  let state = null; // { source, corners, quarter, scale, resolve, seq }
-  let previewTimer = null;
-  let previewBusy = false;
-  let previewDirty = false;
-  let openSeq = 0;  // bumped each open() so a stale preview never paints
+  function cacheElements() {
+    elements.view = $("editorView");
+    elements.stage = $("editorStage");
+    elements.canvas = $("editorCanvas");
+    elements.overlay = $("quadOverlay");
+    elements.loupe = $("loupe");
+    elements.loupeCanvas = $("loupeCanvas");
+    elements.preview = $("previewCanvas");
+    elements.cornerHandles = {};
+    elements.edgeHandles = {};
+  }
 
-  // Each edge handle moves its two corners together along one axis.
-  // `opp` maps a moving corner to the fixed corner on the far side (used to
-  // stop the edge crossing past it); `sign` −1 = must stay before that corner
-  // (top/left), +1 = must stay after it (bottom/right).
-  const EDGE_DEF = {
-    top:    { keys: ["tl", "tr"], axis: "y", opp: { tl: "bl", tr: "br" }, sign: -1 },
-    bottom: { keys: ["bl", "br"], axis: "y", opp: { bl: "tl", br: "tr" }, sign: +1 },
-    left:   { keys: ["tl", "bl"], axis: "x", opp: { tl: "tr", bl: "br" }, sign: -1 },
-    right:  { keys: ["tr", "br"], axis: "x", opp: { tr: "tl", br: "bl" }, sign: +1 },
-  };
-  const EDGE_MARGIN = 8; // min source-px gap kept between opposite edges
+  function wireHandles() {
+    document.querySelectorAll(".corner-handle").forEach((handle) => {
+      elements.cornerHandles[handle.dataset.corner] = handle;
+      attachCornerDrag(handle);
+    });
+    document.querySelectorAll(".edge-handle").forEach((handle) => {
+      elements.edgeHandles[handle.dataset.edge] = handle;
+      attachEdgeDrag(handle);
+    });
+  }
 
-  function $(id) { return document.getElementById(id); }
-
-  function init() {
-    els.view = $("editorView");
-    els.stage = $("editorStage");
-    els.canvas = $("editorCanvas");
-    els.overlay = $("quadOverlay");
-    els.loupe = $("loupe");
-    els.loupeCanvas = $("loupeCanvas");
-    els.preview = $("previewCanvas");
-    els.handles = {};
-    document.querySelectorAll(".corner-handle").forEach((h) => {
-      els.handles[h.dataset.corner] = h;
-      attachHandleDrag(h);
-    });
-    els.edgeHandles = {};
-    document.querySelectorAll(".edge-handle").forEach((h) => {
-      els.edgeHandles[h.dataset.edge] = h;
-      attachEdgeDrag(h);
-    });
-
-    $("rotLeftBtn").addEventListener("click", () => { state.quarter = (state.quarter + 3) % 4; schedulePreview(); });
-    $("rotRightBtn").addEventListener("click", () => { state.quarter = (state.quarter + 1) % 4; schedulePreview(); });
-    $("fullCropBtn").addEventListener("click", () => {
-      state.corners = Detect.fullImageCorners(state.source.width, state.source.height);
-      positionHandles(); schedulePreview();
-    });
-    $("redetectBtn").addEventListener("click", async () => {
-      state.corners = await Detect.detectCorners(state.source);
-      positionHandles(); schedulePreview();
-    });
+  function wireControls() {
+    $("rotLeftBtn").addEventListener("click", () => rotateBy(-1));
+    $("rotRightBtn").addEventListener("click", () => rotateBy(+1));
+    $("fullCropBtn").addEventListener("click", resetCornersToFullImage);
+    $("redetectBtn").addEventListener("click", redetectCorners);
     $("cancelEditBtn").addEventListener("click", () => close(false));
     $("doneEditBtn").addEventListener("click", () => close(true));
     $("editPrevBtn").addEventListener("click", () => close(true, -1));
     $("editNextBtn").addEventListener("click", () => close(true, +1));
   }
 
-  /**
-   * Opens the editor.
-   * @param source   full-res normalized canvas of the original photo
-   * @param settings { corners, quarter }
-   * @param nav      { hasPrev, hasNext } — enables the ◀/▶ page buttons
-   * @returns Promise<null | {corners, quarter, nav}> — null on cancel;
-   *          nav is -1/+1 when a page arrow closed the editor, else 0
-   */
-  function open(source, settings, nav) {
-    nav = nav || { hasPrev: false, hasNext: false };
-    return new Promise((resolve) => {
-      state = {
-        source,
-        corners: JSON.parse(JSON.stringify(settings.corners)),
-        quarter: settings.quarter || 0,
-        scale: 1,
-        resolve,
-        seq: ++openSeq,
-      };
-      $("editPrevBtn").disabled = !nav.hasPrev;
-      $("editNextBtn").disabled = !nav.hasNext;
-
-      $("listView").hidden = true;
-      els.view.hidden = false;
-      layoutStage();
-      renderPreviewNow();
-    });
+  function rotateBy(quarterTurnDelta) {
+    const turns = session.quarterTurns + quarterTurnDelta + QUARTER_TURNS_PER_REVOLUTION;
+    session.quarterTurns = turns % QUARTER_TURNS_PER_REVOLUTION;
+    schedulePreview();
   }
 
-  function close(apply, navDelta) {
-    clearTimeout(previewTimer);
-    // When navigating to an adjacent page the app immediately re-opens the
-    // editor, so don't flip back to the list — that flashes it between pages.
-    if (!(apply && navDelta)) {
-      els.view.hidden = true;
-      $("listView").hidden = false;
-    }
-    const r = state.resolve;
-    const result = apply
-      ? { corners: state.corners, quarter: state.quarter, nav: navDelta || 0 }
-      : null;
-    state = null;
-    r(result);
+  function resetCornersToFullImage() {
+    session.corners = Detect.fullImageCorners(session.source.width, session.source.height);
+    positionHandles();
+    schedulePreview();
   }
+
+  async function redetectCorners() {
+    session.corners = await Detect.detectCorners(session.source);
+    positionHandles();
+    schedulePreview();
+  }
+
+  // ---------------------------------------------------------------
+  // Stage layout and overlay
+  // ---------------------------------------------------------------
 
   /** Fits the source image into the viewport and draws it. */
   function layoutStage() {
-    const src = state.source;
-    const maxW = Math.min(window.innerWidth - 32, 688);
-    const maxH = Math.max(240, window.innerHeight - 330);
-    const scale = Math.min(maxW / src.width, maxH / src.height, 1);
-    state.scale = scale;
-    const cw = Math.round(src.width * scale);
-    const ch = Math.round(src.height * scale);
+    const source = session.source;
+    const availableWidth = Math.min(window.innerWidth - STAGE_HORIZONTAL_MARGIN, STAGE_MAX_WIDTH);
+    const availableHeight = Math.max(STAGE_MIN_HEIGHT, window.innerHeight - CONTROLS_RESERVED_HEIGHT);
+    const scale = Math.min(availableWidth / source.width, availableHeight / source.height, 1);
+    session.scale = scale;
 
-    // Draw at devicePixelRatio for a crisp display.
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    els.canvas.width = Math.round(cw * dpr);
-    els.canvas.height = Math.round(ch * dpr);
-    els.canvas.style.width = cw + "px";
-    els.canvas.style.height = ch + "px";
-    els.stage.style.width = cw + "px";
-    els.stage.style.height = ch + "px";
-    const ctx = els.canvas.getContext("2d");
-    ctx.drawImage(src, 0, 0, els.canvas.width, els.canvas.height);
+    const stageWidth = Math.round(source.width * scale);
+    const stageHeight = Math.round(source.height * scale);
+    elements.stage.style.width = stageWidth + "px";
+    elements.stage.style.height = stageHeight + "px";
+    drawStageCanvas(stageWidth, stageHeight);
     positionHandles();
   }
 
+  /** Draws at devicePixelRatio so the staged photo stays crisp. */
+  function drawStageCanvas(stageWidth, stageHeight) {
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_DEVICE_PIXEL_RATIO);
+    const canvas = elements.canvas;
+    canvas.width = Math.round(stageWidth * pixelRatio);
+    canvas.height = Math.round(stageHeight * pixelRatio);
+    canvas.style.width = stageWidth + "px";
+    canvas.style.height = stageHeight + "px";
+    canvas.getContext("2d").drawImage(session.source, 0, 0, canvas.width, canvas.height);
+  }
+
   function positionHandles() {
-    const s = state.scale;
-    for (const key of ["tl", "tr", "br", "bl"]) {
-      const p = state.corners[key];
-      const h = els.handles[key];
-      h.style.left = p.x * s + "px";
-      h.style.top = p.y * s + "px";
+    const scale = session.scale;
+    for (const key of CORNER_KEYS) {
+      const corner = session.corners[key];
+      const handle = elements.cornerHandles[key];
+      handle.style.left = corner.x * scale + "px";
+      handle.style.top = corner.y * scale + "px";
     }
-    for (const edge in EDGE_DEF) {
-      const [ka, kb] = EDGE_DEF[edge].keys;
-      const a = state.corners[ka], b = state.corners[kb];
-      const h = els.edgeHandles[edge];
-      h.style.left = ((a.x + b.x) / 2) * s + "px";
-      h.style.top = ((a.y + b.y) / 2) * s + "px";
+    for (const edge in EDGE_DEFINITIONS) {
+      const midpoint = edgeMidpoint(EDGE_DEFINITIONS[edge]);
+      const handle = elements.edgeHandles[edge];
+      handle.style.left = midpoint.x * scale + "px";
+      handle.style.top = midpoint.y * scale + "px";
     }
     drawQuad();
   }
 
-  function drawQuad() {
-    const s = state.scale;
-    const c = state.corners;
-    const pts = [c.tl, c.tr, c.br, c.bl]
-      .map((p) => `${p.x * s},${p.y * s}`)
-      .join(" ");
-    els.overlay.innerHTML = `<polygon points="${pts}"/>`;
+  function edgeMidpoint(definition) {
+    const [first, second] = definition.corners.map((key) => session.corners[key]);
+    return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
   }
 
-  function attachHandleDrag(handle) {
-    handle.addEventListener("pointerdown", (e) => {
-      if (!state) return;
-      e.preventDefault();
-      handle.setPointerCapture(e.pointerId);
-      handle.classList.add("active");
-      els.loupe.hidden = false;
-      moveHandle(handle, e);
+  function drawQuad() {
+    const scale = session.scale;
+    const points = CORNER_KEYS
+      .map((key) => session.corners[key])
+      .map((corner) => `${corner.x * scale},${corner.y * scale}`)
+      .join(" ");
+    elements.overlay.innerHTML = `<polygon points="${points}"/>`;
+  }
 
-      const onMove = (ev) => moveHandle(handle, ev);
-      const onUp = () => {
-        handle.classList.remove("active");
-        els.loupe.hidden = true;
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-        handle.removeEventListener("pointercancel", onUp);
-        schedulePreview();
-      };
-      handle.addEventListener("pointermove", onMove);
-      handle.addEventListener("pointerup", onUp);
-      handle.addEventListener("pointercancel", onUp);
+  // ---------------------------------------------------------------
+  // Corner handles
+  // ---------------------------------------------------------------
+
+  function attachCornerDrag(handle) {
+    const moveCorner = (event) => {
+      const point = pointerToSource(event);
+      session.corners[handle.dataset.corner] = point;
+      positionHandles();
+      updateLoupe(point.x, point.y);
+    };
+    PointerDrag.startPointerDrag(handle, {
+      canStart: () => Boolean(session),
+      onDragStart: (event) => { beginHandleDrag(handle); moveCorner(event); },
+      onDragMove: moveCorner,
+      onDragEnd: () => endHandleDrag(handle),
     });
   }
 
-  function moveHandle(handle, e) {
-    const rect = els.canvas.getBoundingClientRect();
-    const s = state.scale;
-    const x = Math.min(Math.max((e.clientX - rect.left) / s, 0), state.source.width);
-    const y = Math.min(Math.max((e.clientY - rect.top) / s, 0), state.source.height);
-    state.corners[handle.dataset.corner] = { x, y };
-    positionHandles();
-    updateLoupe(x, y);
+  function pointerToSource(event) {
+    const bounds = elements.canvas.getBoundingClientRect();
+    const scale = session.scale;
+    return {
+      x: clamp((event.clientX - bounds.left) / scale, 0, session.source.width),
+      y: clamp((event.clientY - bounds.top) / scale, 0, session.source.height),
+    };
   }
 
-  /** Clamps a rigid edge shift to the image and short of the opposite edge. */
-  function clampEdgeDelta(def, start, d) {
-    const max = def.axis === "x" ? state.source.width : state.source.height;
-    let lo = -Infinity, hi = Infinity;
-    for (const k of def.keys) {
-      const v0 = start[k][def.axis];
-      const opp = state.corners[def.opp[k]][def.axis];
-      lo = Math.max(lo, -v0);          // stay within the image (≥ 0)
-      hi = Math.min(hi, max - v0);     // stay within the image (≤ max)
-      if (def.sign < 0) hi = Math.min(hi, opp - EDGE_MARGIN - v0); // before far edge
-      else lo = Math.max(lo, opp + EDGE_MARGIN - v0);              // after far edge
-    }
-    return Math.min(Math.max(d, lo), hi);
+  function clamp(value, low, high) {
+    return Math.min(Math.max(value, low), high);
   }
+
+  function beginHandleDrag(handle) {
+    handle.classList.add("active");
+    elements.loupe.hidden = false;
+  }
+
+  function endHandleDrag(handle) {
+    handle.classList.remove("active");
+    elements.loupe.hidden = true;
+    schedulePreview();
+  }
+
+  // ---------------------------------------------------------------
+  // Edge handles — a rigid shift of the edge's two corners along one axis
+  // ---------------------------------------------------------------
 
   function attachEdgeDrag(handle) {
-    const def = EDGE_DEF[handle.dataset.edge];
-    handle.addEventListener("pointerdown", (e) => {
-      if (!state) return;
-      e.preventDefault();
-      handle.setPointerCapture(e.pointerId);
-      handle.classList.add("active");
-      els.loupe.hidden = false;
-      const origin = { x: e.clientX, y: e.clientY };
-      const start = {};
-      for (const k of def.keys) start[k] = { x: state.corners[k].x, y: state.corners[k].y };
+    const definition = EDGE_DEFINITIONS[handle.dataset.edge];
+    let pointerOrigin = null;
+    let cornersAtDragStart = null;
 
-      const onMove = (ev) => {
-        const s = state.scale;
-        const raw = def.axis === "x"
-          ? (ev.clientX - origin.x) / s
-          : (ev.clientY - origin.y) / s;
-        const d = clampEdgeDelta(def, start, raw);
-        for (const k of def.keys) {
-          state.corners[k] = def.axis === "x"
-            ? { x: start[k].x + d, y: start[k].y }
-            : { x: start[k].x, y: start[k].y + d };
+    const moveEdge = (event) => {
+      const requestedShift = definition.axis === "x"
+        ? (event.clientX - pointerOrigin.x) / session.scale
+        : (event.clientY - pointerOrigin.y) / session.scale;
+      applyEdgeShift(definition, cornersAtDragStart,
+        clampEdgeShift(definition, cornersAtDragStart, requestedShift));
+      positionHandles();
+      const midpoint = edgeMidpoint(definition);
+      updateLoupe(midpoint.x, midpoint.y);
+    };
+
+    PointerDrag.startPointerDrag(handle, {
+      canStart: () => Boolean(session),
+      onDragStart: (event) => {
+        beginHandleDrag(handle);
+        pointerOrigin = { x: event.clientX, y: event.clientY };
+        cornersAtDragStart = {};
+        for (const key of definition.corners) {
+          cornersAtDragStart[key] = { x: session.corners[key].x, y: session.corners[key].y };
         }
-        positionHandles();
-        const a = state.corners[def.keys[0]], b = state.corners[def.keys[1]];
-        updateLoupe((a.x + b.x) / 2, (a.y + b.y) / 2);
-      };
-      onMove(e);
-
-      const onUp = () => {
-        handle.classList.remove("active");
-        els.loupe.hidden = true;
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-        handle.removeEventListener("pointercancel", onUp);
-        schedulePreview();
-      };
-      handle.addEventListener("pointermove", onMove);
-      handle.addEventListener("pointerup", onUp);
-      handle.addEventListener("pointercancel", onUp);
+        moveEdge(event);
+      },
+      onDragMove: moveEdge,
+      onDragEnd: () => endHandleDrag(handle),
     });
   }
 
-  function updateLoupe(imgX, imgY) {
-    const s = state.scale;
-    const lc = els.loupeCanvas;
-    const ctx = lc.getContext("2d");
-    const zoom = 3;
-    const half = lc.width / (2 * zoom);
-    ctx.fillStyle = "#0d0f13";
-    ctx.fillRect(0, 0, lc.width, lc.height);
-    ctx.drawImage(state.source,
-      imgX - half, imgY - half, half * 2, half * 2,
-      0, 0, lc.width, lc.height);
-
-    // Place the loupe above the handle; flip below if near the top edge.
-    const px = imgX * s, py = imgY * s;
-    const stageW = parseFloat(els.stage.style.width);
-    let lx = px - 60, ly = py - 150;
-    lx = Math.min(Math.max(lx, -20), stageW - 100);
-    if (ly < -30) ly = py + 40;
-    els.loupe.style.left = lx + "px";
-    els.loupe.style.top = ly + "px";
+  /** Keeps a rigid edge shift inside the image and short of the opposite edge. */
+  function clampEdgeShift(definition, startCorners, requestedShift) {
+    const axisLimit = definition.axis === "x" ? session.source.width : session.source.height;
+    let lowestShift = -Infinity;
+    let highestShift = Infinity;
+    for (const key of definition.corners) {
+      const startValue = startCorners[key][definition.axis];
+      const oppositeValue = session.corners[definition.opposite[key]][definition.axis];
+      lowestShift = Math.max(lowestShift, -startValue);
+      highestShift = Math.min(highestShift, axisLimit - startValue);
+      if (definition.direction < 0) {
+        highestShift = Math.min(highestShift, oppositeValue - EDGE_MIN_GAP - startValue);
+      } else {
+        lowestShift = Math.max(lowestShift, oppositeValue + EDGE_MIN_GAP - startValue);
+      }
+    }
+    return clamp(requestedShift, lowestShift, highestShift);
   }
 
-  /** Debounced, non-overlapping preview regeneration (downscaled warp). */
-  function schedulePreview() {
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(runPreview, 120);
-  }
-
-  /** Regenerate the preview immediately (used on open/nav — no debounce lag). */
-  function renderPreviewNow() {
-    clearTimeout(previewTimer);
-    runPreview();
-  }
-
-  async function runPreview() {
-    if (!state) return;
-    if (previewBusy) { previewDirty = true; return; }
-    previewBusy = true;
-    const seq = state.seq;
-    try {
-      const { canvas: small, scale } = Detect.scaledCanvas(state.source, 500);
-      const sc = (p) => ({ x: p.x * scale, y: p.y * scale });
-      const corners = { tl: sc(state.corners.tl), tr: sc(state.corners.tr), br: sc(state.corners.br), bl: sc(state.corners.bl) };
-      const result = await renderScan(small, corners, state.quarter);
-      // A page nav (or close) may have superseded this warp while it ran.
-      if (!state || state.seq !== seq) return;
-      els.preview.width = result.width;
-      els.preview.height = result.height;
-      els.preview.getContext("2d").drawImage(result, 0, 0);
-    } catch (err) {
-      console.warn("Preview failed:", err);
-    } finally {
-      previewBusy = false;
-      if (previewDirty) { previewDirty = false; if (state) schedulePreview(); }
+  function applyEdgeShift(definition, startCorners, shift) {
+    for (const key of definition.corners) {
+      const start = startCorners[key];
+      session.corners[key] = definition.axis === "x"
+        ? { x: start.x + shift, y: start.y }
+        : { x: start.x, y: start.y + shift };
     }
   }
 
-  window.addEventListener("resize", () => { if (state) layoutStage(); });
+  // ---------------------------------------------------------------
+  // Magnifier loupe
+  // ---------------------------------------------------------------
 
-  window.Editor = { init, open, renderScan };
+  function updateLoupe(sourceX, sourceY) {
+    drawLoupe(sourceX, sourceY);
+    positionLoupe(sourceX * session.scale, sourceY * session.scale);
+  }
+
+  function drawLoupe(sourceX, sourceY) {
+    const canvas = elements.loupeCanvas;
+    const context = canvas.getContext("2d");
+    const halfWindow = canvas.width / (2 * LOUPE_ZOOM);
+    context.fillStyle = LOUPE_BACKGROUND;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(session.source,
+      sourceX - halfWindow, sourceY - halfWindow, halfWindow * 2, halfWindow * 2,
+      0, 0, canvas.width, canvas.height);
+  }
+
+  /** Sits above the handle, flipping below when it would leave the stage. */
+  function positionLoupe(stageX, stageY) {
+    const stageWidth = parseFloat(elements.stage.style.width);
+    const left = clamp(stageX - LOUPE_OFFSET_LEFT, LOUPE_MIN_LEFT, stageWidth - LOUPE_RIGHT_INSET);
+    const above = stageY - LOUPE_OFFSET_ABOVE;
+    const top = above < LOUPE_FLIP_ABOVE_TOP ? stageY + LOUPE_OFFSET_BELOW : above;
+    elements.loupe.style.left = left + "px";
+    elements.loupe.style.top = top + "px";
+  }
+
+  // ---------------------------------------------------------------
+  // Live preview
+  // ---------------------------------------------------------------
+
+  function schedulePreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(renderPreview, PREVIEW_DEBOUNCE_MS);
+  }
+
+  /** Used on open and page nav, where the debounce would read as lag. */
+  function renderPreviewNow() {
+    clearTimeout(previewTimer);
+    renderPreview();
+  }
+
+  async function renderPreview() {
+    if (!session) return;
+    if (isPreviewRendering) { isPreviewStale = true; return; }
+    isPreviewRendering = true;
+    const openId = session.openId;
+    try {
+      const scan = await renderPreviewScan();
+      if (session && session.openId === openId) paintPreview(scan);
+    } catch (error) {
+      console.warn("Preview failed:", error);
+    } finally {
+      isPreviewRendering = false;
+      if (isPreviewStale) {
+        isPreviewStale = false;
+        if (session) schedulePreview();
+      }
+    }
+  }
+
+  function renderPreviewScan() {
+    const { canvas, scale } = ImageUtils.createScaledCanvas(session.source, PREVIEW_MAX_EDGE);
+    const scaled = {};
+    for (const key of CORNER_KEYS) {
+      const corner = session.corners[key];
+      scaled[key] = { x: corner.x * scale, y: corner.y * scale };
+    }
+    return ScanRenderer.renderScan(canvas, scaled, { quarterTurns: session.quarterTurns });
+  }
+
+  function paintPreview(scan) {
+    elements.preview.width = scan.width;
+    elements.preview.height = scan.height;
+    elements.preview.getContext("2d").drawImage(scan, 0, 0);
+  }
+
+  window.Editor = { init, open };
 })();
