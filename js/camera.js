@@ -23,6 +23,10 @@
     audio: false,
   };
 
+  // A stream can open and then never deliver a frame. Without a deadline the
+  // shutter stays disabled and the camera light stays on, with no error shown.
+  const FIRST_FRAME_TIMEOUT_MS = 10000;
+
   const MESSAGES = {
     insecure: "The camera needs a secure (HTTPS) connection.",
     unsupported: "This browser can’t open the camera inside the page.",
@@ -31,6 +35,7 @@
     NotFoundError: "No camera was found on this device.",
     OverconstrainedError: "No camera matched the requested settings.",
     NotReadableError: "The camera is already in use by another app.",
+    NoFrameError: "The camera opened but never sent a picture. Try again, or add photos from the library instead.",
   };
   const DEFAULT_MESSAGE = "The camera couldn’t be started.";
 
@@ -60,12 +65,19 @@
    *  drawImage would copy an empty frame. */
   function whenSized(video) {
     if (video.videoWidth && video.videoHeight) return Promise.resolve();
-    return new Promise((resolve) => {
-      const onReady = () => {
+    return new Promise((resolve, reject) => {
+      const stopWaiting = () => {
+        clearTimeout(deadline);
         video.removeEventListener("loadedmetadata", onReady);
         video.removeEventListener("loadeddata", onReady);
-        resolve();
       };
+      const onReady = () => { stopWaiting(); resolve(); };
+      const deadline = setTimeout(() => {
+        stopWaiting();
+        const error = new Error("The camera never delivered a frame");
+        error.name = "NoFrameError";
+        reject(error);
+      }, FIRST_FRAME_TIMEOUT_MS);
       video.addEventListener("loadedmetadata", onReady);
       video.addEventListener("loadeddata", onReady);
     });
@@ -104,7 +116,9 @@
         // The autoplay attribute covers the case where this play() is refused,
         // so its rejection is deliberately ignored rather than surfaced.
         markRejectionHandled(video.play());
-        return whenSized(video);
+        // A start that fails must not leave the camera running behind the
+        // error panel.
+        return whenSized(video).catch((error) => { stop(video); throw error; });
       });
     }
 

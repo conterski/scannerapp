@@ -13,6 +13,10 @@
 
   const STATUS_MESSAGE_MS = 6000;
 
+  // Some pickers report no MIME type at all, so an extension is the fallback.
+  // A type that IS present and isn't an image must still lose.
+  const IMAGE_FILE_EXTENSIONS = /\.(jpe?g|png|gif|bmp|webp|heic|heif|avif|tiff?)$/i;
+
   /** @type {Array<{id:number, blob:Blob, corners:Object, quarterTurns:number,
    *  outputBlob:Blob, outputURL:string, renderedSig:string}>}
    *  Stored as `quarter` on disk — Store's page record maps the name. */
@@ -47,8 +51,14 @@
   function wirePhotoInputs() {
     const fileInput = $("fileInput");
     const cameraInput = $("cameraInput");
-    $("addPhotosBtn").addEventListener("click", () => fileInput.click());
-    $("cameraBtn").addEventListener("click", () => startCapture(cameraInput));
+    $("addPhotosBtn").addEventListener("click", () => {
+      preloadScannerEngine();
+      fileInput.click();
+    });
+    $("cameraBtn").addEventListener("click", () => {
+      preloadScannerEngine();
+      startCapture(cameraInput);
+    });
     fileInput.addEventListener("change", () => {
       addFiles(fileInput.files);
       fileInput.value = "";
@@ -93,9 +103,22 @@
   // Adding photos
   // ---------------------------------------------------------------
 
+  function isImageFile(file) {
+    if (file.type) return file.type.startsWith("image/");
+    return IMAGE_FILE_EXTENSIONS.test(file.name || "");
+  }
+
   async function addFiles(fileList) {
-    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || file.name);
-    if (!files.length) return;
+    const selected = Array.from(fileList);
+    const files = selected.filter(isImageFile);
+    if (!files.length) {
+      if (selected.length) {
+        showTemporaryStatus(selected.length === 1
+          ? "That file isn't an image — nothing was added."
+          : "Those files aren't images — nothing was added.");
+      }
+      return;
+    }
     showBusy(`Processing 1 / ${files.length}…`);
     setStatus("Loading OpenCV…");
     try {
@@ -191,6 +214,13 @@
   // Rapid capture: the in-page camera (CaptureUI) runs the whole session and
   // hands back the shots in one go, so detection never runs between shots.
   // ---------------------------------------------------------------
+
+  /** Starts OpenCV's ~11 MB load the moment the user reaches for a photo, so
+   *  the batch doesn't wait on the compile after Done. Fire-and-forget: a
+   *  failure here surfaces later, where it is already handled. */
+  function preloadScannerEngine() {
+    markRejectionHandled(Detect.ensureOpenCV());
+  }
 
   /** Must be called straight from a user gesture — both getUserMedia and the
    *  native-input fallback require one. */
@@ -402,7 +432,14 @@
     return render;
   }
 
-  function whenRendersSettle() { return Promise.allSettled([...inFlightRenders]); }
+  /** Loops rather than awaiting one snapshot: a render scheduled while we were
+   *  waiting (session restore finishing its OpenCV load, say) must be caught
+   *  too, or export bundles a page whose output is still null. */
+  async function whenRendersSettle() {
+    while (inFlightRenders.size) {
+      await Promise.allSettled([...inFlightRenders]);
+    }
+  }
 
   // ---------------------------------------------------------------
   // Decode cache + neighbour prefetch — the slow part of opening a page is
@@ -522,13 +559,14 @@
   function rerenderPagesMissingOutput() {
     const missing = pages.filter((page) => !page.outputBlob);
     if (!missing.length) return;
-    Detect.ensureOpenCV().then(() => {
-      for (const page of missing) {
-        trackRender(regenerateOutput(page).then(
-          () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
-          (error) => console.error("Re-render failed:", error)));
-      }
-    }).catch((error) => console.warn("Couldn't re-render restored pages:", error));
+    // Tracked as ONE promise spanning the OpenCV load as well as the renders,
+    // so an export during restore waits instead of seeing an empty in-flight
+    // set and bundling pages that have no output yet.
+    trackRender(Detect.ensureOpenCV().then(
+      () => Promise.allSettled(missing.map((page) => regenerateOutput(page).then(
+        () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
+        (error) => console.error("Re-render failed:", error)))),
+      (error) => console.warn("Couldn't re-render restored pages:", error)));
   }
 
   // ---------------------------------------------------------------

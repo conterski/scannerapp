@@ -39,6 +39,9 @@
       const failure = new Error(event.message || "Scan worker failed");
       pendingCalls.forEach((call) => call.reject(failure));
       pendingCalls.clear();
+      // Drop the dead worker AND its ~11 MB OpenCV heap. Without terminate()
+      // that heap survives until GC, on the device least able to spare it.
+      worker.terminate();
       worker = null;
       openCVReady = null; // a later call rebuilds the worker from scratch
     };
