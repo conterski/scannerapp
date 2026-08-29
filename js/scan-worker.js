@@ -154,12 +154,16 @@ function addSaturationCandidates(pipeline) {
 
 /** Straight segments from the Canny mask BEFORE dilation — partial document
  *  edges (behind occluders, soft seams) become usable side candidates even
- *  when no mask isolates a full quad from them. */
-function harvestHoughSegments(pipeline) {
+ *  when no mask isolates a full quad from them.
+ *
+ *  HoughLinesP is ~20% of a detection but only three sides in the whole test
+ *  set actually use its output, so this runs lazily: `edges` is kept aside and
+ *  the transform happens only if edge fusion asks for segments. */
+function harvestHoughSegments(pipeline, edges) {
   const segments = [];
   const linesMat = new cv.Mat();
   try {
-    cv.HoughLinesP(pipeline.bin, linesMat, 1, Math.PI / 180, HOUGH_THRESHOLD,
+    cv.HoughLinesP(edges, linesMat, 1, Math.PI / 180, HOUGH_THRESHOLD,
       HOUGH_MIN_LENGTH_FRACTION * Math.min(pipeline.width, pipeline.height), HOUGH_MAX_GAP);
     for (let i = 0; i < Math.min(linesMat.rows, MAX_HOUGH_SEGMENTS); i++) {
       segments.push({
@@ -177,14 +181,24 @@ function harvestHoughSegments(pipeline) {
  *  catches low-contrast paper edges in shadow. */
 function addCannyCandidates(pipeline) {
   cv.Canny(pipeline.gray, pipeline.bin, CANNY_LOW, CANNY_HIGH);
-  const segments = harvestHoughSegments(pipeline);
+  // Keep the undilated edges so the Hough transform can run later, if at all.
+  pipeline.cannyEdges = new cv.Mat();
+  pipeline.bin.copyTo(pipeline.cannyEdges);
   cv.dilate(pipeline.bin, pipeline.bin, pipeline.kDilate);
   harvestMask(pipeline, "canny");
 
   cv.Canny(pipeline.gray, pipeline.bin, CANNY_SOFT_LOW, CANNY_SOFT_HIGH);
   cv.dilate(pipeline.bin, pipeline.bin, pipeline.kDilate);
   harvestMask(pipeline, "canny-soft");
-  return segments;
+}
+
+/** Memoized: the transform runs at most once per detection, and only if asked. */
+function createSegmentSource(pipeline) {
+  let segments = null;
+  return () => {
+    if (!segments) segments = harvestHoughSegments(pipeline, pipeline.cannyEdges);
+    return segments;
+  };
 }
 
 function collectCandidates(pipeline) {
@@ -196,7 +210,7 @@ function collectCandidates(pipeline) {
   addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
   addAdaptiveCandidates(pipeline);
   addSaturationCandidates(pipeline);
-  return addCannyCandidates(pipeline);
+  addCannyCandidates(pipeline);
 }
 
 function selectBestCandidate(candidates) {
@@ -352,12 +366,12 @@ function applyHullCutNet(corners, options) {
 // ------------------------------------------------------------------
 
 /** Fusion, refinement, snap and the anti-cut net, in that order. */
-function buildCorners(best, pipeline, segments, trace) {
+function buildCorners(best, pipeline, getSegments, trace) {
   const { gray, width, height, candidates } = pipeline;
   const locked = lockedSidesFor(best, pipeline.reuniteLock);
   const fuseMeta = {};
   const fused = fuseQuad(candidates, best,
-    { gray, width, height, segments, trace, lockedTypes: locked, meta: fuseMeta });
+    { gray, width, height, getSegments, trace, lockedTypes: locked, meta: fuseMeta });
 
   let corners = fused || refineQuadEdges(best.corners, best.hullPts, width, height);
   corners = snapSidesOutward(pipeline, corners, locked);
@@ -407,9 +421,11 @@ function detect({ width, height, buffer, debug }) {
     candidates: [],
     splitDiag: debug ? [] : null,
     reuniteLock: null,
+    cannyEdges: null,
   };
   try {
-    const segments = collectCandidates(pipeline);
+    collectCandidates(pipeline);
+    const getSegments = createSegmentSource(pipeline);
     const candidates = pipeline.candidates;
     const trace = debug ? [] : null;
 
@@ -422,20 +438,23 @@ function detect({ width, height, buffer, debug }) {
     let corners = null;
     let fusedOk = false;
     if (best) {
-      const built = buildCorners(best, pipeline, segments, trace);
+      const built = buildCorners(best, pipeline, getSegments, trace);
       corners = built.corners;
       fusedOk = built.fusedOk;
     }
 
     if (!debug) return { corners };
+    // Debug callers expect the segment list regardless of whether fusion
+    // needed it, so force it here rather than reporting a lazy null.
     return {
-      corners, fusedOk, trace, segments,
+      corners, fusedOk, trace, segments: getSegments(),
       splitDiag: pipeline.splitDiag,
       debug: debugPayload(candidates),
     };
   } finally {
     pipeline.img.delete(); pipeline.gray.delete(); pipeline.bin.delete();
     pipeline.kOpen.delete(); pipeline.kClose.delete(); pipeline.kDilate.delete();
+    if (pipeline.cannyEdges) pipeline.cannyEdges.delete();
   }
 }
 

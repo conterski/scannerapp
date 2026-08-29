@@ -108,10 +108,10 @@ function walkOutward(pick, options, context) {
 
 /** Hough segments aligned to a direction, gated by contrast and the
  *  continues-beyond veto. */
-function houghSideOptions(type, referenceDirection, context) {
+function houghSideOptions(segments, type, referenceDirection, context) {
   const options = [];
   const tolerance = (HOUGH_ANGLE_TOLERANCE_DEG * Math.PI) / 180;
-  for (const segment of context.segments || []) {
+  for (const segment of segments) {
     const segmentDirection = Math.atan2(segment.b.y - segment.a.y, segment.b.x - segment.a.x);
     if (angleBetweenDirections(segmentDirection, referenceDirection) > tolerance) continue;
     const contrast = sideContrast(context, segment.a, segment.b);
@@ -189,12 +189,15 @@ function fallbackSideChoice(options, bestOption, context) {
 }
 
 function extendWithHoughSegments(pick, type, context) {
-  if (!context.segments || !context.segments.length) return { pick, houghExt: false };
+  // Contrast first: this is what lets the Hough transform stay unevaluated for
+  // the many sides that already sit on a strong edge.
   if (pick.contrast >= HOUGH_APPLIES_BELOW_CONTRAST) return { pick, houghExt: false };
+  const segments = context.getSegments ? context.getSegments() : [];
+  if (!segments.length) return { pick, houghExt: false };
 
   const reference = Math.atan2(pick.s.b.y - pick.s.a.y, pick.s.b.x - pick.s.a.x);
   const maxReach = HOUGH_MAX_REACH_FRACTION * Math.min(context.width, context.height);
-  const extras = houghSideOptions(type, reference, context)
+  const extras = houghSideOptions(segments, type, reference, context)
     .filter((option) => option.outward > pick.outward &&
       option.outward - pick.outward <= maxReach)
     .sort((a, b) => a.outward - b.outward);
@@ -276,18 +279,19 @@ function quadFromChosenSides(chosen, width, height) {
 
 /**
  * Fuses the four document edges from across candidates.
- * @param options { gray, width, height, segments, trace, lockedTypes, meta } —
- *                `meta` is an out-param receiving `contributors` and `rules`
+ * @param options { gray, width, height, getSegments, trace, lockedTypes, meta }
+ *                `getSegments` is called only if a side needs a Hough
+ *                extension; `meta` receives `contributors` and `rules`
  */
 function fuseQuad(candidates, best, options) {
-  const { gray, width, height, segments, trace, lockedTypes, meta } = options;
+  const { gray, width, height, getSegments, trace, lockedTypes, meta } = options;
   const contributors = collectContributors(candidates, best);
   if (!contributors.length) return null;
   if (meta) meta.contributors = contributors;
 
   const centroid = centroidOf(best.corners);
   const context = {
-    gray, width, height, segments, centroid,
+    gray, width, height, getSegments, centroid,
     interiorRef: interiorGrayReference({ gray, width, height }, centroid),
   };
 
