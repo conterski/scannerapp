@@ -139,7 +139,8 @@ function quadFromHull(hull) {
 // Scoring
 // ------------------------------------------------------------------
 
-function countBorderCorners(quad, width, height) {
+function countBorderCorners(quad, bounds) {
+  const { width, height } = bounds;
   const margin = BORDER_MARGIN_FRACTION * Math.min(width, height);
   let onBorder = 0;
   for (const point of quadPoints(quad)) {
@@ -154,10 +155,12 @@ function countBorderCorners(quad, width, height) {
  * better — a solid, well-fitting quad away from the frame edges wins over a
  * huge sloppy background quad.
  */
-function quadMetrics(quad, contourArea, hullArea, width, height) {
+/** @param areas { contour, hull } — the source contour's area and its hull's */
+function quadMetrics(quad, areas, bounds) {
+  const { contour: contourArea, hull: hullArea } = areas;
   const quadArea = shoelaceArea(quad);
-  const areaFraction = quadArea / (width * height);
-  const borderCorners = countBorderCorners(quad, width, height);
+  const areaFraction = quadArea / (bounds.width * bounds.height);
+  const borderCorners = countBorderCorners(quad, bounds);
   const unscored = { score: 0, quadArea, borderCorners };
 
   if (areaFraction < MIN_QUAD_AREA_FRACTION || areaFraction > MAX_QUAD_AREA_FRACTION) {
@@ -205,12 +208,14 @@ function candidateFromPoints(points, context) {
     cv.convexHull(pointMat, hull, false, true);
     let quad = quadFromHull(hull);
     if (!quad) return null;
-    quad = coverQuad(quad, hullPoints(hull), width, height);
+    quad = coverQuad(quad, hullPoints(hull), context);
 
     const contourArea = cv.contourArea(pointMat);
     const hullArea = cv.contourArea(hull);
-    const metrics = quadMetrics(quad,
-      Math.max(contourArea, hullArea * CONTOUR_AREA_FLOOR_OF_HULL), hullArea, width, height);
+    const metrics = quadMetrics(quad, {
+      contour: Math.max(contourArea, hullArea * CONTOUR_AREA_FLOOR_OF_HULL),
+      hull: hullArea,
+    }, context);
 
     // Marked `split` so its cut chord never joins the edge-fusion side pools.
     const candidate = {
@@ -250,11 +255,13 @@ function boundingBoxOfPoints(points) {
   return { x0, y0, x1, y1 };
 }
 
-/** Convexity defects deep enough to be a two-paper seam rather than a wobble. */
-function deepDefectsOf(contour, hullIndices, defects, width, height) {
-  cv.convexityDefects(contour, hullIndices, defects);
+/** Convexity defects deep enough to be a two-paper seam rather than a wobble.
+ *  @param mats { hullIndices, defects } — scratch Mats owned by the caller */
+function deepDefectsOf(contour, mats, bounds) {
+  cv.convexityDefects(contour, mats.hullIndices, mats.defects);
   const deep = [];
-  const minDepth = DEEP_DEFECT_DEPTH_FRACTION * Math.min(width, height);
+  const minDepth = DEEP_DEFECT_DEPTH_FRACTION * Math.min(bounds.width, bounds.height);
+  const defects = mats.defects;
   for (let i = 0; i < defects.rows; i++) {
     const farIndex = defects.data32S[i * 4 + 2];
     const depth = defects.data32S[i * 4 + 3] / 256;
@@ -325,7 +332,7 @@ function splitCandidates(contour, context) {
   try {
     cv.convexHull(contour, hullIndices, false, false);
     if (hullIndices.rows < 3) return;
-    const deep = deepDefectsOf(contour, hullIndices, defects, width, height);
+    const deep = deepDefectsOf(contour, { hullIndices, defects }, context);
 
     const attempt = shouldAttemptSplit(solidity, ownScore);
     if (diag) {
@@ -405,7 +412,8 @@ function largestContourIndices(contours) {
   return areas.slice(0, MAX_CONTOURS_PER_MASK);
 }
 
-function candidateFromContour(contour, contourArea, width, height, maskName) {
+function candidateFromContour(contour, contourArea, context) {
+  const { maskName } = context;
   const hull = new cv.Mat();
   try {
     cv.convexHull(contour, hull, false, true);
@@ -414,11 +422,11 @@ function candidateFromContour(contour, contourArea, width, height, maskName) {
     if (!quad) {
       return {
         candidate: { corners: null, score: 0, rejected: true, mask: maskName,
-          noQuad: true, areaFrac: contourArea / (width * height) },
+          noQuad: true, areaFrac: contourArea / (context.width * context.height) },
         hullArea,
       };
     }
-    const metrics = quadMetrics(quad, contourArea, hullArea, width, height);
+    const metrics = quadMetrics(quad, { contour: contourArea, hull: hullArea }, context);
     return {
       candidate: { corners: quad, score: metrics.score, quadArea: metrics.quadArea,
         borderCorners: metrics.borderCorners, rejected: metrics.score <= 0,
@@ -441,8 +449,7 @@ function candidatesFromMask(bin, context) {
     for (const { index, area } of largestContourIndices(contours)) {
       if (area < MIN_CONTOUR_AREA_FRACTION * width * height) break;
       const contour = contours.get(index);
-      const { candidate, hullArea } =
-        candidateFromContour(contour, area, width, height, maskName);
+      const { candidate, hullArea } = candidateFromContour(contour, area, context);
       out.push(candidate);
 
       // A deeply notched blob whose own quad is BAD is probably two merged

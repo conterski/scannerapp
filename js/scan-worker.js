@@ -237,12 +237,12 @@ function extendedSides(fuller, body, margin) {
   return extended;
 }
 
-function isWellFormedQuad(quad, width, height) {
+function isWellFormedQuad(quad, bounds) {
   return quadPoints(quad).every((point) =>
-    point.x >= -REUNITE_MAX_OUT_OF_FRAME * width &&
-    point.x <= (1 + REUNITE_MAX_OUT_OF_FRAME) * width &&
-    point.y >= -REUNITE_MAX_OUT_OF_FRAME * height &&
-    point.y <= (1 + REUNITE_MAX_OUT_OF_FRAME) * height);
+    point.x >= -REUNITE_MAX_OUT_OF_FRAME * bounds.width &&
+    point.x <= (1 + REUNITE_MAX_OUT_OF_FRAME) * bounds.width &&
+    point.y >= -REUNITE_MAX_OUT_OF_FRAME * bounds.height &&
+    point.y <= (1 + REUNITE_MAX_OUT_OF_FRAME) * bounds.height);
 }
 
 function fullerCandidateContaining(best, candidates) {
@@ -271,7 +271,8 @@ function fullerCandidateContaining(best, candidates) {
  *
  * @returns {best, lock} — unchanged with lock null when no reunion applies
  */
-function reuniteSeveredSection(best, candidates, width, height, trace) {
+function reuniteSeveredSection(best, pipeline, trace) {
+  const { candidates, width, height } = pipeline;
   // Split winners are exempt: their tightness is intentional (the stack fixes).
   if (!best || best.split || !best.hullPts) return { best, lock: null };
   const fuller = fullerCandidateContaining(best, candidates);
@@ -287,7 +288,7 @@ function reuniteSeveredSection(best, candidates, width, height, trace) {
                    (lock.has(SIDE_RIGHT) && lock.has(SIDE_LEFT));
   // A corner far off-image means a distorted blob (a paper fold), not the
   // true document.
-  if (!lock.size || opposite || !isWellFormedQuad(fuller.corners, width, height)) {
+  if (!lock.size || opposite || !isWellFormedQuad(fuller.corners, pipeline)) {
     return { best, lock: null };
   }
   if (trace) trace.push({ reunite: true, from: best.mask, to: fuller.mask, lock: [...lock] });
@@ -355,7 +356,7 @@ function applyHullCutNet(corners, options) {
         covered: hullCut > HULL_CUT_THRESHOLD });
     }
     if (hullCut > HULL_CUT_THRESHOLD) {
-      result = coverSide(result, protectedRegion, type, width, height);
+      result = coverSide(result, type, { points: protectedRegion, bounds: { width, height } });
     }
   }
   return result;
@@ -366,14 +367,14 @@ function applyHullCutNet(corners, options) {
 // ------------------------------------------------------------------
 
 /** Fusion, refinement, snap and the anti-cut net, in that order. */
-function buildCorners(best, pipeline, getSegments, trace) {
-  const { gray, width, height, candidates } = pipeline;
+function buildCorners(best, pipeline, trace) {
+  const { gray, width, height, candidates, getSegments } = pipeline;
   const locked = lockedSidesFor(best, pipeline.reuniteLock);
   const fuseMeta = {};
   const fused = fuseQuad(candidates, best,
     { gray, width, height, getSegments, trace, lockedTypes: locked, meta: fuseMeta });
 
-  let corners = fused || refineQuadEdges(best.corners, best.hullPts, width, height);
+  let corners = fused || refineQuadEdges(best.corners, best.hullPts, pipeline);
   corners = snapSidesOutward(pipeline, corners, locked);
 
   if (fused && best.hullPts && best.hullPts.length >= 3) {
@@ -383,7 +384,7 @@ function buildCorners(best, pipeline, getSegments, trace) {
     });
   }
   const margin = SAFETY_MARGIN_FRACTION * Math.min(width, height);
-  return { corners: expandQuad(corners, margin, width, height), fusedOk: !!fused };
+  return { corners: expandQuad(corners, margin, pipeline), fusedOk: !!fused };
 }
 
 function debugPayload(candidates) {
@@ -422,15 +423,16 @@ function detect({ width, height, buffer, debug }) {
     splitDiag: debug ? [] : null,
     reuniteLock: null,
     cannyEdges: null,
+    getSegments: null,
   };
   try {
     collectCandidates(pipeline);
-    const getSegments = createSegmentSource(pipeline);
+    pipeline.getSegments = createSegmentSource(pipeline);
     const candidates = pipeline.candidates;
     const trace = debug ? [] : null;
 
     let best = selectBestCandidate(candidates);
-    const reunion = reuniteSeveredSection(best, candidates, width, height, trace);
+    const reunion = reuniteSeveredSection(best, pipeline, trace);
     best = reunion.best;
     pipeline.reuniteLock = reunion.lock;
     best = applySafeSplitOverride(best, candidates, trace);
@@ -438,7 +440,7 @@ function detect({ width, height, buffer, debug }) {
     let corners = null;
     let fusedOk = false;
     if (best) {
-      const built = buildCorners(best, pipeline, getSegments, trace);
+      const built = buildCorners(best, pipeline, trace);
       corners = built.corners;
       fusedOk = built.fusedOk;
     }
@@ -447,7 +449,7 @@ function detect({ width, height, buffer, debug }) {
     // Debug callers expect the segment list regardless of whether fusion
     // needed it, so force it here rather than reporting a lazy null.
     return {
-      corners, fusedOk, trace, segments: getSegments(),
+      corners, fusedOk, trace, segments: pipeline.getSegments(),
       splitDiag: pipeline.splitDiag,
       debug: debugPayload(candidates),
     };

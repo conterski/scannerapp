@@ -63,26 +63,26 @@ function collectContributors(candidates, best) {
     bboxIoU(bboxOf(candidate.corners), bestBox) >= CONTRIBUTOR_MIN_BBOX_IOU);
 }
 
-function sideOptionFrom(side, type, context, extra) {
-  return Object.assign({
+function sideOptionFrom(side, type, context) {
+  return {
     s: side,
     contrast: sideContrast(context, side.a, side.b),
     outward: sideOutwardness(side, type),
-  }, extra);
+  };
 }
 
-function buildSideOptions(contributors, type, best, context) {
-  return contributors.map((candidate) =>
-    sideOptionFrom(sideOf(candidate.corners, type), type, context,
-      { isBest: candidate === best }));
+function buildSideOptions(type, context) {
+  return context.contributors.map((candidate) => Object.assign(
+    sideOptionFrom(sideOf(candidate.corners, type), type, context),
+    { isBest: candidate === context.best }));
 }
 
 /** A locked side (the cut chord of a winning safe split, or a reunited
  *  section's seam) is the doc/occluder boundary: no pool, no outward walk,
  *  no Hough extension. */
-function lockedSideChoice(best, type, context) {
-  const side = sideOf(best.corners, type);
-  return sideOptionFrom(side, type, context, { locked: true });
+function lockedSideChoice(type, context) {
+  const side = sideOf(context.best.corners, type);
+  return Object.assign(sideOptionFrom(side, type, context), { locked: true });
 }
 
 // ------------------------------------------------------------------
@@ -108,10 +108,10 @@ function walkOutward(pick, options, context) {
 
 /** Hough segments aligned to a direction, gated by contrast and the
  *  continues-beyond veto. */
-function houghSideOptions(segments, type, referenceDirection, context) {
+function houghSideOptions(type, referenceDirection, context) {
   const options = [];
   const tolerance = (HOUGH_ANGLE_TOLERANCE_DEG * Math.PI) / 180;
-  for (const segment of segments) {
+  for (const segment of context.getSegments()) {
     const segmentDirection = Math.atan2(segment.b.y - segment.a.y, segment.b.x - segment.a.x);
     if (angleBetweenDirections(segmentDirection, referenceDirection) > tolerance) continue;
     const contrast = sideContrast(context, segment.a, segment.b);
@@ -197,7 +197,7 @@ function extendWithHoughSegments(pick, type, context) {
 
   const reference = Math.atan2(pick.s.b.y - pick.s.a.y, pick.s.b.x - pick.s.a.x);
   const maxReach = HOUGH_MAX_REACH_FRACTION * Math.min(context.width, context.height);
-  const extras = houghSideOptions(segments, type, reference, context)
+  const extras = houghSideOptions(type, reference, context)
     .filter((option) => option.outward > pick.outward &&
       option.outward - pick.outward <= maxReach)
     .sort((a, b) => a.outward - b.outward);
@@ -215,8 +215,8 @@ function markContinuingSides(options, context) {
   }
 }
 
-function chooseSideForType(contributors, best, type, context) {
-  const options = buildSideOptions(contributors, type, best, context);
+function chooseSideForType(type, context) {
+  const options = buildSideOptions(type, context);
   markContinuingSides(options, context);
   const bestOption = options.find((option) => option.isBest);
 
@@ -267,9 +267,10 @@ function recordFusionTrace(trace, chosen) {
   }
 }
 
-function quadFromChosenSides(chosen, width, height) {
+function quadFromChosenSides(chosen, bounds) {
+  const { width, height } = bounds;
   const lines = chosen.map((pick) => lineThrough(pick.s.a, pick.s.b));
-  const quad = quadFromSideLines(lines, width, height);
+  const quad = quadFromSideLines(lines, bounds);
   if (!quad) return null;
   const areaFraction = shoelaceArea(quad) / (width * height);
   if (areaFraction < FUSED_MIN_AREA_FRACTION ||
@@ -291,19 +292,19 @@ function fuseQuad(candidates, best, options) {
 
   const centroid = centroidOf(best.corners);
   const context = {
-    gray, width, height, getSegments, centroid,
+    gray, width, height, getSegments, centroid, contributors, best,
     interiorRef: interiorGrayReference({ gray, width, height }, centroid),
   };
 
   const chosen = [];
   for (let type = 0; type < SIDE_COUNT; type++) {
     chosen.push(lockedTypes && lockedTypes.has(type)
-      ? lockedSideChoice(best, type, context)
-      : chooseSideForType(contributors, best, type, context));
+      ? lockedSideChoice(type, context)
+      : chooseSideForType(type, context));
   }
 
   if (meta) meta.rules = chosen.map((pick) => (pick.locked ? "locked" : pick.rule));
   if (trace) recordFusionTrace(trace, chosen);
 
-  return quadFromChosenSides(chosen, width, height);
+  return quadFromChosenSides(chosen, context);
 }

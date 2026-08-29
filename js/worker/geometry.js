@@ -9,6 +9,10 @@
  */
 "use strict";
 
+/* Anything sized takes a `bounds`: { width, height }. The pixel `image` and
+ * the detect `pipeline` are both supersets of that shape, so callers hand in
+ * whichever they already hold. */
+
 const SIDE_COUNT = 4;
 const SIDE_TOP = 0, SIDE_RIGHT = 1, SIDE_BOTTOM = 2, SIDE_LEFT = 3;
 
@@ -187,7 +191,8 @@ function fitLinePts(points) {
   return { px: meanX, py: meanY, dx: Math.cos(theta), dy: Math.sin(theta) };
 }
 
-function validQuadOrNull(points, width, height) {
+function validQuadOrNull(points, bounds) {
+  const { width, height } = bounds;
   if (points.some((p) => !p || !isFinite(p.x) || !isFinite(p.y))) return null;
   if (points.some((p) =>
     p.x < -OUT_OF_FRAME_TOLERANCE * width || p.x > (1 + OUT_OF_FRAME_TOLERANCE) * width ||
@@ -201,13 +206,13 @@ function validQuadOrNull(points, width, height) {
 
 /** Intersects four side lines (indexed by side type) back into a quad.
  *  Every side-moving pass in the detector ends this way. */
-function quadFromSideLines(lines, width, height) {
+function quadFromSideLines(lines, bounds) {
   return validQuadOrNull([
     lineIntersect(lines[SIDE_LEFT], lines[SIDE_TOP]),
     lineIntersect(lines[SIDE_TOP], lines[SIDE_RIGHT]),
     lineIntersect(lines[SIDE_RIGHT], lines[SIDE_BOTTOM]),
     lineIntersect(lines[SIDE_BOTTOM], lines[SIDE_LEFT]),
-  ], width, height);
+  ], bounds);
 }
 
 // ------------------------------------------------------------------
@@ -219,9 +224,10 @@ function crossOfLine(a, b, point) {
   return (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
 }
 
-/** Clips `polygon` to the inside half-plane of line a→b, where "inside" is
- *  whichever side `reference` sits on. */
-function clipPolygonToHalfPlane(polygon, a, b, reference) {
+/** Clips `polygon` to the inside half-plane of `line` ({a, b}), where "inside"
+ *  is whichever side `reference` sits on. */
+function clipPolygonToHalfPlane(polygon, line, reference) {
+  const { a, b } = line;
   const insideSign = crossOfLine(a, b, reference) >= 0 ? 1 : -1;
   const kept = [];
   for (let i = 0; i < polygon.length; i++) {
@@ -248,8 +254,7 @@ function clipPolyToQuad(polygon, quad) {
   const center = centroidOf(quad);
   let points = polygon;
   for (let type = 0; type < SIDE_COUNT; type++) {
-    const side = sideOf(quad, type);
-    points = clipPolygonToHalfPlane(points, side.a, side.b, center);
+    points = clipPolygonToHalfPlane(points, sideOf(quad, type), center);
     if (!points.length) break;
   }
   return points;
@@ -268,7 +273,7 @@ function fracCutBySide(polygon, quad, type) {
   const total = polygonArea(polygon);
   if (total <= 0) return 0;
   const side = sideOf(quad, type);
-  const kept = clipPolygonToHalfPlane(polygon, side.a, side.b, centroidOf(quad));
+  const kept = clipPolygonToHalfPlane(polygon, side, centroidOf(quad));
   return Math.min(1, Math.max(0, 1 - polygonArea(kept) / total));
 }
 
@@ -298,8 +303,10 @@ function overhangBeyondSide(side, normal, points) {
   return furthest;
 }
 
-/** Pushes ONE side of `quad` outward until it clears every point in `points`. */
-function coverSide(quad, points, type, width, height) {
+/** Pushes ONE side of `quad` outward until it clears every point in
+ *  `coverage.points`.
+ *  @param coverage { points, bounds } */
+function coverSide(quad, type, coverage) {
   const lines = [];
   for (let sideType = 0; sideType < SIDE_COUNT; sideType++) {
     const side = sideOf(quad, sideType);
@@ -308,9 +315,10 @@ function coverSide(quad, points, type, width, height) {
       continue;
     }
     const normal = outwardNormal(quad, side);
-    lines.push(offsetSideLine(side, normal, overhangBeyondSide(side, normal, points)));
+    lines.push(offsetSideLine(side, normal,
+      overhangBeyondSide(side, normal, coverage.points)));
   }
-  return quadFromSideLines(lines, width, height) || quad;
+  return quadFromSideLines(lines, coverage.bounds) || quad;
 }
 
 /**
@@ -319,23 +327,23 @@ function coverSide(quad, points, type, width, height) {
  * diagonal that slices the paper; covering repairs that, so a split part's
  * quad can never cut its own content. Falls back to `quad`.
  */
-function coverQuad(quad, points, width, height) {
+function coverQuad(quad, points, bounds) {
   const lines = [];
   for (let type = 0; type < SIDE_COUNT; type++) {
     const side = sideOf(quad, type);
     const normal = outwardNormal(quad, side);
     lines.push(offsetSideLine(side, normal, overhangBeyondSide(side, normal, points)));
   }
-  return quadFromSideLines(lines, width, height) || quad;
+  return quadFromSideLines(lines, bounds) || quad;
 }
 
 /** Pushes every side outward by `margin` px, so hairline errors land on
  *  background instead of clipping document content. */
-function expandQuad(quad, margin, width, height) {
+function expandQuad(quad, margin, bounds) {
   const lines = [];
   for (let type = 0; type < SIDE_COUNT; type++) {
     const side = sideOf(quad, type);
     lines.push(offsetSideLine(side, outwardNormal(quad, side), margin));
   }
-  return quadFromSideLines(lines, width, height) || quad;
+  return quadFromSideLines(lines, bounds) || quad;
 }

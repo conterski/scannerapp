@@ -69,7 +69,8 @@ function quadPerimeter(corners, sides) {
  * Corners come from the EDGES, so rounded or clipped hull corners don't drag
  * them inward.
  */
-function refineQuadEdges(quad, hullPts, width, height) {
+function refineQuadEdges(quad, hullPts, bounds) {
+  const { width, height } = bounds;
   const corners = quadPoints(quad);
   const sides = [[0, 1], [1, 2], [2, 3], [3, 0]]; // top, right, bottom, left
   const perimeter = quadPerimeter(corners, sides);
@@ -114,7 +115,9 @@ function refineQuadEdges(quad, hullPts, width, height) {
 
 /** Median gray just inside the side — a robust "this is the paper" value that
  *  text or artwork under one sample can't poison. */
-function paperReferenceAlongSide(image, side, normal, fractions) {
+/** @param sampling { side, normal, fractions } */
+function paperReferenceAlongSide(image, sampling) {
+  const { side, normal, fractions } = sampling;
   const samples = [];
   for (const t of fractions) {
     const x = Math.round(side.a.x + (side.b.x - side.a.x) * t - normal.nx * PAPER_REFERENCE_INSET);
@@ -181,7 +184,7 @@ function snappedLineForSide(image, quad, type) {
   if (sideContrast(image, side.a, side.b) >= STRONG_EDGE_CONTRAST) return null;
 
   const fractions = sideSampleFractions();
-  const reference = paperReferenceAlongSide(image, side, normal, fractions);
+  const reference = paperReferenceAlongSide(image, { side, normal, fractions });
   if (reference === null) return null;
 
   const maxMarch = MAX_MARCH_FRACTION * Math.min(image.width, image.height);
@@ -232,7 +235,7 @@ function snapSidesOutward(image, quad, lockedTypes) {
   }
   if (!moved) return quad;
 
-  const snappedQuad = quadFromSideLines(lines, width, height);
+  const snappedQuad = quadFromSideLines(lines, image);
   if (!snappedQuad) return quad;
   const area = shoelaceArea(snappedQuad);
   // The snap may only GROW the quad, and never explosively.
@@ -246,7 +249,8 @@ function snapSidesOutward(image, quad, lockedTypes) {
 // ------------------------------------------------------------------
 
 /** Tier 1: a protrusion-verified document part of best's own blob. */
-function tier1Clippers(candidates, best, center, bestBox) {
+function tier1Clippers({ candidates, best }, center) {
+  const bestBox = bboxOf(best.corners);
   return candidates
     .filter((candidate) => candidate.safe && !candidate.rejected && candidate !== best &&
       candidate.corners &&
@@ -283,8 +287,7 @@ function consensusHull(corners, options) {
   const { best, candidates, contributors, width, height, info } = options;
   if (!best.hullPts || best.hullPts.length < 3) return best.hullPts;
   const center = centroidOf(corners);
-  const bestBox = bboxOf(best.corners);
-  const clippers = tier1Clippers(candidates, best, center, bestBox)
+  const clippers = tier1Clippers({ candidates, best }, center)
     .concat(tier2Clippers(contributors, best, center));
 
   let points = best.hullPts;

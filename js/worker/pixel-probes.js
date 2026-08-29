@@ -71,9 +71,11 @@ function median(sortedValues) {
 
 function ascending(a, b) { return a - b; }
 
-/** Gray difference across the line at one point, or null when either probe
- *  falls outside the image. */
-function crossEdgeStep(image, point, normal, depth) {
+/** Gray difference across the line at one point, or null when either side of
+ *  the probe falls outside the image.
+ *  @param probe { point, normal, depth } */
+function crossEdgeStep(image, probe) {
+  const { point, normal, depth } = probe;
   const x1 = Math.round(point.x + normal.nx * depth);
   const y1 = Math.round(point.y + normal.ny * depth);
   const x2 = Math.round(point.x - normal.nx * depth);
@@ -109,7 +111,7 @@ function sideContrast(image, a, b) {
   const steps = [];
   for (let t = 0.1; t <= 0.9; t += 0.05) {
     const point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-    const step = crossEdgeStep(image, point, normal, depth);
+    const step = crossEdgeStep(image, { point, normal, depth });
     if (step !== null) steps.push(step);
   }
   if (steps.length < MIN_CONTRAST_SAMPLES) return 0;
@@ -137,7 +139,7 @@ function lineContinuesBeyond(image, a, b) {
         x: originX + direction * ux * extension * reach,
         y: originY + direction * uy * extension * reach,
       };
-      const step = crossEdgeStep(image, point, normal, depth);
+      const step = crossEdgeStep(image, { point, normal, depth });
       if (step !== null) steps.push(step);
     }
   }
@@ -194,12 +196,13 @@ function interiorGrayReference(image, centroid) {
   return median(values);
 }
 
-/** Majority vote over the three probe depths in one direction from a point. */
-function majorityAtDepths(image, point, direction, test) {
+/** Majority vote over the three probe depths in one direction from a point.
+ *  @param probe { point, direction } */
+function majorityAtDepths(image, probe, test) {
   let hits = 0, sampled = 0;
   for (const depth of BOUNDARY_PROBE_DEPTHS) {
-    const x = Math.round(point.x + direction.x * depth);
-    const y = Math.round(point.y + direction.y * depth);
+    const x = Math.round(probe.point.x + probe.direction.x * depth);
+    const y = Math.round(probe.point.y + probe.direction.y * depth);
     if (!isInsideImage(image, x, y)) continue;
     sampled++;
     if (test(grayAt(image, x, y))) hits++;
@@ -232,8 +235,8 @@ function looksLikeDocumentBoundary(side, context) {
       x: side.a.x + (side.b.x - side.a.x) * t,
       y: side.a.y + (side.b.y - side.a.y) * t,
     };
-    const insideIsPaper = majorityAtDepths(context, point, { x: -nx, y: -ny }, isPaper);
-    const outsideIsNot = majorityAtDepths(context, point, { x: nx, y: ny }, isNotPaper);
+    const insideIsPaper = majorityAtDepths(context, { point, direction: { x: -nx, y: -ny } }, isPaper);
+    const outsideIsNot = majorityAtDepths(context, { point, direction: { x: nx, y: ny } }, isNotPaper);
     sampled++;
     if (insideIsPaper && outsideIsNot) good++;
   }
