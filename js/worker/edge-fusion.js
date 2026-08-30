@@ -71,10 +71,42 @@ function sideOptionFrom(side, type, context) {
   };
 }
 
+/**
+ * A split part's CUT CHORD is an interior line that poisons the outward walks,
+ * which is why `collectContributors` keeps split parts out of the pools
+ * wholesale. But when a mask merges the document with a touching neighbour, the
+ * declumped part is the only place the document's true edge survives at all —
+ * every whole-blob candidate runs off into the neighbour (fail1: each one's
+ * top-left sits at y 0-24, the split part's at y 66).
+ *
+ * So the part's OTHER sides are offered, under four guards: never the chord,
+ * only parts of best's own blob, only parts scoring like a contributor, and
+ * only while the side is still standing on the document. Safety of the split
+ * is deliberately NOT required — fail1's
+ * split is unsafe (mutual 0.18, chord contrast 0.04) precisely because the
+ * neighbour is contiguous white paper, which is the case that needs this most.
+ */
+function splitSideOptions(type, context) {
+  const options = [];
+  for (const candidate of context.candidates) {
+    if (!candidate.split || candidate.rejected || !candidate.corners) continue;
+    if (candidate === context.best) continue;
+    if (candidate.cutSides && candidate.cutSides.indexOf(type) >= 0) continue;
+    if (candidate.score < CONTRIBUTOR_MIN_SCORE_RATIO * context.best.score) continue;
+    if (!candidate.parentBBox ||
+        bboxIoU(candidate.parentBBox, context.bestBox) < CONTRIBUTOR_MIN_BBOX_IOU) continue;
+    const option = sideOptionFrom(sideOf(candidate.corners, type), type, context);
+    if (!isInsideDocument(option, context)) continue;
+    options.push(option);
+  }
+  return options;
+}
+
 function buildSideOptions(type, context) {
-  return context.contributors.map((candidate) => Object.assign(
+  const fromContributors = context.contributors.map((candidate) => Object.assign(
     sideOptionFrom(sideOf(candidate.corners, type), type, context),
     { isBest: candidate === context.best }));
+  return fromContributors.concat(splitSideOptions(type, context));
 }
 
 /** A locked side (the cut chord of a winning safe split, or a reunited
@@ -151,6 +183,13 @@ function isBoundaryLike(option, context) {
   return option.bLike;
 }
 
+/** Memoized per option — the weaker "is this side still on the document"
+ *  half of the boundary probe. */
+function isInsideDocument(option, context) {
+  if (option.iLike === undefined) option.iLike = insideLooksLikeDocument(option.s, context);
+  return option.iLike;
+}
+
 /**
  * When nothing passes the strict gate, fall back in a fixed order. Returns
  * {pick, rule, eligible} — `eligible` is the pool the outward walk may use.
@@ -178,14 +217,33 @@ function fallbackSideChoice(options, bestOption, context) {
   // Low-contrast scene (white paper on a white floor): start from the
   // strongest side, but still walk outward over sides with at least weak edge
   // evidence, so a printed form border cannot win outright.
+  //
+  // The strongest weak edge is only trustworthy while it is still standing ON
+  // the document. Nothing else on this path checks that — the full boundary
+  // test can't, because this path is taken exactly when the background
+  // resembles paper and the outside half is bound to fail. So when the
+  // strongest has walked off onto the desk, the contest is re-run over the
+  // sides that ARE still on the document. With no such alternative the
+  // strongest stands, unchanged.
+  //
+  // The re-run keeps the same "strongest wins" rule rather than taking the
+  // outermost: preferring outermost hands the side to a quad lying along the
+  // frame edge, whose inside reads as document only because an occluding sheet
+  // sits just within it (stack5's top snapped to y=0 that way).
   const nonContinuing = options.filter((option) => !option.continues);
   const pool = nonContinuing.length ? nonContinuing : options;
   const strongest = pool.reduce((a, b) => (b.contrast > a.contrast ? b : a));
-  const eligible = pool
+  const grounded = isInsideDocument(strongest, context)
+    ? []
+    : pool.filter((option) => isInsideDocument(option, context));
+  const pick = grounded.length
+    ? grounded.reduce((a, b) => (b.contrast > a.contrast ? b : a))
+    : strongest;
+  const eligible = (grounded.length ? grounded : pool)
     .filter((option) => option.contrast >= LOW_CONTRAST_WALK_MIN &&
-      option.outward >= strongest.outward)
+      option.outward >= pick.outward)
     .sort((a, b) => a.outward - b.outward);
-  return { pick: strongest, rule: "lowc", eligible };
+  return { pick, rule: "lowc", eligible };
 }
 
 function extendWithHoughSegments(pick, type, context) {
@@ -257,7 +315,7 @@ function recordFusionTrace(trace, chosen) {
     trace.push({
       type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
       locked: !!pick.locked, rule: pick.locked ? "locked" : pick.rule,
-      bLike: pick.bLike, vetoedBest: !!pick.vetoedBest,
+      bLike: pick.bLike, iLike: pick.iLike, vetoedBest: !!pick.vetoedBest,
       bestOutward: pick.bestOutward !== undefined ? Math.round(pick.bestOutward) : undefined,
       walkFrom: pick.walkFrom !== undefined ? Math.round(pick.walkFrom) : undefined,
       houghExt: !!pick.houghExt,
@@ -293,6 +351,7 @@ function fuseQuad(candidates, best, options) {
   const centroid = centroidOf(best.corners);
   const context = {
     gray, width, height, getSegments, centroid, contributors, best,
+    candidates, bestBox: bboxOf(best.corners),
     interiorRef: interiorGrayReference({ gray, width, height }, centroid),
   };
 

@@ -41,6 +41,12 @@ const BOUNDARY_OUTSIDE_TOLERANCE = 30;
 const MIN_BOUNDARY_SAMPLES = 5;
 const BOUNDARY_GOOD_RATIO = 0.55;
 
+// insideLooksLikeDocument: how much of a side must still be standing on the
+// document. Correct low-contrast sides measure 0.63-1.00 (receipt1's left and
+// right 1.00, ok11 1.00, hard5 0.88, stack2 0.75, fail15 0.63); sides that have
+// walked out onto the desk measure 0.00-0.25 (fail1's top 0.25, its left 0.00).
+const INSIDE_DOCUMENT_GOOD_RATIO = 0.55;
+
 // The interior reference is the median of a grid this far around the centroid.
 const INTERIOR_GRID_RADIUS = 2;
 const INTERIOR_GRID_STEP_FRACTION = 0.04;
@@ -211,13 +217,20 @@ function majorityAtDepths(image, probe, test) {
 }
 
 /**
- * True if `side` separates document-looking pixels (inside) from
- * non-document (outside). Sampled at three depths per point so sparse text
- * can't imitate background and background can't imitate paper.
+ * Walks sample points along `side` and counts, at each one, whether the pixels
+ * just INSIDE read like the document interior and whether the pixels just
+ * OUTSIDE read like something else. Sampled at three depths per point so
+ * sparse text can't imitate background and background can't imitate paper.
+ *
+ * The two counts are kept apart because they answer different questions. The
+ * outside test asks "is this the document's outer boundary", which legitimately
+ * fails whenever the background resembles paper; the inside test asks the
+ * weaker "is this side still standing on the document at all".
  *
  * @param context { gray, width, height, centroid, interiorRef }
+ * @returns { sampled, inside, both } — sample counts, not ratios
  */
-function looksLikeDocumentBoundary(side, context) {
+function boundarySampleFlags(side, context) {
   const { centroid, interiorRef } = context;
   const { length } = unitNormalOf(side.a, side.b);
   let nx = -(side.b.y - side.a.y) / (length || 1);
@@ -229,7 +242,7 @@ function looksLikeDocumentBoundary(side, context) {
   const isPaper = (value) => Math.abs(value - interiorRef) <= BOUNDARY_INSIDE_TOLERANCE;
   const isNotPaper = (value) => Math.abs(value - interiorRef) > BOUNDARY_OUTSIDE_TOLERANCE;
 
-  let good = 0, sampled = 0;
+  let inside = 0, both = 0, sampled = 0;
   for (let t = 0.15; t <= 0.86; t += 0.1) {
     const point = {
       x: side.a.x + (side.b.x - side.a.x) * t,
@@ -238,7 +251,38 @@ function looksLikeDocumentBoundary(side, context) {
     const insideIsPaper = majorityAtDepths(context, { point, direction: { x: -nx, y: -ny } }, isPaper);
     const outsideIsNot = majorityAtDepths(context, { point, direction: { x: nx, y: ny } }, isNotPaper);
     sampled++;
-    if (insideIsPaper && outsideIsNot) good++;
+    if (insideIsPaper) inside++;
+    if (insideIsPaper && outsideIsNot) both++;
   }
-  return sampled >= MIN_BOUNDARY_SAMPLES && good / sampled >= BOUNDARY_GOOD_RATIO;
+  return { sampled, inside, both };
+}
+
+/**
+ * True if `side` separates document-looking pixels (inside) from non-document
+ * (outside).
+ *
+ * @param context { gray, width, height, centroid, interiorRef }
+ */
+function looksLikeDocumentBoundary(side, context) {
+  const flags = boundarySampleFlags(side, context);
+  return flags.sampled >= MIN_BOUNDARY_SAMPLES &&
+    flags.both / flags.sampled >= BOUNDARY_GOOD_RATIO;
+}
+
+/**
+ * True if the strip just inside `side` still reads like the document — the
+ * inside half of the boundary test, without the outside half.
+ *
+ * This is what the low-contrast fallback needs. That path is taken precisely
+ * when the background resembles paper, so the full boundary test is bound to
+ * fail there and would veto correct sides (receipt1's left and right measure
+ * 1.00 inside but only 0.38 outside). A side standing on the DESK fails the
+ * inside half outright (fail1's top 0.25, its left 0.00).
+ *
+ * @param context { gray, width, height, centroid, interiorRef }
+ */
+function insideLooksLikeDocument(side, context) {
+  const flags = boundarySampleFlags(side, context);
+  return flags.sampled >= MIN_BOUNDARY_SAMPLES &&
+    flags.inside / flags.sampled >= INSIDE_DOCUMENT_GOOD_RATIO;
 }
