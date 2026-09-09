@@ -16,11 +16,15 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters between photo and scan** — scanning applies geometric
   transforms only, never a colour change. The optional **Natural flash**
-  setting is the one exception: it lifts local contrast so paper reads white,
-  working on luminance alone so hue and saturation are left as photographed.
-  It is off unless you turn it on. (High detail capture does remove sensor
-  grain, but that happens inside the camera before a photo exists — the scan
-  still matches its photo exactly.)
+  setting is the one exception: a photographic grade (exposure and shadow lift,
+  a gentle S-curve, then an unsharp mask) that makes paper read white and text
+  read crisp. It works on luminance alone, so hue and saturation come through
+  as photographed — except where the lift brightens a pixel to near-white, at
+  which point its colour necessarily converges on white. Measured: pixels below
+  200 shift by 0 levels; the shift is confined to paper. It is off unless you
+  turn it on. (High detail capture does remove sensor grain, but that happens
+  inside the camera before a photo exists — the scan still matches its photo
+  exactly.)
 - **Choose where new photos go** — after picking from the library or finishing a
   capture session, a dialog asks whether they belong at the end (the default),
   at the beginning, or after a particular page. Re-shooting page 4 no longer

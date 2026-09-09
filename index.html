@@ -119,14 +119,12 @@
   <button id="scrollBottomBtn" class="anchor-btn" type="button" title="Jump to bottom" aria-label="Jump to bottom">&#8595;</button>
 </div>
 
-<div id="orderPrompt" class="modal" hidden>
-  <div id="orderPromptCard" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="orderPromptTitle">
-    <h2 id="orderPromptTitle" class="modal-title">Add photos</h2>
-    <label class="modal-label" for="orderPromptSelect">Where should they go?</label>
-    <select id="orderPromptSelect" class="modal-select"></select>
+<div id="choicePrompt" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="choicePromptTitle">
+    <h2 id="choicePromptTitle" class="modal-title">Add photos</h2>
+    <div id="choicePromptList" class="choice-list"></div>
     <div class="modal-actions">
-      <button id="orderPromptCancelBtn" class="btn btn-secondary">Cancel</button>
-      <button id="orderPromptConfirmBtn" class="btn btn-primary">Insert</button>
+      <button id="choicePromptCancelBtn" class="btn btn-secondary">Cancel</button>
     </div>
   </div>
 </div>
@@ -173,7 +171,7 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="js/image-utils.js"></script>
 <script src="js/page-scroll.js"></script>
-<script src="js/order-prompt.js"></script>
+<script src="js/choice-prompt.js"></script>
 <script src="js/pointer-drag.js"></script>
 <script src="js/persisted-flag.js"></script>
 <script src="js/capture-quality.js"></script>

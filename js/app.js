@@ -23,6 +23,13 @@
   const pages = [];
   let nextPageId = 1;
 
+  // Where the batch now being chosen should land. ASK_FOR_POSITION means the
+  // user hasn't said, so addFiles raises the picker. It lives here rather than
+  // travelling with the files because a file input reports back through an
+  // event, long after the button that opened it.
+  const ASK_FOR_POSITION = undefined;
+  let pendingInsertAt = ASK_FOR_POSITION;
+
   const $ = (id) => document.getElementById(id);
 
   // ---------------------------------------------------------------
@@ -31,7 +38,7 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     Editor.init();
-    OrderPrompt.init();
+    ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
     ScanEnhance.loadPersistedSetting();
@@ -42,6 +49,7 @@
       onEditPage: editPage,
       onDeletePage: deletePage,
       onMovePage: movePage,
+      onInsertAfterPage: insertAfterPage,
       onDeleteSelected: deleteSelectedPages,
       onClearAll: clearAllPages,
       onSelectModeChanged: renderPageList,
@@ -56,16 +64,10 @@
   function wirePhotoInputs() {
     const fileInput = $("fileInput");
     const cameraInput = $("cameraInput");
-    $("addPhotosBtn").addEventListener("click", () => {
-      preloadScannerEngine();
-      fileInput.click();
-    });
-    $("cameraBtn").addEventListener("click", () => {
-      preloadScannerEngine();
-      startCapture(cameraInput);
-    });
+    $("addPhotosBtn").addEventListener("click", () => startAdd(ASK_FOR_POSITION, openLibrary));
+    $("cameraBtn").addEventListener("click", () => startAdd(ASK_FOR_POSITION, openCamera));
     fileInput.addEventListener("change", () => {
-      addFiles(fileInput.files);
+      addFiles(fileInput.files, pendingInsertAt);
       fileInput.value = "";
     });
     // Fallback path only (no in-page camera): the system camera returns one
@@ -73,7 +75,32 @@
     cameraInput.addEventListener("change", () => {
       const file = cameraInput.files[0]; // grab the ref BEFORE resetting value
       cameraInput.value = "";
-      if (file) addFiles([file]);
+      if (file) addFiles([file], pendingInsertAt);
+    });
+  }
+
+  function openLibrary() { $("fileInput").click(); }
+  function openCamera() { startCapture($("cameraInput")); }
+
+  /** Begins an add from any entry point. Setting the position here rather than
+   *  clearing it afterwards is what keeps a picker the user backs out of from
+   *  leaving a stale one behind: the next add overwrites it regardless. */
+  function startAdd(insertAt, openSource) {
+    pendingInsertAt = insertAt;
+    preloadScannerEngine();
+    openSource();
+  }
+
+  /** A card's + button: the position is already known, so only the source has
+   *  to be asked for. The prompt hands control back inside the button's own
+   *  click, which is what lets the picker open at all. */
+  function insertAfterPage(index) {
+    ChoicePrompt.open({
+      title: `Insert after page ${index + 1}`,
+      choices: [
+        { label: "📷 Camera", onChoose: () => startAdd(index + 1, openCamera) },
+        { label: "🖼 Photos", onChoose: () => startAdd(index + 1, openLibrary) },
+      ],
     });
   }
 
@@ -170,7 +197,33 @@
    *  the photos simply start the document. */
   function chooseInsertPosition(photoCount) {
     if (!pages.length) return Promise.resolve(0);
-    return OrderPrompt.choosePosition({ pageCount: pages.length, photoCount });
+    return new Promise((resolve) => {
+      ChoicePrompt.open({
+        title: `Add ${photoCount} photo${photoCount === 1 ? "" : "s"}`,
+        choices: positionChoices(resolve),
+        onCancel: () => resolve(null),
+      });
+    });
+  }
+
+  /** One entry per slot: before the first page, after each page, and after the
+   *  last — the default, so the quickest answer is the one photos have always
+   *  had. */
+  function positionChoices(choose) {
+    const end = pages.length;
+    const choices = [{ label: "At the beginning", onChoose: () => choose(0) }];
+    for (let position = 1; position < end; position++) {
+      choices.push({
+        label: `After page ${position}`,
+        onChoose: () => choose(position),
+      });
+    }
+    choices.push({
+      label: `At the end (after page ${end})`,
+      onChoose: () => choose(end),
+      isDefault: true,
+    });
+    return choices;
   }
 
   /** Says where the photos landed, since they aren't where the eye expects. */
@@ -273,8 +326,11 @@
    *  native-input fallback require one. */
   function startCapture(cameraInput) {
     if (!CameraStream.isSupported()) { cameraInput.click(); return; }
+    // Fixed for the whole session: a capture run lasts far longer than the tap
+    // that started it, so the destination is read now rather than at Done.
+    const insertAt = pendingInsertAt;
     CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
-      .then((files) => { if (files.length) addFiles(files); });
+      .then((files) => { if (files.length) addFiles(files, insertAt); });
   }
 
   // ---------------------------------------------------------------

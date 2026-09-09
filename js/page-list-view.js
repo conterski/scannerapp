@@ -16,6 +16,7 @@
     adjustCrop: "✂️",
     deletePage: "🗑",
     dragGrip: "≡",
+    insertAfter: "+",
     selected: "✓",
   };
 
@@ -31,7 +32,7 @@
   // ---------------------------------------------------------------
 
   /** @param listHandlers { onEditPage, onDeletePage, onMovePage,
-   *                        onDeleteSelected, onClearAll } */
+   *                        onInsertAfterPage, onDeleteSelected, onClearAll } */
   function init(listHandlers) {
     handlers = listHandlers;
     $("selectBtn").addEventListener("click", enterSelectMode);
@@ -191,8 +192,23 @@
     attachReorderDrag(grip, card);
 
     card.append(thumbnailWrap, createPageNumber(index), grip,
-      createPageActions(index, pageCount));
+      createInsertBadge(index), createPageActions(index, pageCount));
     return card;
+  }
+
+  /** Adds photos straight after this page. A card child rather than part of
+   *  the thumbnail, so its click never reaches the thumbnail's open-the-editor
+   *  handler, and not a fifth entry in the action row, which at 150px cards
+   *  would leave every action too small to hit. */
+  function createInsertBadge(index) {
+    const badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = "insert-badge";
+    badge.textContent = GLYPH.insertAfter;
+    badge.title = `Insert photos after page ${index + 1}`;
+    badge.setAttribute("aria-label", badge.title);
+    badge.addEventListener("click", () => handlers.onInsertAfterPage(index));
+    return badge;
   }
 
   function createActionButton(glyph, title, onClick) {

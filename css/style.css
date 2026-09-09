@@ -165,6 +165,28 @@ html, body {
 }
 .page-thumb-wrap img { max-width: 100%; max-height: 100%; display: block; }
 
+/* On the card rather than inside .page-thumb-wrap, so tapping it cannot
+   bubble into the "open the editor" handler the thumbnail carries. */
+.insert-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 52px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
+  color: #cfd4dc;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.insert-badge:active { background: rgba(0, 0, 0, 0.75); }
+
 .page-num {
   position: absolute;
   top: 6px;
@@ -385,17 +407,31 @@ html, body {
   gap: 12px;
 }
 .modal-title { font-size: 17px; font-weight: 700; }
-.modal-label { font-size: 13px; color: var(--text-dim); }
-.modal-select {
+/* Scrolls once a document has more pages than fit, so the list never pushes
+   Cancel off the screen. */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 45vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.choice-btn {
   appearance: none;
   width: 100%;
-  padding: 12px 14px;
   border: none;
   border-radius: var(--radius);
+  padding: 14px;
   background: var(--surface-2);
   color: var(--text);
-  font-size: 16px;   /* below 16px iOS zooms the page on focus */
+  font-size: 16px;   /* below 16px iOS zooms the page in */
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
 }
+.choice-btn:active { transform: scale(0.99); }
+.choice-btn--default { background: var(--accent); font-weight: 600; }
 .modal-actions { display: flex; gap: 10px; margin-top: 4px; }
 .modal-actions .btn { flex: 1; }
 
