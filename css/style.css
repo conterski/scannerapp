@@ -334,6 +334,71 @@ html, body {
   background: #0d0f13;
 }
 
+/* ---------- Jump anchors ---------- */
+/* Above the grid, below the busy (100) and capture (200) overlays, so those
+   cover these without any extra hide/show logic. */
+.scroll-anchors {
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+}
+.anchor-btn {
+  appearance: none;
+  width: 44px;   /* the smallest comfortable touch target on iOS */
+  height: 44px;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+  backdrop-filter: blur(10px);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.anchor-btn:active { transform: scale(0.94); }
+
+/* ---------- Modal dialog ---------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 16, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 150;
+}
+.modal-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title { font-size: 17px; font-weight: 700; }
+.modal-label { font-size: 13px; color: var(--text-dim); }
+.modal-select {
+  appearance: none;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 16px;   /* below 16px iOS zooms the page on focus */
+}
+.modal-actions { display: flex; gap: 10px; margin-top: 4px; }
+.modal-actions .btn { flex: 1; }
+
 /* ---------- Busy overlay ---------- */
 .busy-overlay {
   position: fixed;

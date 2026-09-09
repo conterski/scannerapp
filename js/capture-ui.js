@@ -173,6 +173,7 @@
         camera.stop(els.captureVideo); // also puts the light out
         store.dispose();
         els.captureView.hidden = true;
+        PageScroll.thaw(); // every exit — Done, Cancel and the fallback — lands here
         els.galleryView.hidden = true;
         els.captureError.hidden = true;
         els.captureFlash.hidden = true;
@@ -238,6 +239,9 @@
       // ----- start (still inside the caller's user gesture) -----
 
       els.captureView.hidden = false;
+      // The camera covers the screen but the page behind it still scrolls,
+      // which on iOS shows as the list sliding under the viewfinder.
+      PageScroll.freeze();
       els.captureError.hidden = true;
       els.captureFlash.hidden = true;
       els.captureControls.hidden = false;

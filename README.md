@@ -21,8 +21,14 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   It is off unless you turn it on. (High detail capture does remove sensor
   grain, but that happens inside the camera before a photo exists — the scan
   still matches its photo exactly.)
+- **Choose where new photos go** — after picking from the library or finishing a
+  capture session, a dialog asks whether they belong at the end (the default),
+  at the beginning, or after a particular page. Re-shooting page 4 no longer
+  means adding it at the end and walking it back.
 - Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps
 - Reorder pages by dragging the ≡ grip or with the ◀ ▶ buttons
+- Long lists: ↑ / ↓ buttons jump to either end, and opening a page for editing
+  puts you back at the same scroll position when you close it
 - Export:
   - **Download PDF** — all pages in order, one PDF
   - **Save to Photos** — on iPhone this opens the share sheet with the images in page order; tap **Save Images** to put them in the Photos app

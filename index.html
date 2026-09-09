@@ -112,6 +112,25 @@
   </div>
 </section>
 
+<!-- Body-level, not inside #listView: [hidden] on the list would take its
+     children with it. -->
+<div id="scrollAnchors" class="scroll-anchors" hidden>
+  <button id="scrollTopBtn" class="anchor-btn" type="button" title="Jump to top" aria-label="Jump to top">&#8593;</button>
+  <button id="scrollBottomBtn" class="anchor-btn" type="button" title="Jump to bottom" aria-label="Jump to bottom">&#8595;</button>
+</div>
+
+<div id="orderPrompt" class="modal" hidden>
+  <div id="orderPromptCard" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="orderPromptTitle">
+    <h2 id="orderPromptTitle" class="modal-title">Add photos</h2>
+    <label class="modal-label" for="orderPromptSelect">Where should they go?</label>
+    <select id="orderPromptSelect" class="modal-select"></select>
+    <div class="modal-actions">
+      <button id="orderPromptCancelBtn" class="btn btn-secondary">Cancel</button>
+      <button id="orderPromptConfirmBtn" class="btn btn-primary">Insert</button>
+    </div>
+  </div>
+</div>
+
 <div id="busyOverlay" class="busy-overlay" hidden>
   <div class="spinner"></div>
   <p id="busyText">Working&hellip;</p>
@@ -153,6 +172,8 @@
 
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="js/image-utils.js"></script>
+<script src="js/page-scroll.js"></script>
+<script src="js/order-prompt.js"></script>
 <script src="js/pointer-drag.js"></script>
 <script src="js/persisted-flag.js"></script>
 <script src="js/capture-quality.js"></script>

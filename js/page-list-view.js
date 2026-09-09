@@ -1,7 +1,8 @@
 /* page-list-view.js — everything the page grid draws and handles: the cards,
- * their thumbnails and action buttons, drag-to-reorder, and select mode. It
- * owns no page data — it renders the array it is handed and reports what the
- * user did through the handlers given to init().
+ * their thumbnails and action buttons, drag-to-reorder, select mode, and the
+ * jump-to-either-end anchors that sit over a long list. It owns no page data —
+ * it renders the array it is handed and reports what the user did through the
+ * handlers given to init().
  * Exposes window.PageListView.
  */
 (function () {
@@ -22,6 +23,7 @@
 
   let handlers = {};
   let isSelectModeActive = false;
+  let isListShowing = true; // false while the editor has the screen
   const selectedPageIds = new Set(); // page.id — stable across re-renders
 
   // ---------------------------------------------------------------
@@ -36,6 +38,11 @@
     $("cancelSelectBtn").addEventListener("click", exitSelectMode);
     $("deleteSelectedBtn").addEventListener("click", () => handlers.onDeleteSelected());
     $("clearAllBtn").addEventListener("click", () => handlers.onClearAll());
+    $("scrollTopBtn").addEventListener("click", () => PageScroll.jumpTo("top"));
+    $("scrollBottomBtn").addEventListener("click", () => PageScroll.jumpTo("bottom"));
+    // Rotating the phone changes what fits, and so whether the jumps are worth
+    // offering. Passive: this listener never blocks the resize.
+    window.addEventListener("resize", updateScrollAnchors, { passive: true });
   }
 
   function render(pages) {
@@ -47,6 +54,9 @@
         ? createSelectableCard(page, index)
         : createEditableCard(page, index, pages.length));
     });
+    // After the grid, not inside updateListChrome: the document has to be its
+    // new height before there is anything worth measuring.
+    updateScrollAnchors();
   }
 
   /** Swaps one page's thumbnail in place — no full grid rebuild. */
@@ -70,8 +80,20 @@
 
   function getSelectedPageIds() { return new Set(selectedPageIds); }
 
-  /** The editor keeps the header visible, so its actions must step aside. */
-  function setToolbarVisible(visible) { $("listToolbar").hidden = !visible; }
+  /** The editor keeps the header visible, so the list's own controls must step
+   *  aside. The jump anchors go with them: the editor is laid out in the flow
+   *  rather than over the page, so nothing would cover them. */
+  function setListChromeVisible(visible) {
+    isListShowing = visible;
+    $("listToolbar").hidden = !visible;
+    updateScrollAnchors();
+  }
+
+  /** Offered only when the page really does scroll — on a short list they
+   *  would be two buttons that do nothing. */
+  function updateScrollAnchors() {
+    $("scrollAnchors").hidden = !(isListShowing && PageScroll.isScrollable());
+  }
 
   // ---------------------------------------------------------------
   // Chrome around the grid
@@ -258,6 +280,6 @@
 
   window.PageListView = {
     init, render, refreshThumbnail,
-    enterSelectMode, exitSelectMode, getSelectedPageIds, setToolbarVisible,
+    enterSelectMode, exitSelectMode, getSelectedPageIds, setListChromeVisible,
   };
 })();

@@ -85,12 +85,20 @@
 
       $("listView").hidden = true;
       elements.view.hidden = false;
+      // The list's scroll position carries over into the shorter editor
+      // document and would open it part way down. app.js has already stashed
+      // it, so starting from the top here costs nothing on the way back.
+      window.scrollTo(0, 0);
       layoutStage();
       renderPreviewNow();
     });
   }
 
   function close(shouldApply, navDelta) {
+    // The controls are only reachable while a session is open, but a stray
+    // close() used to throw on session.resolve and leave the editing loop
+    // hanging — which now also strands the list's saved scroll position.
+    if (!session) return;
     clearTimeout(previewTimer);
     // When navigating to an adjacent page the app immediately re-opens the
     // editor, so don't flip back to the list — that flashes it between pages.

@@ -31,6 +31,7 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     Editor.init();
+    OrderPrompt.init();
     CaptureQuality.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
     ScanEnhance.loadPersistedSetting();
@@ -121,7 +122,14 @@
     return IMAGE_FILE_EXTENSIONS.test(file.name || "");
   }
 
-  async function addFiles(fileList) {
+  /**
+   * @param insertAt where the new pages go, as an index into `pages`. Omit it
+   *                 to ask the user — the picker, rapid capture and the
+   *                 single-shot fallback all come through here, so asking once
+   *                 here covers all three. Passing it explicitly skips the
+   *                 dialog, which is what the console and tests use.
+   */
+  async function addFiles(fileList, insertAt) {
     const selected = Array.from(fileList);
     const files = selected.filter(isImageFile);
     if (!files.length) {
@@ -132,6 +140,10 @@
       }
       return;
     }
+    const position = insertAt === undefined
+      ? await chooseInsertPosition(files.length)
+      : insertAt;
+    if (position === null) return; // cancelled — the photos are discarded
     showBusy(`Processing 1 / ${files.length}…`);
     setStatus("Loading OpenCV…");
     try {
@@ -144,26 +156,47 @@
       return;
     }
     setStatus("");
+    const wasAppended = position === pages.length;
     try {
-      await addPhotoBatch(files);
+      await addPhotoBatch(files, position);
       persistPageOrder();
+      if (!wasAppended) reportInsertPosition(position);
     } finally {
       hideBusy();
     }
   }
 
+  /** Nothing to insert among on an empty list, so the dialog is skipped and
+   *  the photos simply start the document. */
+  function chooseInsertPosition(photoCount) {
+    if (!pages.length) return Promise.resolve(0);
+    return OrderPrompt.choosePosition({ pageCount: pages.length, photoCount });
+  }
+
+  /** Says where the photos landed, since they aren't where the eye expects. */
+  function reportInsertPosition(position) {
+    showTemporaryStatus(position === 0
+      ? "Added at the beginning — now page 1."
+      : `Inserted after page ${position} — now page ${position + 1}.`);
+  }
+
   /** Pipelined: detection in the worker is the long pole, so the next photo's
    *  decode and the previous page's warp+encode run on the main thread while
    *  the worker detects — their cost hides almost entirely. */
-  async function addPhotoBatch(files) {
+  async function addPhotoBatch(files, insertAt) {
     const renders = [];
+    // Advances only when a page is actually registered, so a photo that fails
+    // to process leaves no gap in the run.
+    let cursor = insertAt;
     let nextDecode = decodeOrCaptureError(files[0]);
     for (let index = 0; index < files.length; index++) {
       showBusy(`Processing ${index + 1} / ${files.length}…`);
       const decoded = await nextDecode;
       if (index + 1 < files.length) nextDecode = decodeOrCaptureError(files[index + 1]);
-      const page = await detectAndRegisterPage(files[index], decoded);
-      if (page) renders.push(renderAndPersistNewPage(page, decoded, files[index]));
+      const page = await detectAndRegisterPage(files[index], decoded, cursor);
+      if (!page) continue;
+      cursor++;
+      renders.push(renderAndPersistNewPage(page, decoded, files[index]));
     }
     await Promise.all(renders);
   }
@@ -174,12 +207,13 @@
     return ImageUtils.decodeImageToCanvas(file, DECODE_MAX_EDGE).catch((error) => error);
   }
 
-  async function detectAndRegisterPage(file, decoded) {
+  async function detectAndRegisterPage(file, decoded, index) {
     try {
       if (decoded instanceof Error) throw decoded;
       const corners = await Detect.detectCorners(decoded);
       const page = createPage(await blobToStore(file, decoded), corners);
-      pages.push(page);
+      // splice at pages.length is a push, so appending needs no special case.
+      pages.splice(index, 0, page);
       return page;
     } catch (error) {
       reportPhotoFailure(file, error);
@@ -251,13 +285,20 @@
    *  edits (same as Done) and opens the adjacent page. Indices stay stable —
    *  the list is hidden while the editor is open. */
   async function editPage(startIndex) {
-    PageListView.setToolbarVisible(false); // header actions don't apply while editing
+    // First, before anything moves: hiding the toolbar alone shortens the
+    // header enough to clamp the scroll, so reading the position afterwards
+    // stashes an already-clamped value and the list creeps up the page a
+    // couple of pixels on every visit to the editor.
+    PageScroll.remember();
+    PageListView.setListChromeVisible(false); // header actions don't apply while editing
     try {
       let index = startIndex;
       while (index !== null) index = await editOnePage(index);
     } finally {
       clearSourceCache();
-      renderPageList();
+      PageListView.setListChromeVisible(true);
+      renderPageList(); // the grid has to be back to full height before restoring
+      PageScroll.restore();
     }
   }
 
