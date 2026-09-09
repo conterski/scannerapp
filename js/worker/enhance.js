@@ -73,6 +73,8 @@ const DOC_PARAMS = Object.freeze({
 // OpenCV's float Lab: L spans 0..100, a and b are bounded well inside ±128.
 const LAB_L_MAX = 100.0;
 const LAB_AB_LIMIT = 110.0;
+// Eight-bit Lab stores the chroma channels shifted into an unsigned range.
+const LAB_AB_OFFSET = 128;
 
 // The illumination estimate is low-frequency by construction, so the whole
 // flat-field stage runs on a copy reduced to this many pixels on the short
@@ -84,9 +86,20 @@ const LAB_AB_LIMIT = 110.0;
 // gain clip and flattenStrength damp further — invisible at 1% of a level.
 const BACKGROUND_WORKING_EDGE = 512;
 
+// Enough box blurs to pass for a Gaussian without any of them being wide.
+const BOX_BLUR_PASSES = 3;
+
+// Chroma is denoised, not resolved, so its guided filter runs at a quarter of
+// each side. See gradeChroma.
+const CHROMA_DIVISOR = 4;
+
 // The percentile only has to locate the paper level, so a histogram is plenty
 // and avoids sorting several million floats.
 const PAPER_HISTOGRAM_BINS = 1024;
+
+// The soft clip is applied over this range of detail either side of zero.
+// tanh has flattened by three times the soft limit, so this covers it.
+const DETAIL_RANGE = 0.35;
 
 // tanh is the one transcendental in the pipeline and it runs per pixel:
 // Math.tanh costs 29ms per 2 MP against 6ms for an interpolated table, which
@@ -135,38 +148,86 @@ function radiusFor(fraction, mat) {
   return Math.max(1, Math.round(fraction * Math.min(mat.rows, mat.cols)));
 }
 
+/** Three box blurs converge on a Gaussian. Matching the variance of the sum,
+ *  sigma^2 = 3(w^2-1)/12, gives this width — about twice sigma. */
+function boxBlurWidthFor(sigma) {
+  return Math.max(1, Math.round(Math.sqrt(4 * sigma * sigma + 1))) | 1;
+}
+
 /**
- * The illumination across the sheet: a morphological close removes the
- * writing, and a wide blur turns what is left into a smooth field.
+ * The illumination across the sheet: a close removes the writing, and a wide
+ * blur turns what is left into a smooth field.
  *
  * Returned at BACKGROUND_WORKING_EDGE rather than full size. Both the field
  * and the gain derived from it are low-frequency by construction, so the whole
  * flat-field stage runs at that size and only the finished gain is scaled back
  * up — see BACKGROUND_WORKING_EDGE and toReflectance. The caller owns the Mat.
+ *
+ * Two departures from the reference, both to stop this stage dominating the
+ * filter — it measured 352ms of a 1263ms grade, more than any other:
+ *
+ *   * A square structuring element rather than an ellipse. A square close
+ *     separates into a row pass and a column pass: 42ms against 236ms, for a
+ *     root-mean-square difference of 0.43 in L.
+ *   * Three box blurs rather than a Gaussian. OpenCV sizes a float Gaussian
+ *     to +/-4 sigma, 137 taps here, and costs 79ms where the boxes cost 7ms
+ *     for an RMS difference of 0.41.
+ *
+ * Both differences land on a field that is then clipped to the gain limits and
+ * halved again by flattenStrength, so well under 1% of brightness survives
+ * into the image. The GPU port used the same square close and measured closer
+ * to docphoto_filter.py than the ellipse did.
  */
 function estimateBackground(luma) {
   const fullRadius = radiusFor(DOC_PARAMS.backgroundRadius, luma) | 1;
   const scale = Math.min(1, BACKGROUND_WORKING_EDGE / Math.min(luma.rows, luma.cols));
-  const background = new cv.Mat();
-  let kernel = null;
+  let current = new cv.Mat();
+  let spare = new cv.Mat();
+  let rowKernel = null;
+  let columnKernel = null;
   try {
     if (scale < 1) {
-      cv.resize(luma, background, new cv.Size(
+      cv.resize(luma, current, new cv.Size(
         Math.max(1, Math.round(luma.cols * scale)),
         Math.max(1, Math.round(luma.rows * scale))), 0, 0, cv.INTER_AREA);
     } else {
-      luma.copyTo(background);
+      luma.copyTo(current);
     }
     const radius = Math.max(1, Math.round(fullRadius * scale)) | 1;
-    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(radius, radius));
-    cv.morphologyEx(background, background, cv.MORPH_CLOSE, kernel);
-    cv.GaussianBlur(background, background, new cv.Size(0, 0), radius);
-    return background;
+    rowKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(radius, 1));
+    columnKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, radius));
+
+    // Neither morphology nor blur is safe in place, so every pass writes into
+    // the spare and the two swap. Routing them all through one helper keeps
+    // the swap in a single place rather than repeated seven times.
+    const pass = (operate) => {
+      operate(current, spare);
+      const swap = current;
+      current = spare;
+      spare = swap;
+    };
+
+    // Close = dilate then erode, each separated into a row and a column pass.
+    pass((source, target) => cv.dilate(source, target, rowKernel));
+    pass((source, target) => cv.dilate(source, target, columnKernel));
+    pass((source, target) => cv.erode(source, target, rowKernel));
+    pass((source, target) => cv.erode(source, target, columnKernel));
+
+    const width = boxBlurWidthFor(radius);
+    const blurSize = new cv.Size(width, width);
+    for (let blur = 0; blur < BOX_BLUR_PASSES; blur++) {
+      pass((source, target) => cv.blur(source, target, blurSize));
+    }
+
+    spare.delete();
+    return current;
   } catch (error) {
-    background.delete();
+    current.delete();
+    spare.delete();
     throw error;
   } finally {
-    if (kernel) kernel.delete();
+    if (rowKernel) rowKernel.delete();
+    if (columnKernel) columnKernel.delete();
   }
 }
 
@@ -230,20 +291,57 @@ function suppressTexture(reflectance, scratch, smoothed) {
  * building it as a separate image would cost a full-size allocation and
  * another traversal for nothing.
  */
+/** The soft clip as a 256-entry table over the detail's own range.
+ *
+ *  tanh saturates well before the edges of this range, so anything beyond it
+ *  is already flat and convertTo's saturation handles it correctly. */
+let detailTable = null;
+
+function detailLookupTable() {
+  if (!detailTable) {
+    const limit = DOC_PARAMS.detailSoftLimit;
+    const entries = new Uint8Array(TONE_TABLE_ENTRIES);
+    for (let level = 0; level < TONE_TABLE_ENTRIES; level++) {
+      const detail = (level / TONE_TABLE_MAX) * 2 * DETAIL_RANGE - DETAIL_RANGE;
+      const clipped = Math.tanh(detail / limit) * limit;
+      entries[level] = Math.round((clipped + limit) / (2 * limit) * TONE_TABLE_MAX);
+    }
+    detailTable = cv.matFromArray(1, TONE_TABLE_ENTRIES, cv.CV_8U, entries);
+  }
+  return detailTable;
+}
+
+/**
+ * Edge-aware detail boost restricted to ink. The ink weight is 1 on a stroke,
+ * 0 on clean paper and smooth between; the detail is soft-clipped before it is
+ * amplified, which is what prevents an overshoot rim along an edge.
+ *
+ * Written as whole-image operations rather than a pass over the pixel data: a
+ * pass costs ~35ms per 2 MP in this build where a cv operation costs ~3ms, and
+ * this stage ran a pass over every pixel. The soft clip is the one nonlinear
+ * step and it becomes a table, the same trick the tone curve uses.
+ */
 function sharpenInk(reflectance, scratch, base) {
   guidedSelfFilter(reflectance, radiusFor(DOC_PARAMS.detailRadius, reflectance),
     DOC_PARAMS.detailEps, scratch, base);
-  const { whitePoint, inkReference, detailSoftLimit, detailGain } = DOC_PARAMS;
+  const { whitePoint, inkReference, detailSoftLimit: limit, detailGain } = DOC_PARAMS;
   const inkSpan = Math.max(whitePoint - inkReference, 1e-6);
-  const table = softClipTable();
-  const pixels = reflectance.data32F;
-  const basePixels = base.data32F;
-  for (let i = 0; i < pixels.length; i++) {
-    const value = pixels[i];
-    const inkWeight = clamp01((whitePoint - value) / inkSpan);
-    const detail = softClip(table, (value - basePixels[i]) / detailSoftLimit) * detailSoftLimit;
-    pixels[i] = basePixels[i] + detail * (1 + detailGain * inkWeight);
-  }
+
+  // detail = softClip(reflectance - base), through the table.
+  cv.subtract(reflectance, base, scratch.tmp);
+  scratch.tmp.convertTo(scratch.quantised, cv.CV_8U,
+    TONE_TABLE_MAX / (2 * DETAIL_RANGE), TONE_TABLE_MAX / 2);
+  cv.LUT(scratch.quantised, detailLookupTable(), scratch.quantised);
+  scratch.quantised.convertTo(scratch.tmp, cv.CV_32F, 2 * limit / TONE_TABLE_MAX, -limit);
+
+  // weight = 1 + detailGain * clamp((whitePoint - reflectance) / inkSpan, 0, 1)
+  reflectance.convertTo(scratch.mean, cv.CV_32F, -1 / inkSpan, whitePoint / inkSpan);
+  cv.threshold(scratch.mean, scratch.mean, 1, 0, cv.THRESH_TRUNC);
+  cv.threshold(scratch.mean, scratch.mean, 0, 0, cv.THRESH_TOZERO);
+  scratch.mean.convertTo(scratch.mean, cv.CV_32F, detailGain, 1);
+
+  cv.multiply(scratch.tmp, scratch.mean, scratch.tmp);
+  cv.add(base, scratch.tmp, reflectance);
 }
 
 /**
@@ -251,20 +349,48 @@ function sharpenInk(reflectance, scratch, base) {
  * ink hue. Both channels are guided by the same reflectance, so its moments
  * are computed once and shared.
  */
-function gradeChroma(channels, guide, scratch) {
-  const radius = radiusFor(DOC_PARAMS.chromaRadius, guide);
-  const moments = { mean: scratch.guideMean, variance: scratch.guideVariance };
-  guidedMoments(guide, radius, scratch, moments);
-  const { chromaDenoiseStrength: strength, chromaGain } = DOC_PARAMS;
-  for (const channel of channels) {
-    guidedByReference(guide, moments, channel, radius, DOC_PARAMS.chromaEps,
-      scratch, scratch.filtered);
-    // Blend toward the smoothed channel and apply the gain in one weighted
-    // add, then clamp. Real Lab chroma sits well inside the limit, so the
-    // clamp is the reference's safety net rather than something that fires.
-    cv.addWeighted(channel, (1 - strength) * chromaGain,
-      scratch.filtered, strength * chromaGain, 0, channel);
-    clampSymmetric(channel, LAB_AB_LIMIT, scratch.tmp);
+/**
+ * Takes the edge off colour noise while keeping the paper's own cast and every
+ * ink hue. Both channels are guided by the same reflectance, so its moments
+ * are computed once and shared.
+ *
+ * Run at a quarter of each side. This stage is denoising colour, and the eye
+ * carries little colour detail — JPEG subsamples chroma more coarsely than
+ * this. Measured against the full-resolution result the difference is 0.128
+ * mean, and it costs 43ms rather than 251ms while keeping four full-size float
+ * buffers out of the peak.
+ */
+function gradeChroma(channels, guide, fullScratch) {
+  const width = Math.max(8, Math.round(guide.cols / CHROMA_DIVISOR));
+  const height = Math.max(8, Math.round(guide.rows / CHROMA_DIVISOR));
+  const size = new cv.Size(width, height);
+  const fullSize = new cv.Size(guide.cols, guide.rows);
+  const radius = Math.max(1, Math.round(radiusFor(DOC_PARAMS.chromaRadius, guide) / CHROMA_DIVISOR));
+
+  const scratch = createScratch(height, width);
+  const smallGuide = new cv.Mat();
+  const smallChannel = new cv.Mat();
+  try {
+    cv.resize(guide, smallGuide, size, 0, 0, cv.INTER_AREA);
+    const moments = { mean: scratch.guideMean, variance: scratch.guideVariance };
+    guidedMoments(smallGuide, radius, scratch, moments);
+    const { chromaDenoiseStrength: strength, chromaGain } = DOC_PARAMS;
+    for (const channel of channels) {
+      cv.resize(channel, smallChannel, size, 0, 0, cv.INTER_AREA);
+      guidedByReference(smallGuide, moments, smallChannel, radius,
+        DOC_PARAMS.chromaEps, scratch, scratch.filtered);
+      // Blend toward the smoothed channel and apply the gain in one weighted
+      // add, then clamp. Real Lab chroma sits well inside the limit, so the
+      // clamp is the reference's safety net rather than something that fires.
+      cv.addWeighted(smallChannel, (1 - strength) * chromaGain,
+        scratch.filtered, strength * chromaGain, 0, smallChannel);
+      clampSymmetric(smallChannel, LAB_AB_LIMIT, scratch.tmp);
+      cv.resize(smallChannel, channel, fullSize, 0, 0, cv.INTER_LINEAR);
+    }
+  } finally {
+    smallGuide.delete();
+    smallChannel.delete();
+    releaseScratch(scratch);
   }
 }
 
@@ -282,21 +408,53 @@ function clampSymmetric(channel, limit, scratch) {
  * so neither end clips, then blended back toward the input. Writes the result
  * straight into the luma channel as Lab L.
  */
-function applyToneCurve(reflectance, luma) {
+/** The tone curve at one reflectance value, in 0..1. */
+function toneAt(value) {
   const { blackPoint, whitePoint, contrastShape, outputBlack, outputWhite,
     toneStrength } = DOC_PARAMS;
   const span = Math.max(whitePoint - blackPoint, 1e-6);
-  const outputSpan = outputWhite - outputBlack;
-  const pixels = reflectance.data32F;
-  const out = luma.data32F;
-  for (let i = 0; i < pixels.length; i++) {
-    const value = pixels[i];
-    const linear = clamp01((value - blackPoint) / span);
-    const shaped = linear * linear * (3 - 2 * linear);
-    const curved = linear + (shaped - linear) * contrastShape;
-    const graded = outputBlack + curved * outputSpan;
-    out[i] = clamp01(value + (graded - value) * toneStrength) * LAB_L_MAX;
+  const linear = clamp01((value - blackPoint) / span);
+  const shaped = linear * linear * (3 - 2 * linear);
+  const curved = linear + (shaped - linear) * contrastShape;
+  const graded = outputBlack + curved * (outputWhite - outputBlack);
+  return clamp01(value + (graded - value) * toneStrength);
+}
+
+// Reflectance is paper-relative, so it runs from 0 to a little over 1; this
+// covers it with headroom. Values above land on the last entry, where the
+// curve has already flattened.
+const TONE_INPUT_RANGE = 1.6;
+const TONE_TABLE_ENTRIES = 256;
+const TONE_TABLE_MAX = TONE_TABLE_ENTRIES - 1;
+
+let toneTable = null;
+
+/** The curve as a 256-entry table. It depends only on the parameters, so it
+ *  is built once, like the soft-clip table above. */
+function toneLookupTable() {
+  if (!toneTable) {
+    const entries = new Uint8Array(TONE_TABLE_ENTRIES);
+    for (let level = 0; level < TONE_TABLE_ENTRIES; level++) {
+      const reflectance = (level / TONE_TABLE_MAX) * TONE_INPUT_RANGE;
+      entries[level] = Math.round(toneAt(reflectance) * TONE_TABLE_MAX);
+    }
+    toneTable = cv.matFromArray(1, TONE_TABLE_ENTRIES, cv.CV_8U, entries);
   }
+  return toneTable;
+}
+
+/**
+ * Gentle levels with a partial smoothstep, landing inside a safe output range
+ * so neither end clips, then blended back toward the input.
+ *
+ * Applied as a table rather than per pixel: it is pointwise, and quantising
+ * the input to 256 steps costs 0.42 levels of a result that is written to an
+ * 8-bit channel anyway — for 16ms against 60ms.
+ */
+function applyToneCurve(reflectance, scratch, luma) {
+  reflectance.convertTo(scratch.quantised, cv.CV_8U, TONE_TABLE_MAX / TONE_INPUT_RANGE);
+  cv.LUT(scratch.quantised, toneLookupTable(), scratch.quantised);
+  scratch.quantised.convertTo(luma, cv.CV_32F, LAB_L_MAX / TONE_TABLE_MAX);
 }
 
 // ------------------------------------------------------------------
@@ -306,69 +464,139 @@ function applyToneCurve(reflectance, luma) {
 const SCRATCH_NAMES = ["tmp", "mean", "variance", "scale", "offset",
   "meanSource", "guideMean", "guideVariance", "filtered", "reflectance", "base"];
 
+// The tone curve reads and writes eight-bit data, so its buffer is the one
+// member of the set that is not float.
+const QUANTISED_SCRATCH = "quantised";
+
 function createScratch(rows, cols) {
   const scratch = {};
   for (const name of SCRATCH_NAMES) scratch[name] = new cv.Mat(rows, cols, cv.CV_32FC1);
+  scratch[QUANTISED_SCRATCH] = new cv.Mat(rows, cols, cv.CV_8UC1);
   return scratch;
 }
 
 function releaseScratch(scratch) {
   for (const name of SCRATCH_NAMES) scratch[name].delete();
+  scratch[QUANTISED_SCRATCH].delete();
 }
 
 /**
  * Returns a new RGBA Mat holding the enhanced scan. The caller owns it and
  * must delete it; `rgba` is left untouched.
  */
-function enhanceScan(rgba) {
+/**
+ * Splits the photo into Lab planes, as float, ready to grade.
+ *
+ * The Lab transform runs on eight-bit data and each plane is floated
+ * afterwards, rather than floating the whole image first. OpenCV's float Lab
+ * costs 142ms where the eight-bit one costs 22ms, and a round trip through
+ * eight-bit Lab differs from a float one by 0.41 levels on average — below
+ * what the eight-bit output quantises to anyway. It also never builds the two
+ * three-channel float images, which are 112MB between them on a 2500px scan.
+ *
+ * @returns [luma, a, b] as CV_32FC1; the caller owns all three
+ */
+function toLabPlanes(rgba) {
   const rgb = new cv.Mat();
-  const floating = new cv.Mat();
   const lab = new cv.Mat();
-  const channels = new cv.MatVector();
-  const enhanced = new cv.Mat();
-  let scratch = null;
-  let background = null;
-  let luma = null;
-  let chromaA = null;
-  let chromaB = null;
+  const planes = new cv.MatVector();
+  const floated = [];
   try {
     cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
-    rgb.convertTo(floating, cv.CV_32F, 1 / 255);
-    cv.cvtColor(floating, lab, cv.COLOR_RGB2Lab);
-    cv.split(lab, channels);
-    luma = channels.get(0);
-    chromaA = channels.get(1);
-    chromaB = channels.get(2);
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+    cv.split(lab, planes);
+    // Eight-bit Lab packs L into 0..255 and the chroma channels around an
+    // offset of 128; both are restored to the ranges the grade works in.
+    for (let index = 0; index < 3; index++) {
+      const plane = planes.get(index);
+      const target = new cv.Mat();
+      if (index === 0) plane.convertTo(target, cv.CV_32F, LAB_L_MAX / 255);
+      else plane.convertTo(target, cv.CV_32F, 1, -LAB_AB_OFFSET);
+      plane.delete();
+      floated.push(target);
+    }
+    return floated;
+  } catch (error) {
+    floated.forEach((plane) => plane.delete());
+    throw error;
+  } finally {
+    rgb.delete();
+    lab.delete();
+    planes.delete();
+  }
+}
 
-    scratch = createScratch(luma.rows, luma.cols);
-    const { reflectance, base } = scratch;
-
-    background = estimateBackground(luma);
-    toReflectance(luma, background, scratch, reflectance);
-    suppressTexture(reflectance, scratch, base);
-    sharpenInk(reflectance, scratch, base);
-    // Chroma is guided by the sharpened reflectance, so it must run before the
-    // tone curve overwrites the luma channel.
-    gradeChroma([chromaA, chromaB], reflectance, scratch);
-    applyToneCurve(reflectance, luma);
-
-    cv.merge(channels, lab);
-    cv.cvtColor(lab, floating, cv.COLOR_Lab2RGB);
-    floating.convertTo(rgb, cv.CV_8U, 255);
+/** The inverse of toLabPlanes: graded planes back to an RGBA image.
+ *
+ *  Each plane needs its own eight-bit Mat. A MatVector shares the pixel data
+ *  of what it is given, so reusing one buffer across the three push_backs
+ *  would leave all three channels pointing at whichever was written last.
+ *  Eight-bit planes are a byte a pixel, so three of them cost little. */
+function fromLabPlanes(planes) {
+  const lab = new cv.Mat();
+  const rgb = new cv.Mat();
+  const eightBit = new cv.MatVector();
+  const converted = [];
+  const enhanced = new cv.Mat();
+  try {
+    for (let index = 0; index < 3; index++) {
+      const plane = new cv.Mat();
+      if (index === 0) planes[index].convertTo(plane, cv.CV_8U, 255 / LAB_L_MAX);
+      else planes[index].convertTo(plane, cv.CV_8U, 1, LAB_AB_OFFSET);
+      converted.push(plane);
+      eightBit.push_back(plane);
+    }
+    cv.merge(eightBit, lab);
+    cv.cvtColor(lab, rgb, cv.COLOR_Lab2RGB);
     cv.cvtColor(rgb, enhanced, cv.COLOR_RGB2RGBA);
     return enhanced;
   } catch (error) {
     enhanced.delete();
     throw error;
   } finally {
-    if (luma) luma.delete();
-    if (chromaA) chromaA.delete();
-    if (chromaB) chromaB.delete();
+    converted.forEach((plane) => plane.delete());
+    lab.delete();
+    rgb.delete();
+    eightBit.delete();
+  }
+}
+
+/**
+ * Returns a new RGBA Mat holding the graded scan. The caller owns it and must
+ * delete it; `rgba` is left untouched.
+ */
+function enhanceScan(rgba) {
+  let planes = null;
+  let scratch = null;
+  let background = null;
+  try {
+    planes = toLabPlanes(rgba);
+    const [luma, chromaA, chromaB] = planes;
+
+    scratch = createScratch(luma.rows, luma.cols);
+    const { reflectance, base } = scratch;
+
+    background = estimateBackground(luma);
+    toReflectance(luma, background, scratch, reflectance);
+    background.delete();
+    background = null;
+
+    suppressTexture(reflectance, scratch, base);
+    sharpenInk(reflectance, scratch, base);
+    // Chroma is guided by the sharpened reflectance, so it must run before the
+    // tone curve overwrites the luma plane.
+    gradeChroma([chromaA, chromaB], reflectance, scratch);
+    applyToneCurve(reflectance, scratch, luma);
+
+    // The grade is finished and only the three planes are still needed, so the
+    // working set goes back before the output is assembled rather than being
+    // held alongside it.
+    releaseScratch(scratch);
+    scratch = null;
+    return fromLabPlanes(planes);
+  } finally {
     if (background) background.delete();
     if (scratch) releaseScratch(scratch);
-    rgb.delete();
-    floating.delete();
-    lab.delete();
-    channels.delete();
+    if (planes) planes.forEach((plane) => plane.delete());
   }
 }
