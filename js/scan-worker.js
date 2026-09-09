@@ -1,9 +1,6 @@
 /* scan-worker.js — runs OpenCV.js off the main thread: document detection and
  * its perspective warp, plus the capture-time denoise.
  *
- * The natural-flash look used to run here too. It moved to the GPU
- * (js/gpu-enhance.js), where the same filter costs ~14ms instead of ~850ms.
- *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init    → loads OpenCV
  *   detect  {width, height, buffer}                      → {corners|null}
@@ -22,7 +19,9 @@ importScripts(
   "worker/pixel-probes.js",
   "worker/candidates.js",
   "worker/edge-fusion.js",
-  "worker/quad-refine.js");
+  "worker/quad-refine.js",
+  "worker/guided-filter.js",
+  "worker/enhance.js");
 
 // Morphology: an aggressive OPEN severs thin bright bridges between the paper
 // and adjacent objects (other papers, glare) so blobs don't merge.
@@ -468,7 +467,7 @@ function detect({ width, height, buffer, debug }) {
 // warp
 // ------------------------------------------------------------------
 
-function warp({ width, height, buffer, corners, dstW, dstH }) {
+function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
   const { tl, tr, br, bl } = corners;
   const src = cv.matFromImageData(toImageData(width, height, buffer));
   const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
@@ -478,11 +477,18 @@ function warp({ width, height, buffer, corners, dstW, dstH }) {
   const transform = cv.getPerspectiveTransform(srcTri, dstTri);
   const dst = new cv.Mat();
   try {
-    // Bilinear resampling only — the geometry never filters pixel values. The
-    // natural-flash look is applied afterwards, on the GPU (js/gpu-enhance.js).
+    // Bilinear resampling only — the geometry never filters pixel values.
     cv.warpPerspective(src, dst, transform, new cv.Size(dstW, dstH),
       cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-    return new Uint8ClampedArray(dst.data).buffer;
+    // The optional natural-flash lift runs here, on the cropped scan, so its
+    // tiles only ever contain document rather than desk.
+    if (!enhance) return new Uint8ClampedArray(dst.data).buffer;
+    const enhanced = enhanceScan(dst);
+    try {
+      return new Uint8ClampedArray(enhanced.data).buffer;
+    } finally {
+      enhanced.delete();
+    }
   } finally {
     src.delete(); srcTri.delete(); dstTri.delete(); transform.delete(); dst.delete();
   }

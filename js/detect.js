@@ -1,6 +1,6 @@
 /* detect.js — document corner detection, the perspective warp and capture
  * denoising, all delegated to a Web Worker (js/scan-worker.js) so the ~11 MB
- * OpenCV.js compile and this much pixel work stay off the main thread.
+ * OpenCV.js compile and every pixel operation stay off the main thread.
  * Exposes window.Detect.
  */
 (function () {
@@ -134,19 +134,15 @@
 
   /**
    * Perspective-warps `sourceCanvas` using corners {tl,tr,br,bl} (source px)
-   * into the deskewed document. A geometric transform only — pixel values are
-   * untouched apart from bilinear resampling.
-   *
-   * `warpToImageData` is the form the enhancement wants: uploading ImageData
-   * to a texture is the cheapest path onto the GPU, and building a canvas
-   * first would pay for a putImageData that is then thrown away.
-   *
-   * @param options { maxDim } — caps the output's longest side (OpenCV
-   *                downsamples straight into the smaller target, which is what
-   *                Compact mode uses)
+   * into a new canvas holding the deskewed document. A geometric transform
+   * only — pixel values are untouched apart from bilinear resampling.
+   * @param options { maxDim, enhance } — `maxDim` caps the output's longest
+   *                side (OpenCV downsamples straight into the smaller target,
+   *                which is what Compact mode uses); `enhance` applies the
+   *                natural-flash lift to the cropped scan.
    */
-  async function warpToImageData(sourceCanvas, corners, options) {
-    const { maxDim } = options || {};
+  async function warpPerspective(sourceCanvas, corners, options) {
+    const { maxDim, enhance } = options || {};
     await ensureOpenCV();
     const { width: dstW, height: dstH } = outputSizeFor(corners, maxDim);
     const imageData = imageDataOf(sourceCanvas);
@@ -155,14 +151,10 @@
       height: imageData.height,
       buffer: imageData.data.buffer,
       corners: pickCorners(corners),
-      dstW, dstH,
+      dstW, dstH, enhance: !!enhance,
     }, [imageData.data.buffer]);
 
-    return new ImageData(new Uint8ClampedArray(response.buffer), dstW, dstH);
-  }
-
-  async function warpPerspective(sourceCanvas, corners, options) {
-    return canvasFromImageData(await warpToImageData(sourceCanvas, corners, options));
+    return canvasFromBuffer(response.buffer, dstW, dstH);
   }
 
   /** The deskewed page keeps the average length of each pair of opposite
@@ -242,17 +234,18 @@
     return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
   }
 
-  /** Wraps pixels the worker handed back into a canvas. */
-  function canvasFromImageData(imageData) {
+  /** Wraps pixels the worker handed back into a canvas of the given size. */
+  function canvasFromBuffer(buffer, width, height) {
     const canvas = document.createElement("canvas");
-    canvas.width = imageData.width;
-    canvas.height = imageData.height;
-    canvas.getContext("2d").putImageData(imageData, 0, 0);
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").putImageData(
+      new ImageData(new Uint8ClampedArray(buffer), width, height), 0, 0);
     return canvas;
   }
 
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, warpPerspective, warpToImageData,
-    denoiseCanvas, fullImageCorners,
+    ensureOpenCV, detectCorners, detectDebug, warpPerspective, denoiseCanvas,
+    fullImageCorners,
   };
 })();

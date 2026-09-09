@@ -21,12 +21,10 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   curve, adjusting colour as well as brightness. Its aim is that the result
   still looks like a photograph of paper rather than a processed scan, so it
   deliberately keeps some grain and lands paper just below white instead of
-  clipping it — a watermark or pale print survives. It runs on the GPU, which
-  is what makes it practical: ~14ms for a 2 MP scan against ~850ms for the same
-  filter on the CPU. It is off unless you turn it on, and the setting is hidden
-  on a device whose browser cannot provide WebGL2. (High detail capture does
-  remove sensor grain, but that happens inside the camera before a photo exists
-  — the scan still matches its photo exactly.)
+  clipping it — a watermark or pale print survives. It is off unless you turn
+  it on, and it is by far the slowest step in the app when it is. (High detail
+  capture does remove sensor grain, but that happens inside the camera before a
+  photo exists — the scan still matches its photo exactly.)
 - **Choose where new photos go** — after picking from the library or finishing a
   capture session, a dialog asks whether they belong at the end (the default),
   at the beginning, or after a particular page. Re-shooting page 4 no longer
@@ -41,7 +39,7 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 
 **Tech**
 
-Static site, no build step. The Natural flash filter is WebGL2 fragment shaders on the main thread; everything else is OpenCV.js (vendored, ~11 MB, lazy-loaded in a Web Worker), which does document detection — the paper's outermost boundary is segmented (OTSU / Canny candidates) and a quadrilateral is fitted to its convex hull — plus the perspective warp; [jsPDF](https://github.com/parallax/jsPDF) assembles the PDF. Everything runs client-side.
+Static site, no build step. OpenCV.js (vendored, ~11 MB, lazy-loaded in a Web Worker) does document detection — the paper's outermost boundary is segmented (OTSU / Canny candidates) and a quadrilateral is fitted to its convex hull — plus the perspective warp; [jsPDF](https://github.com/parallax/jsPDF) assembles the PDF. Everything runs client-side.
 
 **Run locally**
 

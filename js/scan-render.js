@@ -1,11 +1,6 @@
 /* scan-render.js — the scan render pipeline: one perspective warp, with the
  * quarter rotation folded into the corner mapping so a rotated scan still
- * costs exactly one resample, and then the optional natural-flash look.
- *
- * The warp is geometry only and runs in the worker; the look is a filter and
- * runs on the GPU. Keeping them apart is what lets a scan with the setting off
- * be byte-identical to one from before the filter existed.
- *
+ * costs exactly one resample. Geometric transforms only, never a filter.
  * Exposes window.ScanRenderer.
  */
 (function () {
@@ -41,19 +36,14 @@
    * Source canvas plus the page's edits → the final scan canvas.
    * @param options { quarterTurns, maxDim, enhance } — maxDim caps the
    *                output's longest side (Compact mode), omit it for full
-   *                size; enhance applies the natural-flash look
+   *                size; enhance applies the natural-flash lift
    */
-  async function renderScan(sourceCanvas, corners, options) {
+  function renderScan(sourceCanvas, corners, options) {
     const settings = options || {};
-    const corrected = rotateCornerLabels(corners, settings.quarterTurns || 0);
-    const warpOptions = { maxDim: settings.maxDim };
-    if (!settings.enhance) {
-      return Detect.warpPerspective(sourceCanvas, corrected, warpOptions);
-    }
-    // The enhancement takes the warped pixels straight to a texture, so the
-    // intermediate canvas the plain path builds is never made.
-    const warped = await Detect.warpToImageData(sourceCanvas, corrected, warpOptions);
-    return GpuEnhance.apply(warped);
+    return Detect.warpPerspective(
+      sourceCanvas,
+      rotateCornerLabels(corners, settings.quarterTurns || 0),
+      { maxDim: settings.maxDim, enhance: settings.enhance });
   }
 
   window.ScanRenderer = { renderScan };
