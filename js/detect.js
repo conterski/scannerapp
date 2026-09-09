@@ -1,6 +1,12 @@
 /* detect.js — document corner detection, the perspective warp and capture
- * denoising, all delegated to a Web Worker (js/scan-worker.js) so the ~11 MB
+ * denoising, all delegated to Web Workers (js/scan-worker.js) so the ~11 MB
  * OpenCV.js compile and every pixel operation stay off the main thread.
+ *
+ * There are two workers, not one, because adding a batch of photos was bound
+ * by a single worker doing detection, the warp and the filter in turn. They
+ * are split by cost: detection on one, the warp and the filter on the other,
+ * so the two halves of a batch overlap. See createWorkerChannel.
+ *
  * Exposes window.Detect.
  */
 (function () {
@@ -16,53 +22,120 @@
   const MIN_WARP_DIMENSION = 8;
   const CORNER_KEYS = ["tl", "tr", "br", "bl"];
 
-  let worker = null;
-  let openCVReady = null;
-  let lastMessageId = 0;
-  const pendingCalls = new Map();
-
   // ---------------------------------------------------------------
   // Worker plumbing
   // ---------------------------------------------------------------
 
-  function getWorker() {
-    if (worker) return worker;
-    worker = new Worker("js/scan-worker.js");
-    worker.onmessage = (event) => {
-      const { id, ok, error } = event.data;
-      const call = pendingCalls.get(id);
-      if (!call) return;
-      pendingCalls.delete(id);
-      ok ? call.resolve(event.data) : call.reject(new Error(error));
-    };
-    worker.onerror = (event) => {
-      const failure = new Error(event.message || "Scan worker failed");
-      pendingCalls.forEach((call) => call.reject(failure));
-      pendingCalls.clear();
-      // Drop the dead worker AND its ~11 MB OpenCV heap. Without terminate()
-      // that heap survives until GC, on the device least able to spare it.
+  /**
+   * One worker and everything belonging to it.
+   *
+   * There are two, because a batch was bound by a single worker running
+   * detection, the warp and the filter one after another. Measured over five
+   * pages: 1225ms of detection behind 2427ms of rendering, against a 3866ms
+   * wall clock. Detection appeared to cost 3096ms inside that batch and
+   * 1225ms alone — the difference was time spent queued, not working.
+   */
+  function createWorkerChannel() {
+    let worker = null;
+    let ready = null;
+    let lastMessageId = 0;
+    const pending = new Map();
+
+    function getWorker() {
+      if (worker) return worker;
+      worker = new Worker("js/scan-worker.js");
+      worker.onmessage = (event) => {
+        const { id, ok, error } = event.data;
+        const call = pending.get(id);
+        if (!call) return;
+        pending.delete(id);
+        ok ? call.resolve(event.data) : call.reject(new Error(error));
+      };
+      worker.onerror = (event) => {
+        const failure = new Error(event.message || "Scan worker failed");
+        pending.forEach((call) => call.reject(failure));
+        pending.clear();
+        // Drop the dead worker AND its ~11 MB OpenCV heap. Without terminate()
+        // that heap survives until GC, on the device least able to spare it.
+        shutDown();
+      };
+      return worker;
+    }
+
+    function call(type, payload, transferables) {
+      return new Promise((resolve, reject) => {
+        const id = ++lastMessageId;
+        pending.set(id, { resolve, reject });
+        getWorker().postMessage({ id, type, ...payload }, transferables || []);
+      });
+    }
+
+    /** Loads OpenCV in this worker once; resolves when it is ready. */
+    function ensureReady() {
+      if (!ready) {
+        ready = call("init");
+        ready.catch(() => { ready = null; }); // let a later call retry
+      }
+      return ready;
+    }
+
+    /** Releases the worker and its heap. A later call rebuilds it. */
+    function shutDown() {
+      if (!worker) return;
       worker.terminate();
       worker = null;
-      openCVReady = null; // a later call rebuilds the worker from scratch
-    };
-    return worker;
-  }
-
-  function callWorker(type, payload, transferables) {
-    return new Promise((resolve, reject) => {
-      const id = ++lastMessageId;
-      pendingCalls.set(id, { resolve, reject });
-      getWorker().postMessage({ id, type, ...payload }, transferables || []);
-    });
-  }
-
-  /** Loads OpenCV in the worker once; resolves when it is ready. */
-  function ensureOpenCV() {
-    if (!openCVReady) {
-      openCVReady = callWorker("init");
-      openCVReady.catch(() => { openCVReady = null; }); // let a later call retry
+      ready = null;
     }
-    return openCVReady;
+
+    return { call, ensureReady, shutDown, isIdle: () => pending.size === 0 };
+  }
+
+  // Detection runs at DETECTION_MAX_EDGE and never grows its worker's heap
+  // past the ~128 MB the module starts with; the warp and the filter are what
+  // take a worker to several hundred. Splitting them that way means the second
+  // worker costs one base heap rather than a second peak.
+  const detector = createWorkerChannel();
+  const renderer = createWorkerChannel();
+
+  // The detector only works while photos are being added, so its heap is given
+  // back once it falls quiet. The delay is long on purpose: scanning comes in
+  // bursts, and rebuilding between two batches would make the second pay for
+  // an ~11 MB compile. The renderer is never shut down — adjusting a crop
+  // needs it, and that is interactive.
+  const DETECTOR_IDLE_SHUTDOWN_MS = 60000;
+  let detectorIdleTimer = 0;
+
+  function callDetector(type, payload, transferables) {
+    clearTimeout(detectorIdleTimer);
+    const finished = detector.call(type, payload, transferables);
+    const rearm = () => {
+      clearTimeout(detectorIdleTimer);
+      detectorIdleTimer = setTimeout(() => {
+        // Only when nothing is in flight, so no reply can be lost.
+        if (detector.isIdle()) detector.shutDown();
+      }, DETECTOR_IDLE_SHUTDOWN_MS);
+    };
+    finished.then(rearm, rearm);
+    return finished;
+  }
+
+  /**
+   * Readies the engine. Resolves on the detector, which is what runs first,
+   * and starts the renderer warming without waiting for it — compiling ~11 MB
+   * twice before the first photo would cost more than the overlap saves. The
+   * renderer then compiles alongside the first detection and is ready well
+   * before the first warp asks for it.
+   */
+  function ensureOpenCV() {
+    markRejectionHandled(renderer.ensureReady());
+    return detector.ensureReady();
+  }
+
+  /** Keeps a rejection from surfacing as unhandled; it is reported at the
+   *  point the renderer is actually used. */
+  function markRejectionHandled(promise) {
+    promise.catch(() => {});
+    return promise;
   }
 
   // ---------------------------------------------------------------
@@ -78,7 +151,7 @@
     const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
     const wholeImage = fullImageCorners(bounds.width, bounds.height);
     try {
-      await ensureOpenCV();
+      await detector.ensureReady();
       const { response, scale } = await runDetection(sourceCanvas, false);
       if (!response.corners) return wholeImage;
       const corners = toFullResolutionCorners(response.corners, scale, bounds);
@@ -91,7 +164,7 @@
 
   /** Debug variant: returns the per-candidate scoring info at detection scale. */
   async function detectDebug(sourceCanvas) {
-    await ensureOpenCV();
+    await detector.ensureReady();
     const { response, scale } = await runDetection(sourceCanvas, true);
     return {
       corners: response.corners, debug: response.debug, scale,
@@ -103,7 +176,7 @@
   async function runDetection(sourceCanvas, wantsDebug) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
     const imageData = imageDataOf(canvas);
-    const response = await callWorker("detect", {
+    const response = await callDetector("detect", {
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
@@ -143,10 +216,10 @@
    */
   async function warpPerspective(sourceCanvas, corners, options) {
     const { maxDim, enhance } = options || {};
-    await ensureOpenCV();
+    await renderer.ensureReady();
     const { width: dstW, height: dstH } = outputSizeFor(corners, maxDim);
     const imageData = imageDataOf(sourceCanvas);
-    const response = await callWorker("warp", {
+    const response = await renderer.call("warp", {
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
@@ -187,10 +260,10 @@
    * rather than on the warped scan.
    */
   async function denoiseCanvas(sourceCanvas) {
-    await ensureOpenCV();
+    await renderer.ensureReady();
     const { width, height } = sourceCanvas;
     const imageData = imageDataOf(sourceCanvas);
-    const response = await callWorker("denoise", {
+    const response = await renderer.call("denoise", {
       width, height, buffer: imageData.data.buffer,
     }, [imageData.data.buffer]);
     return canvasFromBuffer(response.buffer, width, height);
