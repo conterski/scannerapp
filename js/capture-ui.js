@@ -15,7 +15,7 @@
 
   const IDS = [
     "captureView", "captureVideo", "captureFlash", "captureControls",
-    "shotCount", "shotStrip", "shutterBtn", "captureDoneBtn",
+    "shotCount", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
   ];
@@ -50,6 +50,9 @@
       let encodeChain = Promise.resolve(); // serialised: shots keep tap order
       let flashTimer = 0;
       let accepting = true;                // false once the session is closing
+      // The camera LED, held on for the whole session. Not to be confused with
+      // els.captureFlash, which is the white screen blink on each shutter tap.
+      let isTorchOn = false;
 
       // ----- rendering -----
 
@@ -159,7 +162,10 @@
       function teardown() {
         binder.offAll();
         clearTimeout(flashTimer);
-        camera.stop(els.captureVideo);
+        isTorchOn = false;
+        els.torchBtn.hidden = true;
+        renderTorch();
+        camera.stop(els.captureVideo); // also puts the light out
         store.dispose();
         els.captureView.hidden = true;
         els.galleryView.hidden = true;
@@ -176,6 +182,26 @@
         wireShutterControls();
         wireGalleryControls();
         wireFallbackControls();
+        binder.on(els.torchBtn, "click", toggleTorch);
+      }
+
+      function renderTorch() {
+        els.torchBtn.classList.toggle("is-on", isTorchOn);
+        els.torchBtn.setAttribute("aria-pressed", String(isTorchOn));
+        els.torchBtn.title = isTorchOn ? "Turn the light off" : "Turn the light on";
+      }
+
+      /** Stays on across shots for the rest of the session: the light is a
+       *  track constraint, not a per-shot action. */
+      function toggleTorch() {
+        const wanted = !isTorchOn;
+        isTorchOn = wanted;
+        renderTorch();
+        camera.setTorch(wanted).catch((error) => {
+          console.warn("Couldn't switch the camera light:", error);
+          isTorchOn = !wanted; // the device refused — don't show a state that isn't real
+          renderTorch();
+        });
       }
 
       function wireShutterControls() {
@@ -214,8 +240,13 @@
       renderCount();
       renderStrip();
       wire();
+      els.torchBtn.hidden = true; // shown only once the device admits it can
+      renderTorch();
       camera.start(els.captureVideo).then(
-        () => { els.shutterBtn.disabled = false; },
+        () => {
+          els.shutterBtn.disabled = false;
+          els.torchBtn.hidden = !camera.supportsTorch();
+        },
         (err) => {
           console.warn("Camera unavailable:", err);
           showError(CameraStream.describeError(err));

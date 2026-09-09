@@ -13,46 +13,17 @@
   // resolution, so each page's detected corners stay valid against it.
   const COMPACT_ORIGINAL_QUALITY = 0.6;
 
-  const STORAGE_KEY = "scannerapp:compact";
-  const STORED_ENABLED = "1";
-  const STORED_DISABLED = "0";
-
-  let isCompactEnabled = false;
-
-  /** localStorage throws outright in private mode, where "off" is the honest
-   *  answer — compact is opt-in and nothing was ever saved there. */
-  function readPersistedSetting() {
-    try {
-      return localStorage.getItem(STORAGE_KEY) === STORED_ENABLED;
-    } catch (error) {
-      console.warn("Couldn't read the compact-scans setting:", error);
-      return false;
-    }
-  }
-
-  function writePersistedSetting(enabled) {
-    try {
-      localStorage.setItem(STORAGE_KEY, enabled ? STORED_ENABLED : STORED_DISABLED);
-    } catch (error) {
-      console.warn("Couldn't save the compact-scans setting:", error);
-    }
-  }
-
-  function loadPersistedSetting() { isCompactEnabled = readPersistedSetting(); }
-
-  function isEnabled() { return isCompactEnabled; }
-
-  function setEnabled(enabled) {
-    isCompactEnabled = enabled;
-    writePersistedSetting(enabled);
-  }
+  const flag = PersistedFlag.create("scannerapp:compact", "compact-scans");
 
   function currentProfile() {
-    return isCompactEnabled ? COMPACT_PROFILE : STANDARD_PROFILE;
+    return flag.isEnabled() ? COMPACT_PROFILE : STANDARD_PROFILE;
   }
 
   window.ScanQuality = {
-    loadPersistedSetting, isEnabled, setEnabled, currentProfile,
+    loadPersistedSetting: flag.load,
+    isEnabled: flag.isEnabled,
+    setEnabled: flag.setEnabled,
+    currentProfile,
     COMPACT_ORIGINAL_QUALITY,
   };
 })();

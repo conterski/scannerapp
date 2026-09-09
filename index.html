@@ -27,7 +27,7 @@
   <div id="emptyState" class="empty-state">
     <div class="empty-icon">&#128196;</div>
     <p>Photograph documents and turn them into clean scans.</p>
-    <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped &mdash; no filters are applied.</p>
+    <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped, and colours are left untouched unless you turn on Natural flash.</p>
   </div>
 
   <div id="pageGrid" class="page-grid"></div>
@@ -42,6 +42,14 @@
     <button id="photosBtn" class="btn btn-primary" disabled>&#128190; Save to Photos</button>
   </div>
   <p class="export-hint" id="exportHint">On iPhone, &ldquo;Save to Photos&rdquo; opens the share sheet &mdash; tap <b>Save Images</b> there.</p>
+
+  <label class="compact-toggle" id="enhanceToggle">
+    <input type="checkbox" id="enhanceCheck">
+    <span class="compact-text">
+      <span class="compact-title">Natural flash</span>
+      <span class="compact-sub">Lifts contrast so paper reads white &mdash; colours are kept</span>
+    </span>
+  </label>
 
   <label class="compact-toggle" id="compactToggle">
     <input type="checkbox" id="compactCheck">
@@ -109,6 +117,7 @@
   <div id="captureControls" class="capture-controls">
     <div class="capture-top">
       <span id="shotCount" class="shot-count">0 photos</span>
+      <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
     </div>
     <div class="capture-bottom">
       <button id="shotStrip" class="shot-strip capture-side capture-side-left" type="button" title="Review photos" hidden></button>
@@ -137,7 +146,9 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="js/image-utils.js"></script>
 <script src="js/pointer-drag.js"></script>
+<script src="js/persisted-flag.js"></script>
 <script src="js/scan-quality.js"></script>
+<script src="js/scan-enhance.js"></script>
 <script src="js/detect.js"></script>
 <script src="js/scan-render.js"></script>
 <script src="js/camera.js"></script>

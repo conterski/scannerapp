@@ -393,10 +393,37 @@ html, body {
 }
 .capture-controls > * { pointer-events: auto; }
 
+.torch-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(8, 10, 14, 0.55);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.torch-btn.is-on {
+  background: #ffd66b;
+  border-color: #ffd66b;
+  opacity: 1;
+}
+
+/* The count pill stays centred; the torch floats over the row so its width
+   can't shift the pill, the same trick the shutter bar uses. */
 .capture-top {
+  position: relative;
   display: flex;
   justify-content: center;
   padding: max(12px, env(safe-area-inset-top)) 16px 0;
+}
+.capture-top .torch-btn {
+  position: absolute;
+  right: 16px;
+  top: max(12px, env(safe-area-inset-top));
 }
 .shot-count {
   background: rgba(10, 12, 16, 0.6);

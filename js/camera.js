@@ -104,6 +104,31 @@
   function create() {
     let stream = null;
 
+    function videoTrack() {
+      return stream ? stream.getVideoTracks()[0] || null : null;
+    }
+
+    /** Whether this device exposes its camera light. iOS Safari's support is
+     *  patchy, so it is probed rather than assumed and the control is hidden
+     *  when absent. Some browsers throw instead of omitting getCapabilities. */
+    function supportsTorch() {
+      const track = videoTrack();
+      if (!track || typeof track.getCapabilities !== "function") return false;
+      try {
+        return track.getCapabilities().torch === true;
+      } catch (error) {
+        return false;
+      }
+    }
+
+    /** Switches the camera light. Rejects if the device refuses, so the caller
+     *  can put its control back rather than showing a state that isn't real. */
+    function setTorch(on) {
+      const track = videoTrack();
+      if (!track) return Promise.reject(new Error("The camera is not running"));
+      return track.applyConstraints({ advanced: [{ torch: on }] });
+    }
+
     /** Starts the stream and plays it in `video`. Must be called from a user
      *  gesture: getUserMedia is invoked before the first await. */
     function start(video) {
@@ -125,13 +150,17 @@
     /** Releases the camera. Safe to call when never started. */
     function stop(video) {
       if (stream) {
+        // Put the light out before releasing. Stopping the track should do it
+        // on its own, but asking explicitly is what guarantees the LED is
+        // never left burning after Done, a fallback or an error.
+        if (supportsTorch()) markRejectionHandled(setTorch(false));
         for (const track of stream.getTracks()) track.stop();
         stream = null;
       }
       if (video) video.srcObject = null;
     }
 
-    return { start, stop };
+    return { start, stop, supportsTorch, setTorch };
   }
 
   window.CameraStream = {

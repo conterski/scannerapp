@@ -6,7 +6,10 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
-- **No filters** — pixel colors are never altered, only geometric transforms
+- **No filters by default** — pixel colors are never altered, only geometric
+  transforms. The optional **Natural flash** setting is the one exception: it
+  lifts local contrast so paper reads white, working on luminance alone so hue
+  and saturation are left as photographed. It is off unless you turn it on.
 - Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps
 - Reorder pages by dragging the ≡ grip or with the ◀ ▶ buttons
 - Export:

@@ -32,7 +32,9 @@
   document.addEventListener("DOMContentLoaded", async () => {
     Editor.init();
     ScanQuality.loadPersistedSetting();
+    ScanEnhance.loadPersistedSetting();
     $("compactCheck").checked = ScanQuality.isEnabled();
+    $("enhanceCheck").checked = ScanEnhance.isEnabled();
     PageListView.init({
       onEditPage: editPage,
       onDeletePage: deletePage,
@@ -42,7 +44,7 @@
       onSelectModeChanged: renderPageList,
     });
     wirePhotoInputs();
-    wireQualityToggle();
+    wireOutputToggles();
     wireExportControls();
     await restoreSavedSession(); // repopulate pages before the first paint
     renderPageList();
@@ -72,10 +74,14 @@
     });
   }
 
-  function wireQualityToggle() {
+  function wireOutputToggles() {
     $("compactCheck").addEventListener("change", async (event) => {
       await setCompactEnabled(event.target.checked);
       event.target.checked = ScanQuality.isEnabled(); // reverts if cancelled
+    });
+    $("enhanceCheck").addEventListener("change", async (event) => {
+      await setNaturalFlashEnabled(event.target.checked);
+      event.target.checked = ScanEnhance.isEnabled();
     });
   }
 
@@ -379,13 +385,7 @@
     showBusy("Compressing…");
     try {
       await Detect.ensureOpenCV();
-      let nextDecode = pages.length ? prefetchOriginal(pages[0]) : null;
-      for (let index = 0; index < pages.length; index++) {
-        showBusy(`Compressing ${index + 1} / ${pages.length}…`);
-        const source = await nextDecode;
-        if (index + 1 < pages.length) nextDecode = prefetchOriginal(pages[index + 1]);
-        await recompressPage(pages[index], source);
-      }
+      await forEachPageWithSource("Compressing", recompressPage);
       persistPageOrder();
     } catch (error) {
       console.error("Compression failed:", error);
@@ -396,6 +396,18 @@
     }
   }
 
+  /** Walks every page in order, decoding the next original while the current
+   *  one is processed — the same overlap addPhotoBatch uses. */
+  async function forEachPageWithSource(busyLabel, processPage) {
+    let nextDecode = pages.length ? prefetchOriginal(pages[0]) : null;
+    for (let index = 0; index < pages.length; index++) {
+      showBusy(`${busyLabel} ${index + 1} / ${pages.length}…`);
+      const source = await nextDecode;
+      if (index + 1 < pages.length) nextDecode = prefetchOriginal(pages[index + 1]);
+      await processPage(pages[index], source);
+    }
+  }
+
   /** Decodes the next page's original while the current one warps and encodes,
    *  the same overlap addPhotoBatch uses. Marking the rejection handled keeps a
    *  prefetch abandoned by an earlier failure quiet; awaiting it later still
@@ -403,6 +415,31 @@
   function prefetchOriginal(page) {
     return markRejectionHandled(
       ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
+  }
+
+  /** Turning it on or off re-renders every page, so one PDF never mixes an
+   *  enhanced page with an untouched one. */
+  async function setNaturalFlashEnabled(enabled) {
+    if (enabled === ScanEnhance.isEnabled()) return;
+    ScanEnhance.setEnabled(enabled);
+    if (pages.length) await rerenderAllScans();
+  }
+
+  async function rerenderAllScans() {
+    showBusy("Updating scans…");
+    try {
+      await Detect.ensureOpenCV();
+      await forEachPageWithSource("Updating scans", async (page, source) => {
+        await regenerateOutput(page, source);
+        persist(Store.savePage(page));
+      });
+    } catch (error) {
+      console.error("Re-rendering failed:", error);
+      alert("Couldn't update the scans: " + error.message);
+    } finally {
+      hideBusy();
+      renderPageList();
+    }
   }
 
   async function recompressPage(page, source) {
@@ -424,8 +461,10 @@
     renderTokens.set(page.id, token);
     const source = sourceCanvas || (await getSource(page));
     const profile = ScanQuality.currentProfile();
-    const scan = await ScanRenderer.renderScan(source, page.corners,
-      { quarterTurns: page.quarterTurns, maxDim: profile.maxDim });
+    const scan = await ScanRenderer.renderScan(source, page.corners, {
+      quarterTurns: page.quarterTurns, maxDim: profile.maxDim,
+      enhance: ScanEnhance.isEnabled(),
+    });
     if (renderTokens.get(page.id) !== token) return; // superseded by a newer edit
     const blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
     if (renderTokens.get(page.id) !== token) return;
@@ -435,11 +474,11 @@
     page.renderedSig = renderSig(page);
   }
 
-  /** Signature of a page's geometry — lets us skip a re-warp when nothing
-   *  actually changed (e.g. paging through scans to review them). */
+  /** Signature of everything a render depends on — lets us skip a re-warp when
+   *  nothing actually changed (e.g. paging through scans to review them). */
   function renderSig(page) {
     const { tl, tr, br, bl } = page.corners;
-    return JSON.stringify([tl, tr, br, bl, page.quarterTurns]);
+    return JSON.stringify([tl, tr, br, bl, page.quarterTurns, ScanEnhance.isEnabled()]);
   }
 
   // Background renders in flight (page edits regenerated off the critical

@@ -15,6 +15,11 @@ to count as correct.
 | 6 | **Natural proportions** | The page doesn't look stretched or squashed compared to the real paper | Aspect ratio visually plausible |
 | 7 | **No filters** | Colors, brightness, and shadows in the scan match the photo exactly (a gray photo gives a gray scan — that's correct) | Pixel colors must be untouched |
 
+Rule 7 grades the **default** pipeline. With the optional **Natural flash**
+setting on, brightness and local contrast are expected to change; hue and
+saturation are not, because the lift is applied to luminance only. Grade an
+enhanced scan against rules 1-6, and check rule 7 with the setting off.
+
 ## Grading
 
 - **PASS** — all 7 rules hold.
