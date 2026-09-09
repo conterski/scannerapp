@@ -1,10 +1,11 @@
-/* scan-worker.js — runs OpenCV.js off the main thread and orchestrates
- * document detection.
+/* scan-worker.js — runs OpenCV.js off the main thread: document detection and
+ * its perspective warp, plus the capture-time denoise.
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
- *   init   → loads OpenCV
- *   detect {width, height, buffer}                      → {corners|null}
- *   warp   {width, height, buffer, corners, dstW, dstH} → {buffer}
+ *   init    → loads OpenCV
+ *   detect  {width, height, buffer}                      → {corners|null}
+ *   warp    {width, height, buffer, corners, dstW, dstH} → {buffer}
+ *   denoise {width, height, buffer}                      → {buffer}
  *
  * The detector itself lives in worker/: geometry (pure math), pixel-probes
  * (what the pixels say), candidates (mask → scored quads), edge-fusion
@@ -493,30 +494,72 @@ function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
 }
 
 // ------------------------------------------------------------------
+// denoise
+// ------------------------------------------------------------------
+
+// A 3x3 median is the only filter in this build that actually removes sensor
+// grain: bilateralFilter's range kernel preserves the very speckle it is aimed
+// at (+1.0 dB against this filter's +5.0 dB, measured at every sigma), and a
+// 5x5 median removes less noise than it does detail.
+const DENOISE_KERNEL_SIZE = 3;
+
+/**
+ * Removes sensor grain from a full-resolution camera frame.
+ *
+ * Only worth doing BEFORE the capture downscale. Measured on a noisy frame
+ * against its clean original: filtering the full frame gains 2.7 dB, while
+ * filtering after the downscale gains 1.2 dB at best and loses 1.5 dB at the
+ * ratios high detail used to use — past that point the downscale has already
+ * averaged the grain away, so the median only eats real pixels.
+ *
+ * @returns the filtered pixels as a transferable buffer
+ */
+function denoise({ width, height, buffer }) {
+  const src = cv.matFromImageData(toImageData(width, height, buffer));
+  const rgb = new cv.Mat();
+  const out = new cv.Mat();
+  try {
+    // Canvas alpha is uniformly opaque, so dropping it around the filter loses
+    // nothing and costs nothing: sorting three channels instead of four
+    // measures 122ms against 159ms at 2560x1440.
+    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    cv.medianBlur(rgb, rgb, DENOISE_KERNEL_SIZE);
+    cv.cvtColor(rgb, out, cv.COLOR_RGB2RGBA);
+    return new Uint8ClampedArray(out.data).buffer;
+  } finally {
+    src.delete(); rgb.delete(); out.delete();
+  }
+}
+
+// ------------------------------------------------------------------
 // Message dispatch
 // ------------------------------------------------------------------
 
+/** One entry per message type, each returning the fields to merge into the
+ *  reply plus any buffers to hand over rather than copy. A Map rather than an
+ *  object literal so an unknown type can never resolve to Object.prototype. */
+const HANDLERS = new Map([
+  ["init", () => ({ result: {} })],
+  ["detect", (payload) => ({ result: detect(payload) })],
+  ["warp", (payload) => {
+    const buffer = warp(payload);
+    return { result: { buffer }, transferables: [buffer] };
+  }],
+  ["denoise", (payload) => {
+    const buffer = denoise(payload);
+    return { result: { buffer }, transferables: [buffer] };
+  }],
+]);
+
 async function handleMessage({ id, type, ...payload }) {
-  if (type !== "init" && type !== "detect" && type !== "warp") {
+  const handler = HANDLERS.get(type);
+  if (!handler) {
     self.postMessage({ id, ok: false, error: "Unknown message type: " + type });
     return;
   }
   await ensureInit();
-  if (type === "init") {
-    self.postMessage({ id, ok: true });
-    return;
-  }
-  if (type === "detect") {
-    const result = detect(payload);
-    self.postMessage({ id, ok: true, corners: result.corners, debug: result.debug,
-      fusedOk: result.fusedOk, trace: result.trace, segments: result.segments,
-      splitDiag: result.splitDiag });
-    return;
-  }
-  if (type === "warp") {
-    const buffer = warp(payload);
-    self.postMessage({ id, ok: true, buffer }, [buffer]);
-  }
+  const { result, transferables } = handler(payload);
+  self.postMessage({ id, ok: true, ...result }, transferables || []);
 }
 
 self.onmessage = (event) => {

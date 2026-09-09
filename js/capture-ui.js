@@ -110,21 +110,26 @@
 
       // ----- actions -----
 
-      /** One tap: grab the frame now, encode off the critical path, and stay
-       *  on the live preview. No confirmation, no interstitial. */
+      /** One tap: grab the frame now, process it off the critical path, and
+       *  stay on the live preview. No confirmation, no interstitial.
+       *
+       *  The frame is this chain's to own, so it is released the moment the
+       *  JPEG exists rather than left for the collector — taps can outrun the
+       *  chain, and each waiting frame is a full-resolution one. */
       function shoot() {
         if (!accepting) return;
         const frame = CameraStream.grabFrame(els.captureVideo);
         if (!frame) return; // stream has no frame yet
         flash();
         encodeChain = encodeChain
-          .then(() => CameraStream.encodeJpeg(frame))
+          .then(() => CameraStream.captureJpeg(frame))
           .then((blob) => {
             store.add(blob);
             renderCount();
             renderStrip();
           })
-          .catch((err) => console.error("Capture failed:", err));
+          .catch((err) => console.error("Capture failed:", err))
+          .then(() => ImageUtils.releaseCanvas(frame));
       }
 
       // Reviewing never ends the session — the stream keeps running behind

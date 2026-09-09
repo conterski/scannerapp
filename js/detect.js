@@ -1,6 +1,6 @@
-/* detect.js — document corner detection and the perspective warp, delegated to
- * a Web Worker (js/scan-worker.js) so the ~11 MB OpenCV.js compile and all
- * image processing stay off the main thread.
+/* detect.js — document corner detection, the perspective warp and capture
+ * denoising, all delegated to a Web Worker (js/scan-worker.js) so the ~11 MB
+ * OpenCV.js compile and every pixel operation stay off the main thread.
  * Exposes window.Detect.
  */
 (function () {
@@ -154,12 +154,7 @@
       dstW, dstH, enhance: !!enhance,
     }, [imageData.data.buffer]);
 
-    const output = document.createElement("canvas");
-    output.width = dstW;
-    output.height = dstH;
-    output.getContext("2d").putImageData(
-      new ImageData(new Uint8ClampedArray(response.buffer), dstW, dstH), 0, 0);
-    return output;
+    return canvasFromBuffer(response.buffer, dstW, dstH);
   }
 
   /** The deskewed page keeps the average length of each pair of opposite
@@ -177,6 +172,28 @@
       height = Math.max(MIN_WARP_DIMENSION, Math.round(height * shrink));
     }
     return { width, height };
+  }
+
+  // ---------------------------------------------------------------
+  // Capture denoising
+  // ---------------------------------------------------------------
+
+  /**
+   * Removes sensor grain from a camera frame, returning a new canvas of the
+   * same size. `sourceCanvas` is left untouched.
+   *
+   * Belongs to capture rather than to scanning: it only pays off on the full
+   * frame, before the capture downscale, so it runs before a photo is stored
+   * rather than on the warped scan.
+   */
+  async function denoiseCanvas(sourceCanvas) {
+    await ensureOpenCV();
+    const { width, height } = sourceCanvas;
+    const imageData = imageDataOf(sourceCanvas);
+    const response = await callWorker("denoise", {
+      width, height, buffer: imageData.data.buffer,
+    }, [imageData.data.buffer]);
+    return canvasFromBuffer(response.buffer, width, height);
   }
 
   // ---------------------------------------------------------------
@@ -217,7 +234,18 @@
     return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
   }
 
+  /** Wraps pixels the worker handed back into a canvas of the given size. */
+  function canvasFromBuffer(buffer, width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").putImageData(
+      new ImageData(new Uint8ClampedArray(buffer), width, height), 0, 0);
+    return canvas;
+  }
+
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, warpPerspective, fullImageCorners,
+    ensureOpenCV, detectCorners, detectDebug, warpPerspective, denoiseCanvas,
+    fullImageCorners,
   };
 })();

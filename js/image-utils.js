@@ -53,6 +53,14 @@
     return canvas;
   }
 
+  /** Drops a canvas's pixel buffer now instead of at the next collection.
+   *  A queued capture frame is tens of megabytes, and iOS Safari is quick to
+   *  discard a tab that holds several of them waiting to be encoded. */
+  function releaseCanvas(canvas) {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
   function encodeCanvasToJpeg(canvas, quality) {
     return new Promise((resolve, reject) => {
       canvas.toBlob(
@@ -63,5 +71,6 @@
 
   window.ImageUtils = {
     sourceDimensions, createScaledCanvas, decodeImageToCanvas, encodeCanvasToJpeg,
+    releaseCanvas,
   };
 })();

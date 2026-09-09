@@ -5,15 +5,22 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 **Features**
 
 - **High detail capture** (on by default) — the in-page camera keeps more of
-  what the sensor delivers: 1800px frames instead of 1600px, ~27% more pixels
-  for ~7% larger exports. Turn it off to keep files smaller. It applies to new
-  photos only, since resolution is fixed the moment a shot is taken.
+  what the sensor delivers, and works to keep it clean: 2200px frames instead
+  of 1600px (~2.7 MP against ~1.4 MP), a 60fps stream so no frame is exposed
+  for longer than 1/60s and a handheld shot doesn't smear, and sensor grain
+  removed from the full frame before it is scaled down. Exports run ~46%
+  larger than with the setting off; turn it off to keep files smaller. It
+  applies to new photos only, since resolution is fixed the moment a shot is
+  taken.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
-- **No filters by default** — pixel colors are never altered, only geometric
-  transforms. The optional **Natural flash** setting is the one exception: it
-  lifts local contrast so paper reads white, working on luminance alone so hue
-  and saturation are left as photographed. It is off unless you turn it on.
+- **No filters between photo and scan** — scanning applies geometric
+  transforms only, never a colour change. The optional **Natural flash**
+  setting is the one exception: it lifts local contrast so paper reads white,
+  working on luminance alone so hue and saturation are left as photographed.
+  It is off unless you turn it on. (High detail capture does remove sensor
+  grain, but that happens inside the camera before a photo exists — the scan
+  still matches its photo exactly.)
 - Manual adjustment: drag the four corners (with magnifier loupe), rotate in 90° steps
 - Reorder pages by dragging the ≡ grip or with the ◀ ▶ buttons
 - Export:

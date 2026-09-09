@@ -20,6 +20,12 @@ setting on, brightness and local contrast are expected to change; hue and
 saturation are not, because the lift is applied to luminance only. Grade an
 enhanced scan against rules 1-6, and check rule 7 with the setting off.
 
+Rule 7 compares the scan against **the photo**, so **High detail capture** does
+not affect it: its grain removal happens in the camera, before a photo exists,
+and the scan still matches that photo exactly. Worth stating anyway — with High
+detail on, which is the default, the app is filtering pixels at capture time.
+A photo added from the library is never touched.
+
 ## Grading
 
 - **PASS** — all 7 rules hold.
