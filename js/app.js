@@ -45,6 +45,7 @@
     $("highDetailCheck").checked = CaptureQuality.isEnabled();
     $("compactCheck").checked = ScanQuality.isEnabled();
     $("enhanceCheck").checked = ScanEnhance.isEnabled();
+    showNaturalFlashIfSupported();
     PageListView.init({
       onEditPage: editPage,
       onDeletePage: deletePage,
@@ -102,6 +103,17 @@
         { label: "🖼 Photos", onChoose: () => startAdd(index + 1, openLibrary) },
       ],
     });
+  }
+
+  /** Natural flash runs on the GPU, so a device without WebGL2 or float
+   *  render targets cannot offer it. Probed rather than assumed and the
+   *  control hidden when absent, the same way the camera light is. */
+  function showNaturalFlashIfSupported() {
+    if (GpuEnhance.isSupported()) return;
+    console.warn("Natural flash is unavailable:", GpuEnhance.unsupportedMessage());
+    $("enhanceToggle").hidden = true;
+    if (ScanEnhance.isEnabled()) ScanEnhance.setEnabled(false);
+    $("enhanceCheck").checked = false;
   }
 
   function wireOutputToggles() {

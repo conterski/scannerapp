@@ -22,7 +22,8 @@ and so is colour: the grade smooths the chroma channels and lifts saturation
 is push paper to pure white or ink to pure black — it keeps the sheet's own
 cast and some of its grain on purpose, so the scan still reads as a photograph.
 Grade an enhanced scan against rules 1-6, and check rule 7 with the setting
-off.
+off. The filter needs WebGL2; where that is missing the setting is hidden and
+rule 7 simply always applies.
 
 Rule 7 compares the scan against **the photo**, so **High detail capture** does
 not affect it: its grain removal happens in the camera, before a photo exists,
