@@ -13,7 +13,11 @@
   // resolution, so each page's detected corners stay valid against it.
   const COMPACT_ORIGINAL_QUALITY = 0.6;
 
-  const flag = PersistedFlag.create("scannerapp:compact", "compact-scans");
+  const flag = PersistedFlag.create({
+    storageKey: "scannerapp:compact",
+    label: "compact-scans",
+    defaultEnabled: false,
+  });
 
   function currentProfile() {
     return flag.isEnabled() ? COMPACT_PROFILE : STANDARD_PROFILE;

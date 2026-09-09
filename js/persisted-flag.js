@@ -1,8 +1,9 @@
 /* persisted-flag.js — an on/off setting that survives a reload.
  *
  * localStorage throws outright in private mode, so every read and write is
- * guarded and a failure falls back to "off": these flags are opt-in, and if
- * nothing could be saved then nothing was ever turned on.
+ * guarded. A failure falls back to the setting's own declared default: if
+ * nothing could be stored then the user never changed it, and the app's
+ * intended default is the honest answer.
  *
  * Exposes window.PersistedFlag. `create()` is a factory — each setting gets its
  * own flag, so no state is shared between them.
@@ -14,18 +15,20 @@
   const STORED_DISABLED = "0";
 
   /**
-   * @param storageKey  localStorage key to persist under
-   * @param label       human name, used only in the warning when storage fails
+   * @param options { storageKey, label, defaultEnabled } — `label` names the
+   *                setting in the warning shown when storage is unavailable
    */
-  function create(storageKey, label) {
-    let isOn = false;
+  function create(options) {
+    const { storageKey, label, defaultEnabled } = options;
+    let isOn = defaultEnabled;
 
     function read() {
       try {
-        return localStorage.getItem(storageKey) === STORED_ENABLED;
+        const stored = localStorage.getItem(storageKey);
+        return stored === null ? defaultEnabled : stored === STORED_ENABLED;
       } catch (error) {
         console.warn(`Couldn't read the ${label} setting:`, error);
-        return false;
+        return defaultEnabled;
       }
     }
 

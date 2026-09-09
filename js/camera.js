@@ -8,20 +8,19 @@
 (function () {
   "use strict";
 
+  // How large a frame to ask for, how much of it to keep and at what quality
+  // all come from CaptureQuality — this module drives the device, not policy.
   // Frames are downscaled at grab time rather than at export time: a long
   // session holds every shot in memory, and full-resolution iPhone frames
   // exhaust it fast.
-  const MAX_EDGE = 1600;
-  const JPEG_QUALITY = 0.8;
-
-  const CONSTRAINTS = {
-    video: {
-      facingMode: "environment", // rear camera by default
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-    },
-    audio: false,
-  };
+  function mediaConstraints() {
+    return {
+      video: Object.assign(
+        { facingMode: "environment" }, // rear camera by default
+        CaptureQuality.currentProfile().video),
+      audio: false,
+    };
+  }
 
   // A stream can open and then never deliver a frame. Without a deadline the
   // shutter stays disabled and the camera light stays on, with no error shown.
@@ -83,17 +82,18 @@
     });
   }
 
-  /** Copies the current video frame into a canvas capped at MAX_EDGE.
+  /** Copies the current video frame into a canvas capped at the profile's edge.
    *  Returns null while the stream has no frame yet. Synchronous, so a tap
    *  captures the frame the user actually saw. */
   function grabFrame(video) {
     const { width, height } = ImageUtils.sourceDimensions(video);
     if (!width || !height) return null;
-    return ImageUtils.createScaledCanvas(video, MAX_EDGE).canvas;
+    const { maxEdge } = CaptureQuality.currentProfile();
+    return ImageUtils.createScaledCanvas(video, maxEdge).canvas;
   }
 
   function encodeJpeg(canvas) {
-    return ImageUtils.encodeCanvasToJpeg(canvas, JPEG_QUALITY);
+    return ImageUtils.encodeCanvasToJpeg(canvas, CaptureQuality.currentProfile().jpegQuality);
   }
 
   function markRejectionHandled(promise) {
@@ -133,7 +133,7 @@
      *  gesture: getUserMedia is invoked before the first await. */
     function start(video) {
       if (!isSupported()) return Promise.reject(unsupportedError());
-      return navigator.mediaDevices.getUserMedia(CONSTRAINTS).then((s) => {
+      return navigator.mediaDevices.getUserMedia(mediaConstraints()).then((s) => {
         stream = s;
         video.srcObject = s;
         // iOS needs the inline attributes in the markup *and* an explicit
@@ -164,7 +164,6 @@
   }
 
   window.CameraStream = {
-    MAX_EDGE, JPEG_QUALITY,
     isSupported, describeError, grabFrame, encodeJpeg, create,
   };
 })();

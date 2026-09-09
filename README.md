@@ -4,6 +4,10 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 
 **Features**
 
+- **High detail capture** (on by default) — the in-page camera keeps more of
+  what the sensor delivers: 1800px frames instead of 1600px, ~27% more pixels
+  for ~7% larger exports. Turn it off to keep files smaller. It applies to new
+  photos only, since resolution is fixed the moment a shot is taken.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters by default** — pixel colors are never altered, only geometric

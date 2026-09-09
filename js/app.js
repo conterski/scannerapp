@@ -31,8 +31,10 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     Editor.init();
+    CaptureQuality.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
     ScanEnhance.loadPersistedSetting();
+    $("highDetailCheck").checked = CaptureQuality.isEnabled();
     $("compactCheck").checked = ScanQuality.isEnabled();
     $("enhanceCheck").checked = ScanEnhance.isEnabled();
     PageListView.init({
@@ -75,6 +77,11 @@
   }
 
   function wireOutputToggles() {
+    // Capture resolution is fixed when a photo is taken, so unlike the other
+    // two this changes new photos only and re-renders nothing.
+    $("highDetailCheck").addEventListener("change", (event) => {
+      CaptureQuality.setEnabled(event.target.checked);
+    });
     $("compactCheck").addEventListener("change", async (event) => {
       await setCompactEnabled(event.target.checked);
       event.target.checked = ScanQuality.isEnabled(); // reverts if cancelled

@@ -11,7 +11,11 @@
 (function () {
   "use strict";
 
-  const flag = PersistedFlag.create("scannerapp:naturalFlash", "natural-flash");
+  const flag = PersistedFlag.create({
+    storageKey: "scannerapp:naturalFlash",
+    label: "natural-flash",
+    defaultEnabled: false,
+  });
 
   window.ScanEnhance = {
     loadPersistedSetting: flag.load,
