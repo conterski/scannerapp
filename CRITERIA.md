@@ -16,13 +16,13 @@ to count as correct.
 | 7 | **No filters** | Colors, brightness, and shadows in the scan match the photo exactly (a gray photo gives a gray scan — that's correct) | Pixel colors must be untouched |
 
 Rule 7 grades the **default** pipeline. With the optional **Natural flash**
-setting on, brightness and contrast are expected to change, and so is the
-sharpness of edges. Hue and saturation are not adjusted — the grade runs on
-luminance alone — but where it brightens paper to near-white, that paper's
-colour cast necessarily washes out with it. Measured on a receipt: output
-luminance below 200 shifts chroma by 0 levels; the shift sits entirely in the
-paper. Grade an enhanced scan against rules 1-6, and check rule 7 with the
-setting off.
+setting on, brightness, contrast and edge sharpness are all expected to change,
+and so is colour: the grade smooths the chroma channels and lifts saturation
+5%, so it is a colour adjustment and not only a tonal one. What it does not do
+is push paper to pure white or ink to pure black — it keeps the sheet's own
+cast and some of its grain on purpose, so the scan still reads as a photograph.
+Grade an enhanced scan against rules 1-6, and check rule 7 with the setting
+off.
 
 Rule 7 compares the scan against **the photo**, so **High detail capture** does
 not affect it: its grain removal happens in the camera, before a photo exists,

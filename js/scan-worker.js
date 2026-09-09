@@ -20,6 +20,7 @@ importScripts(
   "worker/candidates.js",
   "worker/edge-fusion.js",
   "worker/quad-refine.js",
+  "worker/guided-filter.js",
   "worker/enhance.js");
 
 // Morphology: an aggressive OPEN severs thin bright bridges between the paper
