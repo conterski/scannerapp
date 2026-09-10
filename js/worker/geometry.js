@@ -20,6 +20,7 @@ const SIDE_TOP = 0, SIDE_RIGHT = 1, SIDE_BOTTOM = 2, SIDE_LEFT = 3;
  *  so the four sides can be compared on one scale. */
 const OUTWARD_SIGN = [-1, 1, 1, -1];
 
+
 // A quad this far outside the frame came from a bad line fit, not a document.
 const OUT_OF_FRAME_TOLERANCE = 0.15;
 
@@ -116,11 +117,17 @@ function centroidOf(quad) {
 // Sides, lines and intersections
 // ------------------------------------------------------------------
 
+/** Reads one side. Called several times per clip, per containment test and per
+ *  side move, so it builds only the side asked for rather than all four plus
+ *  an array to hold them. Fixed property names on purpose — looking the corner
+ *  pair up by key measured slower than the allocation it saved. */
 function sideOf(quad, type) {
-  return [
-    { a: quad.tl, b: quad.tr }, { a: quad.tr, b: quad.br },
-    { a: quad.br, b: quad.bl }, { a: quad.bl, b: quad.tl },
-  ][type];
+  switch (type) {
+    case SIDE_TOP: return { a: quad.tl, b: quad.tr };
+    case SIDE_RIGHT: return { a: quad.tr, b: quad.br };
+    case SIDE_BOTTOM: return { a: quad.br, b: quad.bl };
+    default: return { a: quad.bl, b: quad.tl };
+  }
 }
 
 /** How far out this side sits, on the one scale all four sides share.

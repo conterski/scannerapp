@@ -41,18 +41,14 @@ const TIER2_TWIN_MIN_IOU = 0.8;
 const MAX_SINGLE_CLIP = 0.55;             // one clipper may not remove >45%
 const MIN_KEPT_AFTER_CLIPPING = 0.45;
 
-// Sample positions along a side, shared by the march and its reference.
+// Sample positions along a side, shared by the march and its reference. Built
+// once by the same accumulation the probes use (see pixel-probes.js) — the
+// result never varies, so there is nothing to rebuild per side.
 const SIDE_SAMPLE_START = 0.12;
 const SIDE_SAMPLE_END = 0.89;
 const SIDE_SAMPLE_STEP = 0.096;
-
-function sideSampleFractions() {
-  const fractions = [];
-  for (let t = SIDE_SAMPLE_START; t <= SIDE_SAMPLE_END; t += SIDE_SAMPLE_STEP) {
-    fractions.push(t);
-  }
-  return fractions;
-}
+const SIDE_SAMPLE_FRACTIONS =
+  accumulatedFractions(SIDE_SAMPLE_START, SIDE_SAMPLE_END, SIDE_SAMPLE_STEP);
 
 // ------------------------------------------------------------------
 // Corner refinement
@@ -186,13 +182,13 @@ function snappedLineForSide(image, quad, type) {
   // outward from it would climb across a merged occluding paper.
   if (sideContrast(image, side.a, side.b) >= STRONG_EDGE_CONTRAST) return null;
 
-  const fractions = sideSampleFractions();
-  const reference = paperReferenceAlongSide(image, { side, normal, fractions });
+  const reference = paperReferenceAlongSide(image,
+    { side, normal, fractions: SIDE_SAMPLE_FRACTIONS });
   if (reference === null) return null;
 
   const maxMarch = MAX_MARCH_FRACTION * Math.min(image.width, image.height);
   const stops = [];
-  for (const t of fractions) {
+  for (const t of SIDE_SAMPLE_FRACTIONS) {
     const point = {
       x: side.a.x + (side.b.x - side.a.x) * t,
       y: side.a.y + (side.b.y - side.a.y) * t,
@@ -296,17 +292,22 @@ function consensusHull(corners, options) {
 
   let points = best.hullPts;
   const originalArea = polygonArea(points);
+  // Carried alongside `points`: the two only ever change together, and the
+  // hull can be long enough that re-measuring it per clipper adds up.
+  let keptArea = originalArea;
   const used = [];
   for (const clipper of clippers) {
     const clipped = clipPolyToQuad(points, clipper.q);
     if (clipped.length < 3) continue;
-    if (polygonArea(clipped) < MAX_SINGLE_CLIP * polygonArea(points)) continue;
+    const clippedArea = polygonArea(clipped);
+    if (clippedArea < MAX_SINGLE_CLIP * keptArea) continue;
     points = clipped;
+    keptArea = clippedArea;
     used.push(clipper.tier + ":" + clipper.mask);
   }
-  if (polygonArea(points) < MIN_KEPT_AFTER_CLIPPING * originalArea) return best.hullPts;
+  if (keptArea < MIN_KEPT_AFTER_CLIPPING * originalArea) return best.hullPts;
   if (info) {
-    info.keptFrac = originalArea > 0 ? +(polygonArea(points) / originalArea).toFixed(3) : 1;
+    info.keptFrac = originalArea > 0 ? +(keptArea / originalArea).toFixed(3) : 1;
     info.clippers = used;
   }
   return points;

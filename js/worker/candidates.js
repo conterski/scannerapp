@@ -116,11 +116,13 @@ function pentagonToQuad(points) {
  */
 function quadFromHull(hull) {
   const perimeter = cv.arcLength(hull, true);
-  for (let epsilon = APPROX_EPSILON_START;
-       epsilon <= APPROX_EPSILON_LIMIT;
-       epsilon += APPROX_EPSILON_STEP) {
-    const approx = new cv.Mat();
-    try {
+  // One scratch Mat for the whole walk: approxPolyDP replaces its output, so
+  // reusing it is the same as allocating up to eleven of them in turn.
+  const approx = new cv.Mat();
+  try {
+    for (let epsilon = APPROX_EPSILON_START;
+         epsilon <= APPROX_EPSILON_LIMIT;
+         epsilon += APPROX_EPSILON_STEP) {
       cv.approxPolyDP(hull, approx, epsilon * perimeter, true);
       if (approx.rows === 4) return orderCorners(hullPoints(approx));
       if (approx.rows === 5) {
@@ -128,11 +130,11 @@ function quadFromHull(hull) {
         if (quad) return quad;
       }
       if (approx.rows < 4) return null;
-    } finally {
-      approx.delete();
     }
+    return null;
+  } finally {
+    approx.delete();
   }
-  return null;
 }
 
 // ------------------------------------------------------------------
@@ -220,7 +222,8 @@ function candidateFromPoints(points, context) {
     cv.convexHull(pointMat, hull, false, true);
     let quad = quadFromHull(hull);
     if (!quad) return null;
-    quad = coverQuad(quad, hullPoints(hull), context);
+    const hullPts = hullPoints(hull);
+    quad = coverQuad(quad, hullPts, context);
 
     const contourArea = cv.contourArea(pointMat);
     const hullArea = cv.contourArea(hull);
@@ -237,7 +240,7 @@ function candidateFromPoints(points, context) {
       quadArea: metrics.quadArea,
       borderCorners: metrics.borderCorners,
       rejected: metrics.score <= 0,
-      hullPts: hullPoints(hull),
+      hullPts,
       mask: maskName,
       split: true,
     };
