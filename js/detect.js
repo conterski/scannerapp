@@ -22,6 +22,16 @@
   const MIN_WARP_DIMENSION = 8;
   const CORNER_KEYS = ["tl", "tr", "br", "bl"];
 
+  // The worker and its seven modules are fetched by URL rather than by a
+  // <script> tag, so the deploy-time cache-busting stamp never reaches them on
+  // its own. Carry this file's own stamp across by hand: without it a fresh
+  // page can pair a fresh app with a stale detector, and because those modules
+  // share one worker scope a half-stale set fails as a ReferenceError in the
+  // middle of a detection rather than at load.
+  const ASSET_VERSION = document.currentScript && document.currentScript.src
+    ? new URL(document.currentScript.src).search
+    : "";
+
   // ---------------------------------------------------------------
   // Worker plumbing
   // ---------------------------------------------------------------
@@ -43,7 +53,7 @@
 
     function getWorker() {
       if (worker) return worker;
-      worker = new Worker("js/scan-worker.js");
+      worker = new Worker("js/scan-worker.js" + ASSET_VERSION);
       worker.onmessage = (event) => {
         const { id, ok, error } = event.data;
         const call = pending.get(id);

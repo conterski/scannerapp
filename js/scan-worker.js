@@ -14,14 +14,20 @@
  */
 "use strict";
 
-importScripts(
+// Carried across from the page on this worker's own URL (see detect.js).
+// These modules share one scope, so a half-stale set would fail as a
+// ReferenceError mid-detection; stamping them keeps the set consistent.
+const ASSET_VERSION = self.location.search;
+
+importScripts(...[
   "worker/geometry.js",
   "worker/pixel-probes.js",
   "worker/candidates.js",
   "worker/edge-fusion.js",
   "worker/quad-refine.js",
   "worker/guided-filter.js",
-  "worker/enhance.js");
+  "worker/enhance.js",
+].map((path) => path + ASSET_VERSION));
 
 // Morphology: an aggressive OPEN severs thin bright bridges between the paper
 // and adjacent objects (other papers, glare) so blobs don't merge.
@@ -79,6 +85,8 @@ function ensureInit() {
 }
 
 async function loadOpenCV() {
+  // Deliberately unstamped: opencv.js never changes, and busting it would
+  // cost an ~11 MB refetch on every deploy.
   importScripts("../vendor/opencv.js");
   let module = self.cv;
   // Old Emscripten MODULARIZE builds expose a `.then` shim that resolves with
