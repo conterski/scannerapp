@@ -141,9 +141,10 @@ function quadSideOutwardness(quad, type) {
   return sideOutwardness(sideOf(quad, type), type);
 }
 
-/** Outward-pointing unit normal of a quad side (away from the centroid). */
-function outwardNormal(quad, side) {
-  const center = centroidOf(quad);
+/** Unit normal of `side`, flipped to point away from `center`. The probes work
+ *  from a centroid they were handed rather than from a quad, so the flip lives
+ *  here and outwardNormal is the quad-shaped wrapper around it. */
+function outwardNormalFrom(side, center) {
   const length = Math.hypot(side.b.x - side.a.x, side.b.y - side.a.y) || 1;
   let nx = -(side.b.y - side.a.y) / length;
   let ny = (side.b.x - side.a.x) / length;
@@ -151,6 +152,11 @@ function outwardNormal(quad, side) {
   const midY = (side.a.y + side.b.y) / 2;
   if (nx * (center.x - midX) + ny * (center.y - midY) > 0) { nx = -nx; ny = -ny; }
   return { nx, ny };
+}
+
+/** Outward-pointing unit normal of a quad side (away from the centroid). */
+function outwardNormal(quad, side) {
+  return outwardNormalFrom(side, centroidOf(quad));
 }
 
 function lineThrough(a, b) {

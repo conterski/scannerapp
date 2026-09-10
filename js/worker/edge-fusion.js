@@ -65,7 +65,7 @@ function collectContributors(candidates, best) {
 
 function sideOptionFrom(side, type, context) {
   return {
-    s: side,
+    side,
     contrast: sideContrast(context, side.a, side.b),
     outward: sideOutwardness(side, type),
   };
@@ -131,7 +131,7 @@ function walkOutward(pick, options, context) {
   for (const next of options) {
     if (next.outward <= chosen.outward) continue;
     if (next.outward - chosen.outward < SAME_EDGE_GAP ||
-        bandMatchesInside(context, chosen.s, next.s)) {
+        bandMatchesInside(context, chosen.side, next.side)) {
       chosen = next;
     }
   }
@@ -149,7 +149,7 @@ function houghSideOptions(type, referenceDirection, context) {
     const contrast = sideContrast(context, segment.a, segment.b);
     if (contrast < HOUGH_MIN_CONTRAST) continue;
     if (lineContinuesBeyond(context, segment.a, segment.b)) continue;
-    options.push({ s: segment, contrast, outward: sideOutwardness(segment, type), continues: false });
+    options.push({ side: segment, contrast, outward: sideOutwardness(segment, type), continues: false });
   }
   return options;
 }
@@ -179,15 +179,19 @@ function eligibleSideOptions(options, bestOption, context) {
 
 /** Memoized per option — the boundary probe is the expensive one. */
 function isBoundaryLike(option, context) {
-  if (option.bLike === undefined) option.bLike = looksLikeDocumentBoundary(option.s, context);
-  return option.bLike;
+  if (option.boundaryLike === undefined) {
+    option.boundaryLike = looksLikeDocumentBoundary(option.side, context);
+  }
+  return option.boundaryLike;
 }
 
 /** Memoized per option — the weaker "is this side still on the document"
  *  half of the boundary probe. */
 function isInsideDocument(option, context) {
-  if (option.iLike === undefined) option.iLike = insideLooksLikeDocument(option.s, context);
-  return option.iLike;
+  if (option.insideDocument === undefined) {
+    option.insideDocument = insideLooksLikeDocument(option.side, context);
+  }
+  return option.insideDocument;
 }
 
 /**
@@ -253,7 +257,7 @@ function extendWithHoughSegments(pick, type, context) {
   const segments = context.getSegments ? context.getSegments() : [];
   if (!segments.length) return { pick, houghExt: false };
 
-  const reference = Math.atan2(pick.s.b.y - pick.s.a.y, pick.s.b.x - pick.s.a.x);
+  const reference = Math.atan2(pick.side.b.y - pick.side.a.y, pick.side.b.x - pick.side.a.x);
   const maxReach = HOUGH_MAX_REACH_FRACTION * Math.min(context.width, context.height);
   const extras = houghSideOptions(type, reference, context)
     .filter((option) => option.outward > pick.outward &&
@@ -269,8 +273,26 @@ function extendWithHoughSegments(pick, type, context) {
 function markContinuingSides(options, context) {
   for (const option of options) {
     option.continues = option.contrast >= VETO_MIN_CONTRAST &&
-      lineContinuesBeyond(context, option.s.a, option.s.b);
+      lineContinuesBeyond(context, option.side.a, option.side.b);
   }
+}
+
+/** The side to start from: the strict gate when anything clears it, and the
+ *  fallback chain when nothing does. Returns {pick, rule, eligible}. */
+function startingSideChoice(options, bestOption, context) {
+  const eligible = eligibleSideOptions(options, bestOption, context);
+  if (eligible.length) return { pick: eligible[0], rule: "strict", eligible };
+  return fallbackSideChoice(options, bestOption, context);
+}
+
+/** What the trace needs to explain why this side won. */
+function annotateChoice(pick, details) {
+  pick.rule = details.rule;
+  pick.bestOutward = details.bestOption.outward;
+  pick.vetoedBest = !!details.bestOption.continues;
+  pick.walkFrom = details.walkFrom;
+  pick.houghExt = details.houghExt;
+  return pick;
 }
 
 function chooseSideForType(type, context) {
@@ -278,31 +300,18 @@ function chooseSideForType(type, context) {
   markContinuingSides(options, context);
   const bestOption = options.find((option) => option.isBest);
 
-  let eligible = eligibleSideOptions(options, bestOption, context);
-  let pick = eligible[0];
-  let rule = "strict";
-  if (!eligible.length) {
-    const fallback = fallbackSideChoice(options, bestOption, context);
-    pick = fallback.pick;
-    rule = fallback.rule;
-    eligible = fallback.eligible;
-  }
+  const start = startingSideChoice(options, bestOption, context);
+  const walkFrom = start.pick.outward;
+  const rule = start.rule;
 
-  const walkFrom = pick.outward;
-  let houghExt = false;
-  if (rule !== "bestfb") {
-    pick = walkOutward(pick, eligible, context);
-    const extension = extendWithHoughSegments(pick, type, context);
-    pick = extension.pick;
-    houghExt = extension.houghExt;
+  // "bestfb" is best's own boundary taken verbatim — no walk, no Hough.
+  if (rule === "bestfb") {
+    return annotateChoice(start.pick, { rule, bestOption, walkFrom, houghExt: false });
   }
-
-  pick.rule = rule;
-  pick.bestOutward = bestOption.outward;
-  pick.vetoedBest = !!bestOption.continues;
-  pick.walkFrom = walkFrom;
-  pick.houghExt = houghExt;
-  return pick;
+  const extension = extendWithHoughSegments(
+    walkOutward(start.pick, start.eligible, context), type, context);
+  return annotateChoice(extension.pick,
+    { rule, bestOption, walkFrom, houghExt: extension.houghExt });
 }
 
 // ------------------------------------------------------------------
@@ -315,19 +324,21 @@ function recordFusionTrace(trace, chosen) {
     trace.push({
       type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
       locked: !!pick.locked, rule: pick.locked ? "locked" : pick.rule,
-      bLike: pick.bLike, iLike: pick.iLike, vetoedBest: !!pick.vetoedBest,
+      // Trace keys stay short; the fields behind them do not.
+      bLike: pick.boundaryLike, iLike: pick.insideDocument,
+      vetoedBest: !!pick.vetoedBest,
       bestOutward: pick.bestOutward !== undefined ? Math.round(pick.bestOutward) : undefined,
       walkFrom: pick.walkFrom !== undefined ? Math.round(pick.walkFrom) : undefined,
       houghExt: !!pick.houghExt,
-      a: { x: Math.round(pick.s.a.x), y: Math.round(pick.s.a.y) },
-      b: { x: Math.round(pick.s.b.x), y: Math.round(pick.s.b.y) },
+      a: { x: Math.round(pick.side.a.x), y: Math.round(pick.side.a.y) },
+      b: { x: Math.round(pick.side.b.x), y: Math.round(pick.side.b.y) },
     });
   }
 }
 
 function quadFromChosenSides(chosen, bounds) {
   const { width, height } = bounds;
-  const lines = chosen.map((pick) => lineThrough(pick.s.a, pick.s.b));
+  const lines = chosen.map((pick) => lineThrough(pick.side.a, pick.side.b));
   const quad = quadFromSideLines(lines, bounds);
   if (!quad) return null;
   const areaFraction = shoelaceArea(quad) / (width * height);

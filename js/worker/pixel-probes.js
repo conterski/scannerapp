@@ -21,6 +21,14 @@ function accumulatedFractions(start, end, step) {
   return fractions;
 }
 
+// Where the band and boundary probes sample along a side: eight points from
+// 0.15 to 0.85. This one lands on the count it reads as.
+const PROBE_SAMPLE_FRACTIONS = accumulatedFractions(0.15, 0.86, 0.1);
+
+// How far past each endpoint lineContinuesBeyond looks, as a share of the
+// extension: five reaches from 0.3 to 1.0.
+const CONTINUATION_REACHES = accumulatedFractions(0.3, 1.0, 0.175);
+
 // Where sideContrast samples across a side.
 //
 // Read as written this is 0.10 to 0.90 in 17 steps, but it is not: accumulating
@@ -85,6 +93,12 @@ function isInsideImage(image, x, y) {
   return x >= 0 && y >= 0 && x < image.width && y < image.height;
 }
 
+/** The point `t` of the way from `a` to `b`. Every probe that walks a side
+ *  goes through this, so they all sample the same way. */
+function pointAlong(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
 function grayAt(image, x, y) { return image.gray.ucharPtr(y, x)[0]; }
 
 function probeDepthFor(image) {
@@ -137,8 +151,7 @@ function sideContrast(image, a, b) {
   const normal = { nx, ny };
   const steps = [];
   for (const t of SIDE_CONTRAST_FRACTIONS) {
-    const point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-    const step = crossEdgeStep(image, { point, normal, depth });
+    const step = crossEdgeStep(image, { point: pointAlong(a, b, t), normal, depth });
     if (step !== null) steps.push(step);
   }
   if (steps.length < MIN_CONTRAST_SAMPLES) return 0;
@@ -161,7 +174,7 @@ function lineContinuesBeyond(image, a, b) {
 
   const steps = [];
   for (const [originX, originY, direction] of [[a.x, a.y, -1], [b.x, b.y, 1]]) {
-    for (let reach = 0.3; reach <= 1.0; reach += 0.175) {
+    for (const reach of CONTINUATION_REACHES) {
       const point = {
         x: originX + direction * ux * extension * reach,
         y: originY + direction * uy * extension * reach,
@@ -184,17 +197,17 @@ function lineContinuesBeyond(image, a, b) {
 function bandMatchesInside(context, inner, outer) {
   const { centroid } = context;
   let matched = 0, sampled = 0;
-  for (let t = 0.15; t <= 0.86; t += 0.1) {
-    const innerX = inner.a.x + (inner.b.x - inner.a.x) * t;
-    const innerY = inner.a.y + (inner.b.y - inner.a.y) * t;
-    const outerX = outer.a.x + (outer.b.x - outer.a.x) * t;
-    const outerY = outer.a.y + (outer.b.y - outer.a.y) * t;
+  for (const t of PROBE_SAMPLE_FRACTIONS) {
+    const innerPoint = pointAlong(inner.a, inner.b, t);
+    const outerPoint = pointAlong(outer.a, outer.b, t);
 
-    const toCentroid = Math.hypot(centroid.x - innerX, centroid.y - innerY) || 1;
-    const referenceX = Math.round(innerX + (centroid.x - innerX) / toCentroid * INSIDE_REFERENCE_OFFSET);
-    const referenceY = Math.round(innerY + (centroid.y - innerY) / toCentroid * INSIDE_REFERENCE_OFFSET);
-    const bandX = Math.round((innerX + outerX) / 2);
-    const bandY = Math.round((innerY + outerY) / 2);
+    const toCentroid = Math.hypot(centroid.x - innerPoint.x, centroid.y - innerPoint.y) || 1;
+    const referenceX = Math.round(
+      innerPoint.x + (centroid.x - innerPoint.x) / toCentroid * INSIDE_REFERENCE_OFFSET);
+    const referenceY = Math.round(
+      innerPoint.y + (centroid.y - innerPoint.y) / toCentroid * INSIDE_REFERENCE_OFFSET);
+    const bandX = Math.round((innerPoint.x + outerPoint.x) / 2);
+    const bandY = Math.round((innerPoint.y + outerPoint.y) / 2);
 
     if (!isInsideImage(context, bandX, bandY)) continue;
     if (!isInsideImage(context, referenceX, referenceY)) continue;
@@ -253,22 +266,14 @@ function majorityAtDepths(image, probe, test) {
  */
 function boundarySampleFlags(side, context) {
   const { centroid, interiorRef } = context;
-  const { length } = unitNormalOf(side.a, side.b);
-  let nx = -(side.b.y - side.a.y) / (length || 1);
-  let ny = (side.b.x - side.a.x) / (length || 1);
-  const midX = (side.a.x + side.b.x) / 2;
-  const midY = (side.a.y + side.b.y) / 2;
-  if (nx * (centroid.x - midX) + ny * (centroid.y - midY) > 0) { nx = -nx; ny = -ny; }
+  const { nx, ny } = outwardNormalFrom(side, centroid);
 
   const isPaper = (value) => Math.abs(value - interiorRef) <= BOUNDARY_INSIDE_TOLERANCE;
   const isNotPaper = (value) => Math.abs(value - interiorRef) > BOUNDARY_OUTSIDE_TOLERANCE;
 
   let inside = 0, both = 0, sampled = 0;
-  for (let t = 0.15; t <= 0.86; t += 0.1) {
-    const point = {
-      x: side.a.x + (side.b.x - side.a.x) * t,
-      y: side.a.y + (side.b.y - side.a.y) * t,
-    };
+  for (const t of PROBE_SAMPLE_FRACTIONS) {
+    const point = pointAlong(side.a, side.b, t);
     const insideIsPaper = majorityAtDepths(context, { point, direction: { x: -nx, y: -ny } }, isPaper);
     const outsideIsNot = majorityAtDepths(context, { point, direction: { x: nx, y: ny } }, isNotPaper);
     sampled++;

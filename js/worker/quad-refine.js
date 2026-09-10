@@ -119,8 +119,9 @@ function paperReferenceAlongSide(image, sampling) {
   const { side, normal, fractions } = sampling;
   const samples = [];
   for (const t of fractions) {
-    const x = Math.round(side.a.x + (side.b.x - side.a.x) * t - normal.nx * PAPER_REFERENCE_INSET);
-    const y = Math.round(side.a.y + (side.b.y - side.a.y) * t - normal.ny * PAPER_REFERENCE_INSET);
+    const point = pointAlong(side.a, side.b, t);
+    const x = Math.round(point.x - normal.nx * PAPER_REFERENCE_INSET);
+    const y = Math.round(point.y - normal.ny * PAPER_REFERENCE_INSET);
     if (isInsideImage(image, x, y)) samples.push(grayAt(image, x, y));
   }
   if (samples.length < MIN_MARCH_SAMPLES) return null;
@@ -189,10 +190,7 @@ function snappedLineForSide(image, quad, type) {
   const maxMarch = MAX_MARCH_FRACTION * Math.min(image.width, image.height);
   const stops = [];
   for (const t of SIDE_SAMPLE_FRACTIONS) {
-    const point = {
-      x: side.a.x + (side.b.x - side.a.x) * t,
-      y: side.a.y + (side.b.y - side.a.y) * t,
-    };
+    const point = pointAlong(side.a, side.b, t);
     const marched = marchToEdge(image, { point, normal, reference, maxMarch });
     if (marched === null) continue;
     const distance = Math.max(0, marched);

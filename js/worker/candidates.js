@@ -336,6 +336,42 @@ function sideNearestChord(quad, chord) {
   return nearestType;
 }
 
+/** The two deepest defects as ascending contour indices, or null when they sit
+ *  too close together to cut between. */
+function cutIndicesFor(deep) {
+  const deepestFirst = deep.slice().sort((a, b) => b.depth - a.depth);
+  const cuts = deepestFirst.slice(0, 2).map((defect) => defect.far).sort((a, b) => a - b);
+  if (cuts.length !== 2 || cuts[1] - cuts[0] <= MIN_CUT_INDEX_SEPARATION) return null;
+  return cuts;
+}
+
+/** The contour cut in two at `cuts`, or null when one part is a sliver — that
+ *  is an irregular outline, not two merged papers, and splitting it would
+ *  shave a strip off the document. */
+function splitPartsAt(points, cuts) {
+  const partA = points.slice(cuts[0], cuts[1] + 1);
+  const partB = points.slice(cuts[1]).concat(points.slice(0, cuts[0] + 1));
+  const areaA = polygonArea(partA), areaB = polygonArea(partB);
+  const total = areaA + areaB;
+  if (total <= 0 || Math.min(areaA, areaB) / total < MIN_PART_AREA_SHARE) return null;
+  return { partA, partB };
+}
+
+/**
+ * The four protrusion measurements the safety verdict is made from: how much of
+ * each part lies outside the OTHER part's quad (separation), and how much lies
+ * outside its OWN (a quad that fails to cover its own contour would cut visible
+ * content).
+ */
+function splitProtrusions(parts, candidateA, candidateB) {
+  return {
+    outsideBGivenA: fracOutsideQuad(parts.partB, candidateA.corners),
+    outsideAGivenB: fracOutsideQuad(parts.partA, candidateB.corners),
+    selfOutsideA: fracOutsideQuad(parts.partA, candidateA.corners),
+    selfOutsideB: fracOutsideQuad(parts.partB, candidateB.corners),
+  };
+}
+
 /** Annotates the two parts with their safety verdict and seam side. */
 function annotateSplitParts(parts, chord, parentBBox) {
   for (const part of parts) {
@@ -372,42 +408,26 @@ function splitCandidates(contour, context) {
     }
     if (!attempt || !deep.length) return;
 
-    deep.sort((a, b) => b.depth - a.depth);
-    const cuts = deep.slice(0, 2).map((d) => d.far).sort((a, b) => a - b);
-    if (cuts.length !== 2 || cuts[1] - cuts[0] <= MIN_CUT_INDEX_SEPARATION) return;
-
+    const cuts = cutIndicesFor(deep);
+    if (!cuts) return;
     const points = contourToPoints(contour);
-    const partAPoints = points.slice(cuts[0], cuts[1] + 1);
-    const partBPoints = points.slice(cuts[1]).concat(points.slice(0, cuts[0] + 1));
-
-    // A true two-paper merge splits into two SUBSTANTIAL parts. If one part is
-    // a sliver this is just an irregular outline, and splitting it would shave
-    // a strip off the document.
-    const areaA = polygonArea(partAPoints), areaB = polygonArea(partBPoints);
-    const total = areaA + areaB;
-    if (total <= 0 || Math.min(areaA, areaB) / total < MIN_PART_AREA_SHARE) return;
+    const parts = splitPartsAt(points, cuts);
+    if (!parts) return;
 
     const splitContext = Object.assign({}, context, { maskName: maskName + "-split" });
-    const candidateA = candidateFromPoints(partAPoints, splitContext);
-    const candidateB = candidateFromPoints(partBPoints, splitContext);
+    const candidateA = candidateFromPoints(parts.partA, splitContext);
+    const candidateB = candidateFromPoints(parts.partB, splitContext);
     // Both parts are already in the pool by now. Returning here leaves whichever
     // one survived competing as an ordinary penalised candidate with no safety
     // verdict, which is the intended outcome: the pair failed, so neither part
     // is proven, but a good part is still better evidence than nothing.
     if (!candidateA || !candidateB || candidateA.rejected || candidateB.rejected) return;
 
-    const outsideBGivenA = fracOutsideQuad(partBPoints, candidateA.corners);
-    const outsideAGivenB = fracOutsideQuad(partAPoints, candidateB.corners);
+    const { outsideBGivenA, outsideAGivenB, selfOutsideA, selfOutsideB } =
+      splitProtrusions(parts, candidateA, candidateB);
     const chord = { a: points[cuts[0]], b: points[cuts[1]] };
     const chordContrast = gray ? sideContrast({ gray, width, height }, chord.a, chord.b) : 0;
     const mutuallySeparated = isMutuallySeparated(outsideBGivenA, outsideAGivenB, chordContrast);
-
-    // Self-containment: a part whose own quad fails to cover its own contour
-    // (hull simplification dropped an occluded-corner vertex, leaving a
-    // diagonal that slices the paper) must never win — the crop would cut
-    // visible content.
-    const selfOutsideA = fracOutsideQuad(partAPoints, candidateA.corners);
-    const selfOutsideB = fracOutsideQuad(partBPoints, candidateB.corners);
 
     if (diag) {
       diag.push({ split: maskName,
