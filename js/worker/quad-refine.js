@@ -70,6 +70,9 @@ function quadPerimeter(corners, sides) {
  * them inward.
  */
 function refineQuadEdges(quad, hullPts, bounds) {
+  // Same condition the anti-cut net applies to best.hullPts: with no hull
+  // there is nothing to fit, so the quad stands as it is.
+  if (!hullPts || hullPts.length < 3) return quad;
   const { width, height } = bounds;
   const corners = quadPoints(quad);
   const sides = [[0, 1], [1, 2], [2, 3], [3, 0]]; // top, right, bottom, left
@@ -125,8 +128,8 @@ function paperReferenceAlongSide(image, sampling) {
     if (isInsideImage(image, x, y)) samples.push(grayAt(image, x, y));
   }
   if (samples.length < MIN_MARCH_SAMPLES) return null;
-  samples.sort((a, b) => a - b);
-  return samples[Math.floor(samples.length / 2)];
+  samples.sort(ascending);
+  return median(samples);
 }
 
 /** A thin dark run (a printed border line) with paper resuming right behind it
@@ -201,12 +204,13 @@ function snappedLineForSide(image, quad, type) {
   }
   if (stops.length < MIN_MARCH_SAMPLES) return null;
 
-  const distances = stops.map((stop) => stop.d).sort((a, b) => a - b);
-  const median = distances[Math.floor(distances.length / 2)];
-  if (median <= MIN_USEFUL_MARCH) return null;
+  // `median` is a shared function in this scope (pixel-probes.js), so the
+  // distance gets its own name rather than shadowing it.
+  const medianDistance = median(stops.map((stop) => stop.d).sort(ascending));
+  if (medianDistance <= MIN_USEFUL_MARCH) return null;
 
-  const spread = Math.max(STOP_SPREAD_FLOOR, STOP_SPREAD_RATIO * median);
-  const usable = stops.filter((stop) => Math.abs(stop.d - median) <= spread);
+  const spread = Math.max(STOP_SPREAD_FLOOR, STOP_SPREAD_RATIO * medianDistance);
+  const usable = stops.filter((stop) => Math.abs(stop.d - medianDistance) <= spread);
   if (usable.length < MIN_MARCH_SAMPLES) return null;
   return fitLinePts(usable);
 }

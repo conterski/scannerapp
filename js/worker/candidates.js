@@ -195,8 +195,20 @@ function shouldAttemptSplit(solidity, ownScore) {
   return solidity < SPLIT_MAX_SOLIDITY && ownScore < SPLIT_MAX_OWN_SCORE;
 }
 
-/** Quad-fits an arbitrary point list (via its convex hull) into `context.out`.
- *  @param context { width, height, out, maskName } */
+/**
+ * Quad-fits an arbitrary point list (via its convex hull) into `context.out`.
+ *
+ * The candidate is published straight away, before the split it belongs to is
+ * known to hold up. That is deliberate: a declumped part is a legitimate
+ * candidate on its own at the penalised score, whatever the pair does. What it
+ * does NOT get until annotateSplitParts runs is `parentBBox` — and without a
+ * parent box there is nothing to measure a bbox IoU against, which is what
+ * keeps an unverified part out of the fusion side pools and the consensus
+ * clippers. That exclusion is a data dependency, not a guard; do not "fix" it
+ * by hoisting the annotation.
+ *
+ * @param context { width, height, out, maskName }
+ */
 function candidateFromPoints(points, context) {
   const { width, height, out, maskName } = context;
   if (points.length < MIN_POINTS_FOR_HULL) return null;
@@ -255,10 +267,25 @@ function boundingBoxOfPoints(points) {
   return { x0, y0, x1, y1 };
 }
 
-/** Convexity defects deep enough to be a two-paper seam rather than a wobble.
- *  @param mats { hullIndices, defects } — scratch Mats owned by the caller */
+/**
+ * Convexity defects deep enough to be a two-paper seam rather than a wobble.
+ *
+ * @param mats { hullIndices, defects } — scratch Mats owned by the caller
+ * @returns null when OpenCV refuses the contour. Both calls throw on a
+ *          self-intersecting one, and there is nothing to declump then. The
+ *          catch lives here, around the two calls that actually throw, rather
+ *          than around the whole split — wrapping that would swallow every
+ *          later failure too, silently and after candidates had already been
+ *          published.
+ */
 function deepDefectsOf(contour, mats, bounds) {
-  cv.convexityDefects(contour, mats.hullIndices, mats.defects);
+  try {
+    cv.convexHull(contour, mats.hullIndices, false, false);
+    if (mats.hullIndices.rows < 3) return null;
+    cv.convexityDefects(contour, mats.hullIndices, mats.defects);
+  } catch (error) {
+    return null;
+  }
   const deep = [];
   const minDepth = DEEP_DEFECT_DEPTH_FRACTION * Math.min(bounds.width, bounds.height);
   const defects = mats.defects;
@@ -330,9 +357,8 @@ function splitCandidates(contour, context) {
   const hullIndices = new cv.Mat();
   const defects = new cv.Mat();
   try {
-    cv.convexHull(contour, hullIndices, false, false);
-    if (hullIndices.rows < 3) return;
     const deep = deepDefectsOf(contour, { hullIndices, defects }, context);
+    if (!deep) return;
 
     const attempt = shouldAttemptSplit(solidity, ownScore);
     if (diag) {
@@ -361,6 +387,10 @@ function splitCandidates(contour, context) {
     const splitContext = Object.assign({}, context, { maskName: maskName + "-split" });
     const candidateA = candidateFromPoints(partAPoints, splitContext);
     const candidateB = candidateFromPoints(partBPoints, splitContext);
+    // Both parts are already in the pool by now. Returning here leaves whichever
+    // one survived competing as an ordinary penalised candidate with no safety
+    // verdict, which is the intended outcome: the pair failed, so neither part
+    // is proven, but a good part is still better evidence than nothing.
     if (!candidateA || !candidateB || candidateA.rejected || candidateB.rejected) return;
 
     const outsideBGivenA = fracOutsideQuad(partBPoints, candidateA.corners);
@@ -390,10 +420,6 @@ function splitCandidates(contour, context) {
       { candidate: candidateB, outsideOther: outsideAGivenB, otherOutside: outsideBGivenA,
         selfOutside: selfOutsideB, safe: mutuallySeparated && selfOutsideB <= MAX_SELF_OUTSIDE },
     ], chord, boundingBoxOfPoints(points));
-  } catch (error) {
-    // convexityDefects throws on self-intersecting contours. There is nothing
-    // to declump then, and the caller keeps the un-split candidate.
-    return;
   } finally {
     hullIndices.delete(); defects.delete();
   }
@@ -406,7 +432,14 @@ function splitCandidates(contour, context) {
 function largestContourIndices(contours) {
   const areas = [];
   for (let i = 0; i < contours.size(); i++) {
-    areas.push({ index: i, area: cv.contourArea(contours.get(i)) });
+    // get() hands back its own Mat wrapper; the vector keeps its reference to
+    // the data, so this frees the wrapper and nothing else.
+    const contour = contours.get(i);
+    try {
+      areas.push({ index: i, area: cv.contourArea(contour) });
+    } finally {
+      contour.delete();
+    }
   }
   areas.sort((a, b) => b.area - a.area);
   return areas.slice(0, MAX_CONTOURS_PER_MASK);
@@ -449,14 +482,18 @@ function candidatesFromMask(bin, context) {
     for (const { index, area } of largestContourIndices(contours)) {
       if (area < MIN_CONTOUR_AREA_FRACTION * width * height) break;
       const contour = contours.get(index);
-      const { candidate, hullArea } = candidateFromContour(contour, area, context);
-      out.push(candidate);
+      try {
+        const { candidate, hullArea } = candidateFromContour(contour, area, context);
+        out.push(candidate);
 
-      // A deeply notched blob whose own quad is BAD is probably two merged
-      // papers — offer the declumped parts as candidates too.
-      if (hullArea > 0 && shouldAttemptSplit(area / hullArea, candidate.score)) {
-        splitCandidates(contour, Object.assign({}, context,
-          { ownScore: candidate.score, solidity: area / hullArea }));
+        // A deeply notched blob whose own quad is BAD is probably two merged
+        // papers — offer the declumped parts as candidates too.
+        if (hullArea > 0 && shouldAttemptSplit(area / hullArea, candidate.score)) {
+          splitCandidates(contour, Object.assign({}, context,
+            { ownScore: candidate.score, solidity: area / hullArea }));
+        }
+      } finally {
+        contour.delete();
       }
     }
   } finally {

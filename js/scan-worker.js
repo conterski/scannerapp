@@ -78,8 +78,11 @@ let initPromise = null;
 
 function ensureInit() {
   if (!initPromise) {
-    initPromise = loadOpenCV();
-    initPromise.catch(() => { initPromise = null; });
+    const started = loadOpenCV();
+    initPromise = started;
+    // Retire THIS attempt only: a later call may already have replaced it, and
+    // clearing a newer promise would compile OpenCV twice over.
+    started.catch(() => { if (initPromise === started) initPromise = null; });
   }
   return initPromise;
 }
@@ -109,6 +112,14 @@ async function loadOpenCV() {
 
 function toImageData(width, height, buffer) {
   return new ImageData(new Uint8ClampedArray(buffer), width, height);
+}
+
+/** Frees every Mat handed to it, skipping the slots never filled. Lets the
+ *  allocations sit INSIDE the try that frees them: a throw part way through
+ *  would otherwise strand whatever had already been allocated, and at full
+ *  resolution that is tens of megabytes of WASM heap. */
+function releaseMats(...mats) {
+  for (const mat of mats) if (mat) mat.delete();
 }
 
 // ------------------------------------------------------------------
@@ -145,21 +156,24 @@ function addAdaptiveCandidates(pipeline) {
 /** Paper is colorless even in shadow while wood and desks are saturated, so
  *  this mask survives brightness gradients that break gray thresholds. */
 function addSaturationCandidates(pipeline) {
-  const rgb = new cv.Mat();
-  const hsv = new cv.Mat();
-  const channels = new cv.MatVector();
+  let rgb = null, hsv = null, channels = null, saturation = null;
   try {
+    rgb = new cv.Mat();
+    hsv = new cv.Mat();
+    channels = new cv.MatVector();
     cv.cvtColor(pipeline.img, rgb, cv.COLOR_RGBA2RGB);
     cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
     cv.split(hsv, channels);
-    const saturation = channels.get(1);
+    // A MatVector element is its own Mat wrapper and has to be freed
+    // separately from the vector.
+    saturation = channels.get(1);
     cv.GaussianBlur(saturation, saturation, new cv.Size(BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), 0);
     cv.threshold(saturation, pipeline.bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
     cleanMask(pipeline);
     harvestMask(pipeline, "saturation");
-    saturation.delete();
   } finally {
-    rgb.delete(); hsv.delete(); channels.delete();
+    releaseMats(saturation, rgb, hsv);
+    if (channels) channels.delete();
   }
 }
 
@@ -385,6 +399,8 @@ function buildCorners(best, pipeline, trace) {
   const fused = fuseQuad(candidates, best,
     { gray, width, height, getSegments, trace, lockedTypes: locked, meta: fuseMeta });
 
+  // refineQuadEdges returns its input unchanged without hull evidence, so this
+  // needs no guard of its own — the same condition the net applies below.
   let corners = fused || refineQuadEdges(best.corners, best.hullPts, pipeline);
   corners = snapSidesOutward(pipeline, corners, locked);
 
@@ -421,22 +437,42 @@ function debugPayload(candidates) {
  * four sides, an outward snap recovers any clipped strips, and a small margin
  * guarantees hairline errors never cut content.
  */
-function detect({ width, height, buffer, debug }) {
-  const pipeline = {
+/** The pipeline's Mat slots start empty so a throw mid-allocation still leaves
+ *  something releasePipeline can clean up. */
+function createPipeline(width, height, debug) {
+  return {
     width, height,
-    img: cv.matFromImageData(toImageData(width, height, buffer)),
-    gray: new cv.Mat(),
-    bin: new cv.Mat(),
-    kOpen: cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(OPEN_KERNEL_SIZE, OPEN_KERNEL_SIZE)),
-    kClose: cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(CLOSE_KERNEL_SIZE, CLOSE_KERNEL_SIZE)),
-    kDilate: cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE)),
+    img: null, gray: null, bin: null,
+    kOpen: null, kClose: null, kDilate: null,
     candidates: [],
     splitDiag: debug ? [] : null,
     reuniteLock: null,
     cannyEdges: null,
     getSegments: null,
   };
+}
+
+function allocatePipelineMats(pipeline, buffer) {
+  pipeline.img = cv.matFromImageData(toImageData(pipeline.width, pipeline.height, buffer));
+  pipeline.gray = new cv.Mat();
+  pipeline.bin = new cv.Mat();
+  pipeline.kOpen = cv.getStructuringElement(cv.MORPH_RECT,
+    new cv.Size(OPEN_KERNEL_SIZE, OPEN_KERNEL_SIZE));
+  pipeline.kClose = cv.getStructuringElement(cv.MORPH_RECT,
+    new cv.Size(CLOSE_KERNEL_SIZE, CLOSE_KERNEL_SIZE));
+  pipeline.kDilate = cv.getStructuringElement(cv.MORPH_RECT,
+    new cv.Size(DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE));
+}
+
+function releasePipeline(pipeline) {
+  releaseMats(pipeline.img, pipeline.gray, pipeline.bin,
+    pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges);
+}
+
+function detect({ width, height, buffer, debug }) {
+  const pipeline = createPipeline(width, height, debug);
   try {
+    allocatePipelineMats(pipeline, buffer);
     collectCandidates(pipeline);
     pipeline.getSegments = createSegmentSource(pipeline);
     const candidates = pipeline.candidates;
@@ -465,9 +501,7 @@ function detect({ width, height, buffer, debug }) {
       debug: debugPayload(candidates),
     };
   } finally {
-    pipeline.img.delete(); pipeline.gray.delete(); pipeline.bin.delete();
-    pipeline.kOpen.delete(); pipeline.kClose.delete(); pipeline.kDilate.delete();
-    if (pipeline.cannyEdges) pipeline.cannyEdges.delete();
+    releasePipeline(pipeline);
   }
 }
 
@@ -477,14 +511,15 @@ function detect({ width, height, buffer, debug }) {
 
 function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
   const { tl, tr, br, bl } = corners;
-  const src = cv.matFromImageData(toImageData(width, height, buffer));
-  const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
-    [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
-  const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2,
-    [0, 0, dstW, 0, dstW, dstH, 0, dstH]);
-  const transform = cv.getPerspectiveTransform(srcTri, dstTri);
-  const dst = new cv.Mat();
+  let src = null, srcTri = null, dstTri = null, transform = null, dst = null;
   try {
+    src = cv.matFromImageData(toImageData(width, height, buffer));
+    srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
+      [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
+    dstTri = cv.matFromArray(4, 1, cv.CV_32FC2,
+      [0, 0, dstW, 0, dstW, dstH, 0, dstH]);
+    transform = cv.getPerspectiveTransform(srcTri, dstTri);
+    dst = new cv.Mat();
     // Bilinear resampling only — the geometry never filters pixel values.
     cv.warpPerspective(src, dst, transform, new cv.Size(dstW, dstH),
       cv.INTER_LINEAR, cv.BORDER_REPLICATE);
@@ -498,7 +533,7 @@ function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
       enhanced.delete();
     }
   } finally {
-    src.delete(); srcTri.delete(); dstTri.delete(); transform.delete(); dst.delete();
+    releaseMats(src, srcTri, dstTri, transform, dst);
   }
 }
 
@@ -524,10 +559,11 @@ const DENOISE_KERNEL_SIZE = 3;
  * @returns the filtered pixels as a transferable buffer
  */
 function denoise({ width, height, buffer }) {
-  const src = cv.matFromImageData(toImageData(width, height, buffer));
-  const rgb = new cv.Mat();
-  const out = new cv.Mat();
+  let src = null, rgb = null, out = null;
   try {
+    src = cv.matFromImageData(toImageData(width, height, buffer));
+    rgb = new cv.Mat();
+    out = new cv.Mat();
     // Canvas alpha is uniformly opaque, so dropping it around the filter loses
     // nothing and costs nothing: sorting three channels instead of four
     // measures 122ms against 159ms at 2560x1440.
@@ -536,7 +572,7 @@ function denoise({ width, height, buffer }) {
     cv.cvtColor(rgb, out, cv.COLOR_RGB2RGBA);
     return new Uint8ClampedArray(out.data).buffer;
   } finally {
-    src.delete(); rgb.delete(); out.delete();
+    releaseMats(src, rgb, out);
   }
 }
 

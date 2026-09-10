@@ -13,6 +13,27 @@
 // A side shorter than this has too few samples to judge.
 const MIN_PROBE_SIDE_LENGTH = 8;
 
+/** Sample positions along a side, built by accumulation on purpose — see
+ *  SIDE_CONTRAST_FRACTIONS. */
+function accumulatedFractions(start, end, step) {
+  const fractions = [];
+  for (let t = start; t <= end; t += step) fractions.push(t);
+  return fractions;
+}
+
+// Where sideContrast samples across a side.
+//
+// Read as written this is 0.10 to 0.90 in 17 steps, but it is not: accumulating
+// 0.05 seventeen times lands on 0.9000000000000002, which fails the bound. The
+// probe actually takes 16 samples spanning 0.10 to 0.85, so it leans toward the
+// `a` end of every side.
+//
+// That is now calibration rather than an accident — every threshold in this
+// file was tuned against these exact samples — so the accumulation is preserved
+// bit for bit and pinned here instead of being corrected into the 17 the
+// original loop reads as.
+const SIDE_CONTRAST_FRACTIONS = accumulatedFractions(0.1, 0.9, 0.05);
+
 // How far to either side of a line we sample for the cross-edge step.
 const PROBE_DEPTH_FRACTION = 0.012;
 const MIN_PROBE_DEPTH = 6;
@@ -115,7 +136,7 @@ function sideContrast(image, a, b) {
   const depth = probeDepthFor(image);
   const normal = { nx, ny };
   const steps = [];
-  for (let t = 0.1; t <= 0.9; t += 0.05) {
+  for (const t of SIDE_CONTRAST_FRACTIONS) {
     const point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
     const step = crossEdgeStep(image, { point, normal, depth });
     if (step !== null) steps.push(step);
