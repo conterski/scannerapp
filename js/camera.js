@@ -127,13 +127,12 @@
     return ready.then((canvas) => ImageUtils.encodeCanvasToJpeg(canvas, jpegQuality));
   }
 
-  function markRejectionHandled(promise) {
-    if (promise && typeof promise.catch === "function") promise.catch(() => {});
-    return promise;
-  }
-
   function create() {
     let stream = null;
+    // stop() can run while getUserMedia is still waiting on the permission
+    // prompt. The stream that arrives afterwards is held by nothing, so it has
+    // to be released on arrival or the camera stays on for the life of the tab.
+    let isStopped = false;
 
     function videoTrack() {
       return stream ? stream.getVideoTracks()[0] || null : null;
@@ -164,28 +163,41 @@
      *  gesture: getUserMedia is invoked before the first await. */
     function start(video) {
       if (!isSupported()) return Promise.reject(unsupportedError());
+      isStopped = false;
       return navigator.mediaDevices.getUserMedia(mediaConstraints()).then((s) => {
+        if (isStopped) {
+          releaseTracks(s);
+          const abandoned = new Error("The camera was released before it opened");
+          abandoned.name = "AbortError";
+          throw abandoned;
+        }
         stream = s;
         video.srcObject = s;
         // iOS needs the inline attributes in the markup *and* an explicit
         // play() — autoplay alone is unreliable when the screen re-opens.
         // The autoplay attribute covers the case where this play() is refused,
         // so its rejection is deliberately ignored rather than surfaced.
-        markRejectionHandled(video.play());
+        PromiseUtils.markRejectionHandled(video.play());
         // A start that fails must not leave the camera running behind the
         // error panel.
         return whenSized(video).catch((error) => { stop(video); throw error; });
       });
     }
 
-    /** Releases the camera. Safe to call when never started. */
+    function releaseTracks(target) {
+      for (const track of target.getTracks()) track.stop();
+    }
+
+    /** Releases the camera. Safe to call when never started, and safe to call
+     *  while start() is still waiting — see `isStopped`. */
     function stop(video) {
+      isStopped = true;
       if (stream) {
         // Put the light out before releasing. Stopping the track should do it
         // on its own, but asking explicitly is what guarantees the LED is
         // never left burning after Done, a fallback or an error.
-        if (supportsTorch()) markRejectionHandled(setTorch(false));
-        for (const track of stream.getTracks()) track.stop();
+        if (supportsTorch()) PromiseUtils.markRejectionHandled(setTorch(false));
+        releaseTracks(stream);
         stream = null;
       }
       if (video) video.srcObject = null;

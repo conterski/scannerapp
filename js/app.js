@@ -1,7 +1,9 @@
 /* app.js — orchestration: the add-photos pipeline, the editor navigation loop,
  * the capture hand-off, export wiring and session restore. Image work lives in
  * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
- * warp in ScanRenderer, persistence in Store.
+ * warp in ScanRenderer, persistence in Store, the busy overlay and status line
+ * in AppChrome, decoded originals in SourceCache, render bookkeeping in
+ * RenderTracker.
  */
 (function () {
   "use strict";
@@ -10,8 +12,6 @@
   // many 12 MP originals. Standard-quality scans are capped at the same size,
   // which makes the output cap a no-op unless Compact is on.
   const DECODE_MAX_EDGE = 2500;
-
-  const STATUS_MESSAGE_MS = 6000;
 
   // Some pickers report no MIME type at all, so an extension is the fallback.
   // A type that IS present and isn't an image must still lose.
@@ -22,6 +22,19 @@
    *  Stored as `quarter` on disk — Store's page record maps the name. */
   const pages = [];
   let nextPageId = 1;
+
+  // Decoded originals for the editing session, and which renders are current
+  // or still in flight. Both are bookkeeping the pipeline reads constantly and
+  // neither is anyone else's business, so they are created here and passed
+  // nowhere.
+  const sources = SourceCache.create(
+    (page) => ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
+  const renders = RenderTracker.create();
+
+  // Work that walks the whole document runs one job at a time. Two passes
+  // interleaved would each be reading a list the other is changing, and both
+  // would be driving the same OpenCV worker.
+  const libraryJobs = JobQueue.create();
 
   // Where the batch now being chosen should land. ASK_FOR_POSITION means the
   // user hasn't said, so addFiles raises the picker. It lives here rather than
@@ -36,7 +49,16 @@
   // Startup
   // ---------------------------------------------------------------
 
-  document.addEventListener("DOMContentLoaded", async () => {
+  document.addEventListener("DOMContentLoaded", () => {
+    // An init() that throws leaves the app half-wired: some buttons live, some
+    // dead, and nothing on screen to say why. Say so instead.
+    startApp().catch((error) => {
+      console.error("Startup failed:", error);
+      AppChrome.showTemporaryStatus("Something went wrong starting up — reload the page.");
+    });
+  });
+
+  async function startApp() {
     Editor.init();
     ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
@@ -59,7 +81,7 @@
     wireExportControls();
     await restoreSavedSession(); // repopulate pages before the first paint
     renderPageList();
-  });
+  }
 
   function wirePhotoInputs() {
     const fileInput = $("fileInput");
@@ -67,7 +89,7 @@
     $("addPhotosBtn").addEventListener("click", () => startAdd(ASK_FOR_POSITION, openLibrary));
     $("cameraBtn").addEventListener("click", () => startAdd(ASK_FOR_POSITION, openCamera));
     fileInput.addEventListener("change", () => {
-      addFiles(fileInput.files, pendingInsertAt);
+      addFilesReportingFailure(fileInput.files, pendingInsertAt);
       fileInput.value = "";
     });
     // Fallback path only (no in-page camera): the system camera returns one
@@ -75,7 +97,7 @@
     cameraInput.addEventListener("change", () => {
       const file = cameraInput.files[0]; // grab the ref BEFORE resetting value
       cameraInput.value = "";
-      if (file) addFiles([file], pendingInsertAt);
+      if (file) addFilesReportingFailure([file], pendingInsertAt);
     });
   }
 
@@ -130,8 +152,8 @@
       busyText: "Preparing images…",
       exportBlobs: () => Exporter.exportPhotos(outputBlobs()),
       failurePrefix: "Export failed: ",
-      onDownloadFallback: () =>
-        showTemporaryStatus("Sharing unavailable — images downloaded in order instead."),
+      onDownloadFallback: () => AppChrome.showTemporaryStatus(
+        "Sharing unavailable — images downloaded in order instead."),
     }));
 
     if (!(navigator.canShare && navigator.share)) {
@@ -149,6 +171,16 @@
     return IMAGE_FILE_EXTENSIONS.test(file.name || "");
   }
 
+  /** Entry points that run inside a DOM event can't await addFiles, so a
+   *  failure outside its own try would be an unhandled rejection with the busy
+   *  overlay left up and nothing on screen to explain it. */
+  function addFilesReportingFailure(fileList, insertAt) {
+    addFiles(fileList, insertAt).catch((error) => {
+      console.error("Adding photos failed:", error);
+      AppChrome.showTemporaryStatus("Couldn't add those photos.");
+    });
+  }
+
   /**
    * @param insertAt where the new pages go, as an index into `pages`. Omit it
    *                 to ask the user — the picker, rapid capture and the
@@ -161,7 +193,7 @@
     const files = selected.filter(isImageFile);
     if (!files.length) {
       if (selected.length) {
-        showTemporaryStatus(selected.length === 1
+        AppChrome.showTemporaryStatus(selected.length === 1
           ? "That file isn't an image — nothing was added."
           : "Those files aren't images — nothing was added.");
       }
@@ -171,26 +203,43 @@
       ? await chooseInsertPosition(files.length)
       : insertAt;
     if (position === null) return; // cancelled — the photos are discarded
-    showBusy(`Processing 1 / ${files.length}…`);
-    setStatus("Loading OpenCV…");
+    // Only the processing queues: asking where the photos go has already
+    // happened, so the dialog never waits behind another job.
+    return libraryJobs.run(() => processChosenFiles(files, position));
+  }
+
+  async function processChosenFiles(files, position) {
+    const busy = AppChrome.beginBusy(`Processing 1 / ${files.length}…`);
     try {
-      await Detect.ensureOpenCV();
-    } catch (error) {
-      console.error(error);
-      setStatus("");
-      hideBusy();
-      alert("Couldn't load the scanner engine (OpenCV). Check your connection and try again.");
-      return;
-    }
-    setStatus("");
-    const wasAppended = position === pages.length;
-    try {
-      await addPhotoBatch(files, position);
+      if (!(await loadScannerEngine())) return;
+      const wasAppended = position === pages.length;
+      const tally = await addPhotoBatch(files, position, busy);
       persistPageOrder();
       if (!wasAppended) reportInsertPosition(position);
+      // Last, so it replaces the placement note: an uncropped page is the more
+      // useful thing to know about.
+      if (tally.detectionFailures) reportDetectionFailures(tally.detectionFailures);
     } finally {
-      hideBusy();
+      busy.end();
     }
+  }
+
+  /** @returns whether the engine is ready; a failure is reported here and the
+   *  caller simply stops. */
+  async function loadScannerEngine() {
+    AppChrome.setStatus("Loading OpenCV…");
+    let isReady = false;
+    try {
+      await Detect.ensureOpenCV();
+      isReady = true;
+    } catch (error) {
+      console.error(error);
+    }
+    AppChrome.setStatus("");
+    if (!isReady) {
+      alert("Couldn't load the scanner engine (OpenCV). Check your connection and try again.");
+    }
+    return isReady;
   }
 
   /** Nothing to insert among on an empty list, so the dialog is skipped and
@@ -228,7 +277,7 @@
 
   /** Says where the photos landed, since they aren't where the eye expects. */
   function reportInsertPosition(position) {
-    showTemporaryStatus(position === 0
+    AppChrome.showTemporaryStatus(position === 0
       ? "Added at the beginning — now page 1."
       : `Inserted after page ${position} — now page ${position + 1}.`);
   }
@@ -236,22 +285,26 @@
   /** Pipelined: detection in the worker is the long pole, so the next photo's
    *  decode and the previous page's warp+encode run on the main thread while
    *  the worker detects — their cost hides almost entirely. */
-  async function addPhotoBatch(files, insertAt) {
+  async function addPhotoBatch(files, insertAt, busy) {
     const renders = [];
+    // Counted rather than reported per photo: a dead worker fails every
+    // remaining photo, and one message is enough to explain the whole run.
+    const tally = { detectionFailures: 0 };
     // Advances only when a page is actually registered, so a photo that fails
     // to process leaves no gap in the run.
     let cursor = insertAt;
     let nextDecode = decodeOrCaptureError(files[0]);
     for (let index = 0; index < files.length; index++) {
-      showBusy(`Processing ${index + 1} / ${files.length}…`);
+      busy.update(`Processing ${index + 1} / ${files.length}…`);
       const decoded = await nextDecode;
       if (index + 1 < files.length) nextDecode = decodeOrCaptureError(files[index + 1]);
-      const page = await detectAndRegisterPage(files[index], decoded, cursor);
+      const page = await detectAndRegisterPage(files[index], decoded, cursor, tally);
       if (!page) continue;
       cursor++;
       renders.push(renderAndPersistNewPage(page, decoded, files[index]));
     }
     await Promise.all(renders);
+    return tally;
   }
 
   /** A decode failure travels with the queue rather than rejecting it, so one
@@ -260,10 +313,11 @@
     return ImageUtils.decodeImageToCanvas(file, DECODE_MAX_EDGE).catch((error) => error);
   }
 
-  async function detectAndRegisterPage(file, decoded, index) {
+  async function detectAndRegisterPage(file, decoded, index, tally) {
     try {
       if (decoded instanceof Error) throw decoded;
-      const corners = await Detect.detectCorners(decoded);
+      const { corners, failed } = await Detect.detectCorners(decoded);
+      if (failed) tally.detectionFailures++;
       const page = createPage(await blobToStore(file, decoded), corners);
       // splice at pages.length is a push, so appending needs no special case.
       pages.splice(index, 0, page);
@@ -278,7 +332,9 @@
    *  photo's detection, which is what makes the pipeline fast. */
   function renderAndPersistNewPage(page, decoded, file) {
     return regenerateOutput(page, decoded).then(() => {
-      persist(Store.addPage(page)); // blob + rendered output survive a reload
+      // addPage writes the original blob as well, so persisting a page that
+      // has since been deleted would leave megabytes nothing ever reclaims.
+      if (isPagePresent(page)) persist(Store.addPage(page));
       renderPageList();
     }, (error) => {
       discardPage(page);
@@ -294,6 +350,11 @@
     return ImageUtils.encodeCanvasToJpeg(decoded, ScanQuality.COMPACT_ORIGINAL_QUALITY);
   }
 
+  /** A render outlives the edit that started it, so by the time its output
+   *  lands the page may already have been deleted. Everything that persists
+   *  after an await checks this first. */
+  function isPagePresent(page) { return pages.indexOf(page) >= 0; }
+
   function createPage(blob, corners) {
     return {
       id: nextPageId++,
@@ -303,6 +364,15 @@
       outputBlob: null,
       outputURL: null,
     };
+  }
+
+  /** Detection falling back to the whole image is normal; the engine failing
+   *  is not, and it leaves a run of uncropped pages that otherwise looks like
+   *  the app just ignored the document. */
+  function reportDetectionFailures(count) {
+    AppChrome.showTemporaryStatus(count === 1
+      ? "Couldn't find the edges on 1 photo — crop it by hand."
+      : `Couldn't find the edges on ${count} photos — crop them by hand.`);
   }
 
   function reportPhotoFailure(file, error) {
@@ -319,7 +389,7 @@
    *  the batch doesn't wait on the compile after Done. Fire-and-forget: a
    *  failure here surfaces later, where it is already handled. */
   function preloadScannerEngine() {
-    markRejectionHandled(Detect.ensureOpenCV());
+    PromiseUtils.markRejectionHandled(Detect.ensureOpenCV());
   }
 
   /** Must be called straight from a user gesture — both getUserMedia and the
@@ -330,7 +400,7 @@
     // that started it, so the destination is read now rather than at Done.
     const insertAt = pendingInsertAt;
     CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
-      .then((files) => { if (files.length) addFiles(files, insertAt); });
+      .then((files) => { if (files.length) addFilesReportingFailure(files, insertAt); });
   }
 
   // ---------------------------------------------------------------
@@ -351,7 +421,7 @@
       let index = startIndex;
       while (index !== null) index = await editOnePage(index);
     } finally {
-      clearSourceCache();
+      sources.clear();
       PageListView.setListChromeVisible(true);
       renderPageList(); // the grid has to be back to full height before restoring
       PageScroll.restore();
@@ -361,7 +431,8 @@
   /** @returns the next index to open, or null when the session ends */
   async function editOnePage(index) {
     const page = pages[index];
-    primeSources(index); // decode this page and its neighbours ahead of time
+    if (!page) return null;
+    sources.keepAround(pages, index); // this page and its neighbours, decoded ahead
     const source = await sourceForEditing(page);
     if (!source) return null;
     const result = await Editor.open(source, page,
@@ -373,18 +444,18 @@
 
   /** A cached decode opens instantly; only a miss shows the spinner. */
   async function sourceForEditing(page) {
-    const entry = getSourceEntry(page);
-    if (entry.canvas) return entry.canvas;
-    showBusy("Opening…");
+    const alreadyDecoded = sources.cached(page);
+    if (alreadyDecoded) return alreadyDecoded;
+    const busy = AppChrome.beginBusy("Opening…");
     try {
-      const source = await entry.promise;
+      const source = await sources.get(page);
       await Detect.ensureOpenCV();
-      hideBusy();
       return source;
     } catch (error) {
-      hideBusy();
       alert("Couldn't open this page: " + error.message);
       return null;
+    } finally {
+      busy.end();
     }
   }
 
@@ -394,8 +465,11 @@
     // Skip the warp entirely when nothing changed (e.g. paging through to
     // review scans); otherwise render off the critical path and persist.
     if (page.outputBlob && page.renderedSig === renderSig(page)) return;
-    trackRender(regenerateOutput(page, source).then(
-      () => { PageListView.refreshThumbnail(page); persist(Store.savePage(page)); },
+    renders.track(regenerateOutput(page, source).then(
+      () => {
+        PageListView.refreshThumbnail(page);
+        if (isPagePresent(page)) persist(Store.savePage(page));
+      },
       (error) => console.error("Rendering failed:", error)));
   }
 
@@ -404,8 +478,10 @@
   // ---------------------------------------------------------------
 
   function deletePage(index) {
+    const page = pages[index];
+    if (!page) return; // splice would return [] and forgetPage would throw
     if (!confirm(`Delete page ${index + 1}?`)) return;
-    const [page] = pages.splice(index, 1);
+    pages.splice(index, 1);
     forgetPage(page);
     persist(Store.removePage(page.id));
     persistPageOrder();
@@ -413,6 +489,9 @@
   }
 
   function movePage(from, to) {
+    // `from` as well as `to`: an out-of-range splice returns [] and would put
+    // an undefined hole in `pages` that breaks render, persist and export.
+    if (from < 0 || from >= pages.length) return;
     if (to < 0 || to >= pages.length || from === to) return;
     const [page] = pages.splice(from, 1);
     pages.splice(to, 0, page);
@@ -460,7 +539,7 @@
    *  currently guarding. */
   function forgetPage(page) {
     releasePageURL(page);
-    renderTokens.delete(page.id);
+    renders.forget(page.id);
   }
 
   function renderPageList() { PageListView.render(pages); }
@@ -485,30 +564,40 @@
       `\n\nThis lowers their resolution and can't be undone.`);
   }
 
-  async function recompressAllPages() {
-    showBusy("Compressing…");
+  function recompressAllPages() {
+    return libraryJobs.run(recompressEveryPage);
+  }
+
+  async function recompressEveryPage() {
+    const busy = AppChrome.beginBusy("Compressing…");
     try {
       await Detect.ensureOpenCV();
-      await forEachPageWithSource("Compressing", recompressPage);
+      await forEachPageWithSource(busy, "Compressing", recompressPage);
       persistPageOrder();
     } catch (error) {
       console.error("Compression failed:", error);
       alert("Couldn't compress scans: " + error.message);
     } finally {
-      hideBusy();
+      busy.end();
       renderPageList();
     }
   }
 
   /** Walks every page in order, decoding the next original while the current
    *  one is processed — the same overlap addPhotoBatch uses. */
-  async function forEachPageWithSource(busyLabel, processPage) {
-    let nextDecode = pages.length ? prefetchOriginal(pages[0]) : null;
-    for (let index = 0; index < pages.length; index++) {
-      showBusy(`${busyLabel} ${index + 1} / ${pages.length}…`);
+  async function forEachPageWithSource(busy, busyLabel, processPage) {
+    // A snapshot rather than live indices: walking `pages` itself would process
+    // one page twice and skip another if the list changed underneath.
+    const queued = pages.slice();
+    let nextDecode = queued.length ? prefetchOriginal(queued[0]) : null;
+    for (let index = 0; index < queued.length; index++) {
+      busy.update(`${busyLabel} ${index + 1} / ${queued.length}…`);
       const source = await nextDecode;
-      if (index + 1 < pages.length) nextDecode = prefetchOriginal(pages[index + 1]);
-      await processPage(pages[index], source);
+      // Advanced before the skip below, so a removed page never breaks the
+      // decode overlap that makes the pass fast.
+      if (index + 1 < queued.length) nextDecode = prefetchOriginal(queued[index + 1]);
+      if (!isPagePresent(queued[index])) continue; // deleted since we started
+      await processPage(queued[index], source);
     }
   }
 
@@ -517,7 +606,7 @@
    *  prefetch abandoned by an earlier failure quiet; awaiting it later still
    *  throws, so one unreadable page aborts the run exactly as before. */
   function prefetchOriginal(page) {
-    return markRejectionHandled(
+    return PromiseUtils.markRejectionHandled(
       ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
   }
 
@@ -529,11 +618,15 @@
     if (pages.length) await rerenderAllScans();
   }
 
-  async function rerenderAllScans() {
-    showBusy("Updating scans…");
+  function rerenderAllScans() {
+    return libraryJobs.run(rerenderEveryScan);
+  }
+
+  async function rerenderEveryScan() {
+    const busy = AppChrome.beginBusy("Updating scans…");
     try {
       await Detect.ensureOpenCV();
-      await forEachPageWithSource("Updating scans", async (page, source) => {
+      await forEachPageWithSource(busy, "Updating scans", async (page, source) => {
         await regenerateOutput(page, source);
         persist(Store.savePage(page));
       });
@@ -541,7 +634,7 @@
       console.error("Re-rendering failed:", error);
       alert("Couldn't update the scans: " + error.message);
     } finally {
-      hideBusy();
+      busy.end();
       renderPageList();
     }
   }
@@ -549,29 +642,28 @@
   async function recompressPage(page, source) {
     page.blob = await ImageUtils.encodeCanvasToJpeg(source, ScanQuality.COMPACT_ORIGINAL_QUALITY);
     await regenerateOutput(page, source);
-    persist(Store.addPage(page)); // the blob changed → rewrite the full record
+    // The blob changed → rewrite the full record, but only while the page is
+    // still part of the document.
+    if (isPagePresent(page)) persist(Store.addPage(page));
   }
 
   // ---------------------------------------------------------------
   // Rendering a page's output
   // ---------------------------------------------------------------
 
-  const renderTokens = new Map(); // page.id -> latest render token
-
   /** Re-runs the render pipeline for a page and refreshes its JPEG output.
    *  Guards against a newer edit landing while this one is mid-flight. */
   async function regenerateOutput(page, sourceCanvas) {
-    const token = (renderTokens.get(page.id) || 0) + 1;
-    renderTokens.set(page.id, token);
-    const source = sourceCanvas || (await getSource(page));
+    const isCurrent = renders.claim(page.id);
+    const source = sourceCanvas || (await sources.get(page));
     const profile = ScanQuality.currentProfile();
     const scan = await ScanRenderer.renderScan(source, page.corners, {
       quarterTurns: page.quarterTurns, maxDim: profile.maxDim,
       enhance: ScanEnhance.isEnabled(),
     });
-    if (renderTokens.get(page.id) !== token) return; // superseded by a newer edit
+    if (!isCurrent()) return; // superseded by a newer edit
     const blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
-    if (renderTokens.get(page.id) !== token) return;
+    if (!isCurrent()) return;
     releasePageURL(page);
     page.outputBlob = blob;
     page.outputURL = URL.createObjectURL(blob);
@@ -583,75 +675,6 @@
   function renderSig(page) {
     const { tl, tr, br, bl } = page.corners;
     return JSON.stringify([tl, tr, br, bl, page.quarterTurns, ScanEnhance.isEnabled()]);
-  }
-
-  // Background renders in flight (page edits regenerated off the critical
-  // path). Export waits on these so it never bundles a stale page.
-  const inFlightRenders = new Set();
-
-  function trackRender(render) {
-    inFlightRenders.add(render);
-    render.finally(() => inFlightRenders.delete(render));
-    return render;
-  }
-
-  /** Loops rather than awaiting one snapshot: a render scheduled while we were
-   *  waiting (session restore finishing its OpenCV load, say) must be caught
-   *  too, or export bundles a page whose output is still null. */
-  async function whenRendersSettle() {
-    while (inFlightRenders.size) {
-      await Promise.allSettled([...inFlightRenders]);
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Decode cache + neighbour prefetch — the slow part of opening a page is
-  // decoding its full-res photo, so during an editing session we keep the
-  // current page and its two neighbours decoded and ready. Bounded to 3 large
-  // canvases so iOS Safari's canvas memory stays comfortable.
-  // ---------------------------------------------------------------
-
-  const sourceCache = new Map(); // page.id -> { promise, canvas|null, error|null }
-
-  function getSourceEntry(page) {
-    const cached = sourceCache.get(page.id);
-    if (cached) {
-      sourceCache.delete(page.id); // refresh LRU order
-      sourceCache.set(page.id, cached);
-      return cached;
-    }
-    const entry = { promise: null, canvas: null, error: null };
-    entry.promise = ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE).then(
-      (canvas) => { entry.canvas = canvas; return canvas; },
-      (error) => { entry.error = error; throw error; });
-    markRejectionHandled(entry.promise);
-    sourceCache.set(page.id, entry);
-    return entry;
-  }
-
-  function getSource(page) { return getSourceEntry(page).promise; }
-
-  /** Keeps only pages adjacent to `center` decoded; prefetches those. */
-  function primeSources(center) {
-    const keep = new Set();
-    for (const offset of [0, 1, -1]) {
-      const index = center + offset;
-      if (index < 0 || index >= pages.length) continue;
-      keep.add(pages[index].id);
-      getSourceEntry(pages[index]);
-    }
-    for (const id of [...sourceCache.keys()]) {
-      if (!keep.has(id)) sourceCache.delete(id); // canvas is GC'd once unreferenced
-    }
-  }
-
-  function clearSourceCache() { sourceCache.clear(); }
-
-  /** A prefetched neighbour is never awaited, so its rejection has to be
-   *  marked handled or it surfaces as an unhandled promise rejection. */
-  function markRejectionHandled(promise) {
-    promise.catch(() => {});
-    return promise;
   }
 
   // ---------------------------------------------------------------
@@ -673,9 +696,9 @@
 
   /** @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
-    showBusy(options.busyText);
+    const busy = AppChrome.beginBusy(options.busyText);
     try {
-      await whenRendersSettle(); // never bundle a page that is still rendering
+      await renders.whenSettled(); // never bundle a page that is still rendering
       // A page with no scan would reach the exporter as a null blob: the PDF
       // path throws, and Save to Photos silently writes a 4-byte file named
       // like a real scan. Refuse instead.
@@ -691,7 +714,7 @@
     } catch (error) {
       alert(options.failurePrefix + error.message);
     } finally {
-      hideBusy();
+      busy.end();
     }
   }
 
@@ -744,9 +767,11 @@
     // Tracked as ONE promise spanning the OpenCV load as well as the renders,
     // so an export during restore waits instead of seeing an empty in-flight
     // set and bundling pages that have no output yet.
-    trackRender(Detect.ensureOpenCV().then(
+    // Queued like the other whole-document passes: this one runs with no busy
+    // overlay, so it is the one job the user really can act during.
+    renders.track(libraryJobs.run(() => Detect.ensureOpenCV().then(
       () => rerenderInTurn(missing),
-      (error) => console.warn("Couldn't re-render restored pages:", error)));
+      (error) => console.warn("Couldn't re-render restored pages:", error))));
   }
 
   /** One at a time on purpose: every re-render decodes a full-resolution
@@ -755,10 +780,12 @@
    *  memory without costing time. A page that fails is skipped, not fatal. */
   async function rerenderInTurn(pagesToRender) {
     for (const page of pagesToRender) {
+      // Deleted while we worked: skip the decode and the warp entirely.
+      if (!isPagePresent(page)) continue;
       try {
         await regenerateOutput(page);
         PageListView.refreshThumbnail(page);
-        persist(Store.savePage(page));
+        if (isPagePresent(page)) persist(Store.savePage(page));
       } catch (error) {
         // The original can't be decoded, so this page will never render. Mark
         // it so the grid shows why, and so export refuses rather than writing
@@ -768,28 +795,6 @@
         console.error("Re-render failed:", error);
       }
     }
-  }
-
-  // ---------------------------------------------------------------
-  // Busy / status chrome
-  // ---------------------------------------------------------------
-
-  function showBusy(text) {
-    $("busyText").textContent = text;
-    $("busyOverlay").hidden = false;
-  }
-
-  function hideBusy() { $("busyOverlay").hidden = true; }
-
-  function setStatus(text) {
-    const status = $("statusText");
-    status.textContent = text;
-    status.hidden = !text;
-  }
-
-  function showTemporaryStatus(text) {
-    setStatus(text);
-    setTimeout(() => setStatus(""), STATUS_MESSAGE_MS);
   }
 
   // Exposed for debugging/testing.

@@ -73,8 +73,11 @@
     /** Loads OpenCV in this worker once; resolves when it is ready. */
     function ensureReady() {
       if (!ready) {
-        ready = call("init");
-        ready.catch(() => { ready = null; }); // let a later call retry
+        const started = call("init");
+        ready = started;
+        // Retire this attempt only: shutDown() may already have replaced it,
+        // and clearing a newer promise would send a second, pointless init.
+        started.catch(() => { if (ready === started) ready = null; });
       }
       return ready;
     }
@@ -127,15 +130,9 @@
    * before the first warp asks for it.
    */
   function ensureOpenCV() {
-    markRejectionHandled(renderer.ensureReady());
+    // The renderer's rejection is reported at the point it is actually used.
+    PromiseUtils.markRejectionHandled(renderer.ensureReady());
     return detector.ensureReady();
-  }
-
-  /** Keeps a rejection from surfacing as unhandled; it is reported at the
-   *  point the renderer is actually used. */
-  function markRejectionHandled(promise) {
-    promise.catch(() => {});
-    return promise;
   }
 
   // ---------------------------------------------------------------
@@ -143,9 +140,12 @@
   // ---------------------------------------------------------------
 
   /**
-   * Detects document corners in `sourceCanvas` (full-res normalized image).
-   * Returns corners {tl,tr,br,bl} in full-res coordinates, falling back to the
-   * whole image whenever no plausible document quad is found.
+   * Detects document corners in `sourceCanvas` (full-res normalized image),
+   * falling back to the whole image when no plausible document quad is found
+   * and when detection itself fails.
+   * @returns { corners, failed } — corners {tl,tr,br,bl} in full-res
+   *          coordinates; `failed` separates the engine giving up from the
+   *          photo simply having no document in it, so a caller can say so.
    */
   async function detectCorners(sourceCanvas) {
     const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
@@ -153,12 +153,13 @@
     try {
       await detector.ensureReady();
       const { response, scale } = await runDetection(sourceCanvas, false);
-      if (!response.corners) return wholeImage;
+      if (!response.corners) return { corners: wholeImage, failed: false };
       const corners = toFullResolutionCorners(response.corners, scale, bounds);
-      return isPlausibleDocumentQuad(corners, bounds) ? corners : wholeImage;
+      const isDocument = isPlausibleDocumentQuad(corners, bounds);
+      return { corners: isDocument ? corners : wholeImage, failed: false };
     } catch (error) {
       console.warn("Corner detection failed, using full image:", error);
-      return wholeImage;
+      return { corners: wholeImage, failed: true };
     }
   }
 
@@ -176,6 +177,7 @@
   async function runDetection(sourceCanvas, wantsDebug) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
     const imageData = imageDataOf(canvas);
+    ImageUtils.releaseCanvas(canvas); // the pixels live in imageData now
     const response = await callDetector("detect", {
       width: imageData.width,
       height: imageData.height,

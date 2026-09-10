@@ -39,8 +39,8 @@
     $("cancelSelectBtn").addEventListener("click", exitSelectMode);
     $("deleteSelectedBtn").addEventListener("click", () => handlers.onDeleteSelected());
     $("clearAllBtn").addEventListener("click", () => handlers.onClearAll());
-    $("scrollTopBtn").addEventListener("click", () => PageScroll.jumpTo("top"));
-    $("scrollBottomBtn").addEventListener("click", () => PageScroll.jumpTo("bottom"));
+    $("scrollTopBtn").addEventListener("click", PageScroll.jumpToTop);
+    $("scrollBottomBtn").addEventListener("click", PageScroll.jumpToBottom);
     // Rotating the phone changes what fits, and so whether the jumps are worth
     // offering. Passive: this listener never blocks the resize.
     window.addEventListener("resize", updateScrollAnchors, { passive: true });

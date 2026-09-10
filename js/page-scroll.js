@@ -57,19 +57,17 @@
       window.innerHeight + SCROLLABLE_SLACK;
   }
 
-  /** Jumps to one end of the page.
-   *
-   *  Instant rather than animated. `scroll-behavior: smooth` on the root would
-   *  also animate restore() and the editor's jump to its own top, which must
-   *  both be immediate, and scrollTo's own `behavior` option is honoured
-   *  unevenly. A list long enough to need these buttons is also long enough
-   *  that animating the whole way is a wait, not a courtesy.
-   *
-   *  @param end "top" or "bottom"
-   */
-  function jumpTo(end) {
-    window.scrollTo(0, end === "top" ? 0 : document.documentElement.scrollHeight);
-  }
+  /* Both jumps are instant rather than animated. `scroll-behavior: smooth` on
+   * the root would also animate restore() and the editor's jump to its own
+   * top, which must both be immediate, and scrollTo's own `behavior` option is
+   * honoured unevenly. A list long enough to need these buttons is also long
+   * enough that animating the whole way is a wait, not a courtesy. */
 
-  window.PageScroll = { remember, restore, freeze, thaw, isScrollable, jumpTo };
+  function jumpToTop() { window.scrollTo(0, 0); }
+
+  function jumpToBottom() { window.scrollTo(0, document.documentElement.scrollHeight); }
+
+  window.PageScroll = {
+    remember, restore, freeze, thaw, isScrollable, jumpToTop, jumpToBottom,
+  };
 })();

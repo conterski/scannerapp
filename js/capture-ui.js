@@ -251,12 +251,19 @@
       wire();
       els.torchBtn.hidden = true; // shown only once the device admits it can
       renderTorch();
+      // Both handlers check `accepting`: the user can leave before the camera
+      // finishes opening, and writing to the torn-down screen would leave the
+      // error panel showing when the next session opens.
       camera.start(els.captureVideo).then(
         () => {
+          if (!accepting) return;
           els.shutterBtn.disabled = false;
           els.torchBtn.hidden = !camera.supportsTorch();
         },
         (err) => {
+          // Leaving early makes start() reject on purpose (it releases the
+          // stream it was still waiting for), so that is not worth reporting.
+          if (!accepting) return;
           console.warn("Camera unavailable:", err);
           showError(CameraStream.describeError(err));
         });

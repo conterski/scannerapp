@@ -168,10 +168,20 @@
     schedulePreview();
   }
 
+  /** Detection is slow enough that the editor can be closed or moved to
+   *  another page before it lands, so the result is applied only to the
+   *  session that asked for it — the same guard renderPreview uses. */
   async function redetectCorners() {
-    session.corners = await Detect.detectCorners(session.source);
-    positionHandles();
-    schedulePreview();
+    const openId = session.openId;
+    try {
+      const { corners } = await Detect.detectCorners(session.source);
+      if (!session || session.openId !== openId) return;
+      session.corners = corners;
+      positionHandles();
+      schedulePreview();
+    } catch (error) {
+      console.warn("Re-detection failed:", error);
+    }
   }
 
   // ---------------------------------------------------------------
@@ -414,7 +424,10 @@
       const corner = session.corners[key];
       scaled[key] = { x: corner.x * scale, y: corner.y * scale };
     }
-    return ScanRenderer.renderScan(canvas, scaled, { quarterTurns: session.quarterTurns });
+    // Released on settle rather than straight away: the warp reads the canvas
+    // after awaiting the worker, and a preview runs on every drag and rotation.
+    return ScanRenderer.renderScan(canvas, scaled, { quarterTurns: session.quarterTurns })
+      .finally(() => ImageUtils.releaseCanvas(canvas));
   }
 
   function paintPreview(scan) {

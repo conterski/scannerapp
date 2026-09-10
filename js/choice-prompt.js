@@ -37,6 +37,9 @@
    *                scrolled into view when the list is long enough to scroll.
    */
   function open(options) {
+    // A prompt already on screen owns a caller waiting on its callbacks.
+    // Cancel it rather than overwriting them, or that caller never hears back.
+    cancel();
     elements.title.textContent = options.title;
     onCancel = options.onCancel || null;
     const defaultButton = fillChoices(options.choices);

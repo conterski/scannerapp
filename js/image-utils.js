@@ -18,6 +18,9 @@
    *  Returns the applied `scale` so callers can map coordinates back. */
   function createScaledCanvas(source, maxEdge) {
     const { width, height } = sourceDimensions(source);
+    // Without this the returned scale divides by zero: the caller would get an
+    // Infinity scale and a 1x1 canvas instead of an error it can report.
+    if (!width || !height) throw new Error("Image has no pixels");
     const requestedScale = Math.min(1, maxEdge / Math.max(width, height));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(width * requestedScale));
