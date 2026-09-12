@@ -44,10 +44,18 @@ const GRID = Object.freeze({
   // Stage 2 — the search outward from the printed border for the sheet edge.
   searchDepth: 0.22,           // how far past the border the edge may lie
   marchStep: 2,                // px, the snap's step
-  referenceOutset: 4,          // px past the border: blank margin, never print
+  // The paper reference is read in the margin just past the border, at three
+  // outsets, and taken as a high percentile: a border that sits on one rule
+  // of a printed box has more ink a few px on, and a median would read it.
+  // It is also floored by the sheet's interior paper level, for a border
+  // buried in print altogether.
+  referenceOutsets: [4, 8, 12], // px past the border
+  referencePercentile: 0.75,
+  referenceMinShareOfInterior: 0.8,
   rulingClearance: 6,          // px: the border's own ink, never a shadow candidate
   plateauSteps: 5,             // steps of clean paper that must precede a shadow dip
-  plateauTolerance: 14,        // gray levels the sheet's own margin may sit below the reference
+  plateauTolerance: 20,        // gray levels the sheet's own margin may sit below the reference —
+                               // a curling edge darkens its own margin a little before the shadow
   plateauAfterSteps: 3,        // steps of pad paper that must follow the shadow's recovery
   padTolerance: 24,            // the pad lies beneath the sheet and reads darker — the
                                // "small, consistently signed step" — so its plateau is looser
@@ -84,7 +92,12 @@ const GRID = Object.freeze({
   minStops: 4,
   coverageFloor: 0.4,          // spec: below this the side has no say
   stopSpreadRatio: 0.5,        // agreement: stops within this of the median distance
-  maxResidual: 0.008,          // of the short side, for a straight edge
+  // These sheets curl. Stops that fit a line to within curlResidual are a flat
+  // edge; up to maxResidual they are a curled one — still the sheet's edge,
+  // flagged `curled` for the trace, and the straight fit stands in for it (the
+  // spec's four-point contract). Beyond that they are not one edge at all.
+  curlResidual: 0.008,         // of the short side
+  maxResidual: 0.02,
   lockConfidence: 0.6,
 });
 
@@ -319,6 +332,27 @@ function isNearForeignRuling(point, foreign, radius) {
 // Stage 2 — the edge search along one border's normal
 // ------------------------------------------------------------------
 
+/**
+ * The paper's gray just outside a printed border: a high percentile over the
+ * margin at three outsets along the whole border, floored by the interior
+ * paper level. Null when too little of the margin is inside the image.
+ */
+function paperReferenceOutside(image, border, normal, centre) {
+  const samples = [];
+  for (const t of SIDE_SAMPLE_FRACTIONS) {
+    const point = pointAlong(border.a, border.b, t);
+    for (const outset of GRID.referenceOutsets) {
+      const x = Math.round(point.x + normal.nx * outset), y = Math.round(point.y + normal.ny * outset);
+      if (isInsideImage(image, x, y)) samples.push(grayAt(image, x, y));
+    }
+  }
+  if (samples.length < MIN_MARCH_SAMPLES) return null;
+  samples.sort(ascending);
+  const margin = samples[Math.min(samples.length - 1, Math.floor(samples.length * GRID.referencePercentile))];
+  const interior = interiorGrayReference(image, centre);
+  return margin < GRID.referenceMinShareOfInterior * interior ? interior : margin;
+}
+
 /** Gray values outward from `point` along `normal`, one per march step, up to
  *  `depth`. Stops short at the image edge or at an excluded pixel — the values
  *  up to there are still real, so they are kept and the cut is reported. */
@@ -424,18 +458,8 @@ function outermostStopOnProfile(values, reference, shortSide) {
 function sheetEdgeForBorder(image, border, centre, exclusions) {
   const shortSide = Math.min(image.width, image.height);
   const normal = outwardNormalFrom(border, centre);
-  // The blank paper is OUTSIDE the printed border, in the margin; just inside
-  // it is the table's own print. paperReferenceAlongSide reads inward of the
-  // line it is given, so it gets the border pushed out by the outset plus
-  // its own inset.
-  const outset = GRID.referenceOutset + PAPER_REFERENCE_INSET;
-  const referenceLine = {
-    a: { x: border.a.x + normal.nx * outset, y: border.a.y + normal.ny * outset },
-    b: { x: border.b.x + normal.nx * outset, y: border.b.y + normal.ny * outset },
-  };
-  const reference = paperReferenceAlongSide(image,
-    { side: referenceLine, normal, fractions: SIDE_SAMPLE_FRACTIONS });
-  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null,
+  const reference = paperReferenceOutside(image, border, normal, centre);
+  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null, curled: false,
                      uniformity: null, reference, excluded: 0, exclusions: { skin: 0, foreign: 0 },
                      distance: null, border, normal,
                      profiles: [],   // one per sample, for the overlay page
@@ -481,6 +505,7 @@ function sheetEdgeForBorder(image, border, centre, exclusions) {
   const line = fitLinePts(agreeing);
   evidence.residual = Math.max(...agreeing.map((stop) =>
     Math.abs((stop.x - line.px) * line.dy - (stop.y - line.py) * line.dx))) / shortSide;
+  evidence.curled = evidence.residual > GRID.curlResidual;
   for (const key of Object.keys(evidence.signals)) {
     evidence.signals[key] = agreeing.reduce((sum, stop) => sum + stop[key], 0) / agreeing.length;
   }
@@ -549,12 +574,12 @@ function scoreSideEvidence(evidence) {
   if (!evidence.side) return 0;
   if (evidence.coverage < GRID.coverageFloor) return 0;
   if (evidence.uniformity === null || evidence.uniformity < GRID.minShadowUniformity) return 0;
-  const straightness = Math.max(0, 1 - evidence.residual / GRID.maxResidual);
+  if (evidence.residual > GRID.maxResidual) return 0; // not one edge; curl is allowed, scatter is not
   const strength = (1 - GRID.stepWeight) * evidence.signals.shadow +
                    GRID.stepWeight * evidence.signals.step;
   // The prior already chose which stop each sample kept; here it only marks
   // down a side that sits well past any plausible margin.
-  return Math.min(1, strength * evidence.agreement * straightness * Math.sqrt(evidence.signals.prior));
+  return Math.min(1, strength * evidence.agreement * Math.sqrt(evidence.signals.prior));
 }
 
 /**

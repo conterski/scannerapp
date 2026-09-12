@@ -446,7 +446,7 @@ function gridLocksFor(pipeline, baseLocks, trace) {
       trace.push({ gridSide: type, confidence: +confidence.toFixed(2),
         coverage: +evidence.coverage.toFixed(2), stops: evidence.stops.length,
         shadow: +evidence.signals.shadow.toFixed(2), prior: +evidence.signals.prior.toFixed(2),
-        residual: evidence.residual === null ? null : +evidence.residual.toFixed(4),
+        residual: evidence.residual === null ? null : +evidence.residual.toFixed(4), curled: evidence.curled,
         reference: evidence.reference, excluded: evidence.excluded, exclusions: evidence.exclusions,
         agreement: evidence.agreement === null ? null : +evidence.agreement.toFixed(2),
         uniformity: evidence.uniformity === null ? null : +evidence.uniformity.toFixed(2),
