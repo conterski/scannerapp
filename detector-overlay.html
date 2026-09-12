@@ -29,7 +29,7 @@
   <strong>Detector overlay</strong>
   <select id="pick"></select>
   <button id="prev">◀</button><button id="next">▶</button>
-  <span class="legend">red dashed: crop without grid · blue: crop with grid · orange: printed border · green: locked side · yellow: evidence side · dots: stops · red marches: cut by an exclusion</span>
+  <span class="legend">red dashed: crop without grid · blue: crop with grid · orange: printed border · green: locked side · yellow: evidence side · dots: stops · red marches: cut by an exclusion · magenta: foreign rulings</span>
 </header>
 <div id="scene" class="scene"></div>
 
@@ -97,6 +97,8 @@
     view.height = Math.round(canvas.height * withGrid.scale);
     const ctx = view.getContext("2d");
     ctx.drawImage(canvas, 0, 0, view.width, view.height);
+    const grid = ((withGrid.trace || []).find((t) => "grid" in t) || {}).grid;
+    for (const segment of (grid && grid.foreignSegments) || []) strokeSegment(ctx, segment, "#d946ef", 2);
     for (const side of sides) {
       strokeSegment(ctx, side.border, "#f97316", 2);
       for (const profile of side.profiles) {
@@ -156,7 +158,7 @@
     const p = document.createElement("div");
     p.className = "verdict";
     const head = `<b>${name}</b> — grid ${grid && grid.grid ? `${grid.grid.inliers.horizontal} rows / ${grid.grid.inliers.vertical} columns, ${grid.grid.foreign} foreign` : "none"}` +
-      (gate ? ` · gate <b>${gate.gridGate}</b>` : "") + "<br>";
+      (gate ? ` · gate <b>${gate.gridGate}</b>` + (gate.fallbackGate ? ` (fallback ${gate.fallbackGate})` : "") : "") + "<br>";
     p.innerHTML = head + sides.map((s) => {
       const cls = s.locked ? "locked" : s.confidence > 0 ? "weak" : "none";
       const ex = s.exclusions ? ` (excluded ${s.excluded}: skin ${s.exclusions.skin}, foreign ${s.exclusions.foreign})` : "";
@@ -257,6 +259,34 @@
       if (shift > 0.5) moved.push(`${name.padEnd(13)} max ${shift.toFixed(1)}% locks ${base[name].locks || "-"} -> ${locks || "-"}`);
     }
     return { moved, unchanged: Object.keys(base).length - moved.length };
+  };
+
+  /** A contact sheet of the named scenes (default: every scene that moved
+   *  against the baseline): baseline crop dashed red, current crop blue. */
+  window.showMovers = async function (names, tileHeight = 300) {
+    await Detect.ensureOpenCV();
+    const base = JSON.parse(localStorage.getItem("overlayBaseline") || "{}");
+    if (!names) names = (await window.compareToBaseline()).moved.map((line) => line.split(" ")[0]);
+    const host = document.getElementById("scene");
+    host.innerHTML = "";
+    host.style.flexWrap = "wrap";
+    for (const name of names) {
+      const canvas = await canvasFor(name);
+      const result = await Detect.detectDebug(canvas);
+      const view = document.createElement("canvas");
+      view.className = "photo";
+      view.width = Math.round(canvas.width * result.scale);
+      view.height = Math.round(canvas.height * result.scale);
+      view.style.height = tileHeight + "px";
+      view.title = name;
+      const ctx = view.getContext("2d");
+      ctx.drawImage(canvas, 0, 0, view.width, view.height);
+      if (base[name]) strokeQuad(ctx, base[name].corners, "#ef4444", 3, [8, 6]);
+      strokeQuad(ctx, result.corners, "#3b82f6", 3, []);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(name, 8, 24);
+      host.appendChild(view);
+    }
+    return names;
   };
 
   show(SCENES[0]);

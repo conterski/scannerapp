@@ -76,6 +76,19 @@ const SAFE_OVERRIDE_MIN_SCORE_RATIO = 0.5;
 // false positive only loosens the crop, which is the accepted bias.
 const HULL_CUT_THRESHOLD = 0.09;
 
+// The sheet's own colour, sampled inside its printed grid. It is what
+// separates a pink carbon copy from brown wood, or a white sheet from a blue
+// pad, where gray and saturation cannot: chroma (Lab a/b) is what
+// discriminates, and lightness is left almost free, since a sheet shades
+// across its own surface. The mask is not a candidate — a sheet split by its
+// own print would hand fusion a half-sheet quad — it is read along the grid
+// evidence's march lines, one side at a time, like the shadow line is.
+const SHEET_COLOUR_SAMPLES_PER_AXIS = 7;
+const SHEET_COLOUR_INSET = 0.1;           // of the frame, clear of its rules
+const SHEET_COLOUR_PAPER_SHARE = 0.6;     // the brightest share of samples is paper, not ink
+const SHEET_CHROMA_TOLERANCE = 12;        // Lab a and b, either side of the paper's
+const SHEET_LIGHTNESS_ALLOWANCE = 70;     // Lab L below the paper's that still counts
+
 // Final margin, so hairline errors land on background rather than content.
 const SAFETY_MARGIN_FRACTION = 0.004;
 
@@ -171,6 +184,76 @@ function addAdaptiveCandidates(pipeline) {
     cv.THRESH_BINARY, block % 2 ? block : block + 1, ADAPTIVE_CONSTANT);
   cleanMask(pipeline);
   harvestMask(pipeline, "adaptive");
+}
+
+/** The four corners of the printed frame, so its interior can be sampled. */
+function frameCorners(frame) {
+  const [top, right, bottom, left] = frame.map((border) => border && lineThrough(border.a, border.b));
+  if (!top || !right || !bottom || !left) return null;
+  const corners = [lineIntersect(left, top), lineIntersect(top, right),
+                   lineIntersect(right, bottom), lineIntersect(bottom, left)];
+  return corners.every(Boolean) ? corners : null;
+}
+
+/** Bilinear point inside a quad given as [tl, tr, br, bl], at (u, v) in 0..1. */
+function pointInsideQuad([tl, tr, br, bl], u, v) {
+  const top = { x: tl.x + (tr.x - tl.x) * u, y: tl.y + (tr.y - tl.y) * u };
+  const bottom = { x: bl.x + (br.x - bl.x) * u, y: bl.y + (br.y - bl.y) * u };
+  return { x: top.x + (bottom.x - top.x) * v, y: top.y + (bottom.y - top.y) * v };
+}
+
+/** The paper's Lab colour inside the grid: the median of the brightest share
+ *  of a grid of samples, so ink and rulings do not vote. Null without a
+ *  complete frame or enough samples inside the image. */
+function paperColourInside(lab, frame) {
+  const corners = frameCorners(frame);
+  if (!corners) return null;
+  const samples = [];
+  const n = SHEET_COLOUR_SAMPLES_PER_AXIS;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const u = SHEET_COLOUR_INSET + (1 - 2 * SHEET_COLOUR_INSET) * (i + 0.5) / n;
+      const v = SHEET_COLOUR_INSET + (1 - 2 * SHEET_COLOUR_INSET) * (j + 0.5) / n;
+      const point = pointInsideQuad(corners, u, v);
+      const x = Math.round(point.x), y = Math.round(point.y);
+      if (x < 0 || y < 0 || x >= lab.cols || y >= lab.rows) continue;
+      const pixel = lab.ucharPtr(y, x);
+      samples.push({ l: pixel[0], a: pixel[1], b: pixel[2] });
+    }
+  }
+  if (samples.length < n) return null;
+  samples.sort((p, q) => q.l - p.l);
+  const paper = samples.slice(0, Math.max(1, Math.round(samples.length * SHEET_COLOUR_PAPER_SHARE)));
+  const medianOf = (key) => median(paper.map((s) => s[key]).sort(ascending));
+  return { l: medianOf("l"), a: medianOf("a"), b: medianOf("b") };
+}
+
+/** Everything that shares the sheet's chroma, at any lightness down to deep
+ *  shadow: a CV_8UC1 mask the grid evidence reads along its march lines, or
+ *  null when the frame is incomplete. Unlike the candidate masks it is not
+ *  opened or closed — print inside the sheet is a gap the march steps over,
+ *  and a morphology that bridged it would also bridge the sheet to a
+ *  neighbour of the same colour. */
+function sheetColourMask(pipeline, grid) {
+  let rgb = null, lab = null, low = null, high = null;
+  try {
+    rgb = new cv.Mat();
+    lab = new cv.Mat();
+    cv.cvtColor(pipeline.img, rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+    const paper = paperColourInside(lab, grid.frame);
+    if (!paper) return null;
+    low = new cv.Mat(lab.rows, lab.cols, lab.type(), new cv.Scalar(
+      Math.max(0, paper.l - SHEET_LIGHTNESS_ALLOWANCE), paper.a - SHEET_CHROMA_TOLERANCE, paper.b - SHEET_CHROMA_TOLERANCE));
+    high = new cv.Mat(lab.rows, lab.cols, lab.type(), new cv.Scalar(
+      255, paper.a + SHEET_CHROMA_TOLERANCE, paper.b + SHEET_CHROMA_TOLERANCE));
+    const mask = new cv.Mat();
+    cv.inRange(lab, low, high, mask);
+    pipeline.sheetColour = paper; // for the trace
+    return mask;
+  } finally {
+    releaseMats(rgb, lab, low, high);
+  }
 }
 
 /** Paper is colorless even in shadow while wood and desks are saturated, so
@@ -430,34 +513,42 @@ function applyHullCutNet(corners, options) {
  * @returns the widened lock map, or null when the grid added nothing
  */
 function gridLocksFor(pipeline, baseLocks, trace) {
-  const grid = findPrintedGrid(pipeline, pipeline.getSegments(), pipeline);
+  const grid = pipeline.grid;
   if (trace) {
     trace.push({ grid: grid
-      ? { inliers: grid.inliers, borders: grid.frame.map(Boolean), foreign: grid.foreign.length }
+      ? { inliers: grid.inliers, borders: grid.frame.map(Boolean), foreign: grid.foreign.length,
+          foreignSegments: grid.foreign } // for the overlay page
       : null });
   }
   if (!grid) return null;
 
   const locks = new Map(baseLocks || []);
   let added = 0;
-  for (const { type, side, confidence, evidence } of gridSideEvidence(pipeline, grid)) {
+  if (trace && pipeline.sheetColour) trace.push({ sheetColour: pipeline.sheetColour });
+  for (const { type, side, confidence, evidence, source, other } of gridSideEvidence(pipeline, grid, pipeline.sheetMask)) {
     const locked = confidence >= GRID.lockConfidence && !locks.has(type);
     if (trace) {
-      trace.push({ gridSide: type, confidence: +confidence.toFixed(2),
-        coverage: +evidence.coverage.toFixed(2), stops: evidence.stops.length,
-        shadow: +evidence.signals.shadow.toFixed(2), prior: +evidence.signals.prior.toFixed(2),
-        residual: evidence.residual === null ? null : +evidence.residual.toFixed(4), curled: evidence.curled,
-        reference: evidence.reference, excluded: evidence.excluded, exclusions: evidence.exclusions,
-        agreement: evidence.agreement === null ? null : +evidence.agreement.toFixed(2),
-        uniformity: evidence.uniformity === null ? null : +evidence.uniformity.toFixed(2),
-        distance: evidence.distance === null ? null : +evidence.distance.toFixed(3), locked,
-        // For the overlay page: where the search ran and what it read.
-        border: evidence.border, normal: evidence.normal, side, profiles: evidence.profiles,
-        stopPoints: evidence.stops.map((stop) => ({ x: stop.x, y: stop.y })) });
+      trace.push({ gridSide: type, locked, side, ...sideEvidenceTrace(source, confidence, evidence),
+                   other: other && sideEvidenceTrace(other.source, other.confidence, other.evidence) });
     }
     if (locked) { locks.set(type, side); added++; }
   }
   return added ? locks : null;
+}
+
+/** One kind of side evidence, rounded for the trace, with what the overlay
+ *  page draws: where the search ran and what it read. */
+function sideEvidenceTrace(source, confidence, evidence) {
+  const rounded = (value, digits) => (value === null ? null : +value.toFixed(digits));
+  return { source, confidence: rounded(confidence, 2),
+    coverage: rounded(evidence.coverage, 2), stops: evidence.stops.length,
+    shadow: rounded(evidence.signals.shadow, 2), prior: rounded(evidence.signals.prior, 2),
+    residual: rounded(evidence.residual, 4), curled: evidence.curled,
+    reference: evidence.reference, excluded: evidence.excluded, exclusions: evidence.exclusions,
+    agreement: rounded(evidence.agreement, 2), uniformity: rounded(evidence.uniformity, 2),
+    distance: rounded(evidence.distance, 3),
+    border: evidence.border, normal: evidence.normal, profiles: evidence.profiles,
+    stopPoints: evidence.stops.map((stop) => ({ x: stop.x, y: stop.y })) };
 }
 
 /** Why a grid-locked quad is not a sheet, or null when it passes. */
@@ -505,18 +596,25 @@ function assembleCorners(best, pipeline, locks, trace) {
  * any side and the result still looks like a sheet; otherwise assembled the
  * way the pipeline always has. The second path is the fallback, not a retry —
  * it is the detector that works on everything without a printed grid.
+ *
+ * The gates exist so the locks cannot make the quad less like a sheet. When
+ * the fallback fails a gate too, they have nothing to protect, and the sides
+ * with evidence behind them stand.
  */
 function buildCorners(best, pipeline, trace) {
   const baseLocks = lockedSidesFor(best, pipeline.reuniteLock);
-  // `withoutGrid` is the overlay page's before/after switch, nothing more.
-  const gridLocks = pipeline.withoutGrid ? null : gridLocksFor(pipeline, baseLocks, trace);
-  if (gridLocks) {
-    const built = assembleCorners(best, pipeline, gridLocks, trace);
-    const failure = gridGateFailure(built.corners, pipeline);
-    if (trace) trace.push({ gridGate: failure || "passed" });
-    if (!failure) return built;
+  const gridLocks = gridLocksFor(pipeline, baseLocks, trace);
+  if (!gridLocks) return assembleCorners(best, pipeline, baseLocks, trace);
+  const built = assembleCorners(best, pipeline, gridLocks, trace);
+  const failure = gridGateFailure(built.corners, pipeline);
+  if (!failure) {
+    if (trace) trace.push({ gridGate: "passed" });
+    return built;
   }
-  return assembleCorners(best, pipeline, baseLocks, trace);
+  const fallback = assembleCorners(best, pipeline, baseLocks, trace);
+  const fallbackFailure = gridGateFailure(fallback.corners, pipeline);
+  if (trace) trace.push({ gridGate: failure, fallbackGate: fallbackFailure || "passed" });
+  return fallbackFailure ? built : fallback;
 }
 
 function debugPayload(candidates) {
@@ -554,6 +652,9 @@ function createPipeline(width, height, debug) {
     reuniteLock: null,
     cannyEdges: null,
     getSegments: null,
+    grid: null,
+    sheetMask: null,
+    sheetColour: null,
   };
 }
 
@@ -573,7 +674,7 @@ function allocatePipelineMats(pipeline, buffer, kernels) {
 
 function releasePipeline(pipeline) {
   releaseMats(pipeline.img, pipeline.gray, pipeline.bin,
-    pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges);
+    pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges, pipeline.sheetMask);
 }
 
 function detect({ width, height, buffer, debug, withoutGrid }) {
@@ -583,6 +684,11 @@ function detect({ width, height, buffer, debug, withoutGrid }) {
     allocatePipelineMats(pipeline, buffer, DETECT_KERNELS);
     collectCandidates(pipeline);
     pipeline.getSegments = createSegmentSource(pipeline);
+    // The printed grid, found once: it vouches for sides in buildCorners, and
+    // its interior tells the sheet-colour mask what colour to look for.
+    // `withoutGrid` is the overlay page's before/after switch, nothing more.
+    pipeline.grid = pipeline.withoutGrid ? null : findPrintedGrid(pipeline, pipeline.getSegments(), pipeline);
+    pipeline.sheetMask = pipeline.grid ? sheetColourMask(pipeline, pipeline.grid) : null;
     const candidates = pipeline.candidates;
     const trace = debug ? [] : null;
 

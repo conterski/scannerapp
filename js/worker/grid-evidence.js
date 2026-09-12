@@ -34,6 +34,9 @@ const GRID = Object.freeze({
   rulingProbeOffset: 5,        // px
   rulingMaxSideDifference: 35, // gray levels between the two sides
   rulingMinSideGray: 60,       // both sides at least this bright
+  // A foreign ruling is on paper lit like the sheet; a scratch in dark wood
+  // has two dim sides that read alike, so it needs the stronger floor.
+  foreignMinSideShare: 0.75,   // of the sheet's interior paper gray
 
   // The table's left and right borders are traced by where its rulings END,
   // not by detecting the border lines: those are often lost to the segment
@@ -73,7 +76,11 @@ const GRID = Object.freeze({
   foreignRulingRadius: 0.02,   // a march passing within this of one is excluded
   // Skin: the usual YCrCb band, but warm-lit paper sits inside it too, so a
   // pixel must also be clearly darker than the paper and actually saturated.
+  // And the fringe of red print is skin-coloured pixel by pixel, so a march
+  // is only cut where skin goes on along it: an occluder is deep.
   skin: { crMin: 133, crMax: 173, cbMin: 77, cbMax: 127, maxLumaOfPaper: 0.85, minSaturation: 0.25 },
+  occluderRun: 0.03,           // of the short side, along the march
+  occluderRunShare: 0.8,       // of that run that must be skin
 
   // A cast shadow is a THIN dark line for its whole length. A line of small
   // print dips just like one in a single outward profile, but read across the
@@ -87,6 +94,13 @@ const GRID = Object.freeze({
   shadowRunMinDip: 15,         // a shadow pixel is well below paper; a darker pad is not
   maxShadowRunWidth: 4,        // px of dark across the line that still reads as shadow
   minShadowUniformity: 0.8,    // share of the length that reads as a thin shadow
+
+  // The sheet-colour boundary, read along the same march lines: the sheet
+  // ends where its colour ends for good. Print inside the sheet is a gap of
+  // its own colour too, so a gap only ends the march once it has lasted
+  // longer than any banner or logo does.
+  colourGapEnd: 0.08,          // of the short side, without the sheet's colour: the edge
+  colourMinDepth: 0.02,        // an end closer than this is the border's own margin
 
   // Verdict.
   minStops: 4,
@@ -159,11 +173,11 @@ function graySideOf(image, segment, sign) {
 }
 
 /** Printed ink on paper, as opposed to the paper's own edge against the desk:
- *  both sides read as paper, and read alike. */
-function isPrintedRuling(image, segment) {
+ *  both sides read as paper, at least `minSideGray` bright, and read alike. */
+function isPrintedRuling(image, segment, minSideGray = GRID.rulingMinSideGray) {
   const near = graySideOf(image, segment, 1), far = graySideOf(image, segment, -1);
   if (near === null || far === null) return false;
-  return Math.min(near, far) >= GRID.rulingMinSideGray &&
+  return Math.min(near, far) >= minSideGray &&
     Math.abs(near - far) <= GRID.rulingMaxSideDifference;
 }
 
@@ -241,8 +255,8 @@ function outermostPair(inliers, coordinate) {
  * @returns { frame, inliers, angles, foreign } or null when there is no grid.
  *          `frame` holds one segment per side type (top, right, bottom, left),
  *          right and left null when the vertical family is too thin;
- *          `foreign` is every long segment pointing neither way — another
- *          paper's rulings.
+ *          `foreign` is every long printed ruling pointing neither way —
+ *          another paper's.
  */
 function findPrintedGrid(image, segments, bounds) {
   const horizontal = rulingFamily(image, segments, {
@@ -266,14 +280,20 @@ function findPrintedGrid(image, segments, bounds) {
   const left = spanBetween(columns.left, top, bottom);
   const right = spanBetween(columns.right, top, bottom);
 
+  // Another paper's rulings point neither way and, like any ruling, have
+  // paper on both sides — which the desk's grain and the sheet's own edges
+  // do not.
+  const frame = [top, right, bottom, left]; // by side type
+  const paperGray = interiorGrayReference(image, gridCentre(frame));
   const isForeign = (segment) =>
     segmentLength(segment) >= GRID.minVerticalLength * bounds.width &&
     angleDifferenceDeg(segmentAngleDeg(segment), horizontal.angle) > GRID.foreignRulingAngleDeg &&
     (vertical.angle === null ||
-      angleDifferenceDeg(verticalAngleDeg(segment), vertical.angle) > GRID.foreignRulingAngleDeg);
+      angleDifferenceDeg(verticalAngleDeg(segment), vertical.angle) > GRID.foreignRulingAngleDeg) &&
+    isPrintedRuling(image, segment, GRID.foreignMinSideShare * paperGray);
 
   return {
-    frame: [top, right, bottom, left], // by side type
+    frame,
     inliers: { horizontal: horizontal.inliers.length, vertical: vertical.inliers.length },
     angles: { horizontal: horizontal.angle, vertical: vertical.angle },
     foreign: segments.filter(isForeign),
@@ -311,6 +331,22 @@ function isSkinAt(image, x, y, paperGray) {
   const cr = (r - luma) * 0.713 + 128;
   const cb = (b - luma) * 0.564 + 128;
   return cr >= crMin && cr <= crMax && cb >= cbMin && cb <= cbMax;
+}
+
+/** Whether skin goes on from `point` along `normal` for an occluder's depth:
+ *  a hand, or a desk in the skin band — not the fringe of red print. */
+function isOccluderAt(image, point, normal, paperGray) {
+  if (!isSkinAt(image, point.x, point.y, paperGray)) return false;
+  const run = GRID.occluderRun * Math.min(image.width, image.height);
+  let sampled = 0, skin = 0;
+  for (let distance = 0; distance <= run; distance += GRID.marchStep) {
+    const x = Math.round(point.x + normal.nx * distance);
+    const y = Math.round(point.y + normal.ny * distance);
+    if (!isInsideImage(image, x, y)) break;
+    sampled++;
+    if (isSkinAt(image, x, y, paperGray)) skin++;
+  }
+  return sampled > 0 && skin / sampled >= GRID.occluderRunShare;
 }
 
 /** Distance from a point to a segment proper (not its infinite line). */
@@ -362,7 +398,7 @@ function outwardProfile(image, point, normal, depth, exclusions, reference) {
     const x = Math.round(point.x + normal.nx * distance);
     const y = Math.round(point.y + normal.ny * distance);
     if (!isInsideImage(image, x, y)) return { values, cutBy: null };
-    const excluded = exclusions.isExcluded({ x, y }, reference);
+    const excluded = exclusions.isExcluded({ x, y }, normal, reference);
     if (excluded) return { values, cutBy: excluded, at: distance };
     values.push(grayAt(image, x, y));
   }
@@ -449,7 +485,8 @@ function outermostStopOnProfile(values, reference, shortSide) {
  * @param image     { gray, img, width, height }
  * @param border    the frame segment for this side
  * @param centre    the grid's interior, to orient the outward normal
- * @param exclusions { isExcluded(point, paperGray) → "skin" | "foreign" | null }
+ * @param exclusions { isExcluded(point, normal, paperGray) → "skin" | "foreign" | null,
+ *                     isNearForeign(point) → boolean }
  * @returns evidence: { side, stops, coverage, agreement, residual, uniformity,
  *          signals, … } with `side` null when too little was found to fit a
  *          line. The numbers are what scoreSideEvidence reads; nothing here
@@ -492,8 +529,17 @@ function sheetEdgeForBorder(image, border, centre, exclusions) {
     }
   }
   evidence.coverage = usable / SIDE_SAMPLE_FRACTIONS.length;
-  if (evidence.stops.length < GRID.minStops) return evidence;
+  return finishSideEvidence(image, evidence, border, shortSide, exclusions, reference, /* uniform */ true);
+}
 
+/**
+ * The tail every search shares: the stops' agreement, the fitted line and
+ * its residual, and — for the shadow search — the along-the-line uniformity
+ * test. Returns `evidence` filled in, `side` still null when too few stops
+ * agreed.
+ */
+function finishSideEvidence(image, evidence, border, shortSide, exclusions, reference, checkUniformity) {
+  if (evidence.stops.length < GRID.minStops) return evidence;
   const distances = evidence.stops.map((stop) => stop.distance).sort(ascending);
   const medianDistance = median(distances);
   evidence.distance = medianDistance / shortSide;
@@ -515,7 +561,9 @@ function sheetEdgeForBorder(image, border, centre, exclusions) {
     a: { x: line.px - line.dx * half, y: line.py - line.dy * half },
     b: { x: line.px + line.dx * half, y: line.py + line.dy * half },
   };
-  evidence.uniformity = shadowUniformity(image, spanOfStops(line, agreeing), normal, reference, exclusions);
+  if (checkUniformity) {
+    evidence.uniformity = shadowUniformity(image, spanOfStops(line, agreeing), evidence.normal, reference, exclusions);
+  }
   return evidence;
 }
 
@@ -553,7 +601,7 @@ function shadowUniformity(image, span, normal, reference, exclusions) {
   for (let i = 0; i < GRID.uniformitySamples; i++) {
     const point = pointAlong(span.a, span.b, (i + 0.5) / GRID.uniformitySamples);
     const x = Math.round(point.x), y = Math.round(point.y);
-    if (!isInsideImage(image, x, y) || exclusions.isExcluded({ x, y }, reference)) continue;
+    if (!isInsideImage(image, x, y) || exclusions.isExcluded({ x, y }, normal, reference)) continue;
     usable++;
     const run = darkRunAcross(image, point, normal, reference);
     if (run > 0 && run <= GRID.maxShadowRunWidth) thinAndDark++;
@@ -582,29 +630,119 @@ function scoreSideEvidence(evidence) {
   return Math.min(1, strength * evidence.agreement * Math.sqrt(evidence.signals.prior));
 }
 
+/** Whether the sheet-colour mask is set at a point. */
+function maskAt(mask, x, y) { return mask.ucharPtr(y, x)[0] !== 0; }
+
 /**
- * Every side the printed grid can vouch for, as lock candidates.
+ * Where the sheet's colour ends for good along one march line: the last
+ * mask pixel before a gap longer than any print inside the sheet. Null when
+ * the colour never ends within the search, or ends before a usable depth.
+ *
+ * Skin is not an exclusion here: red print on the sheet reads as skin too
+ * deep to tell from a hand, and a hand over the edge is simply not the
+ * sheet's colour — that sample stops short, and the agreement filter in
+ * finishSideEvidence outvotes it. A foreign ruling, though, means another
+ * printed sheet lies over the edge, and that sample has no verdict.
+ */
+function colourEndAlong(image, mask, point, normal, depth, isNearForeign) {
+  const gapEnd = GRID.colourGapEnd * Math.min(image.width, image.height);
+  const profile = { values: [], cutBy: null, end: null }; // values: 255 on the sheet's colour
+  let lastInside = -1, gap = 0;
+  for (let distance = 0; distance <= depth; distance += GRID.marchStep) {
+    const x = Math.round(point.x + normal.nx * distance);
+    const y = Math.round(point.y + normal.ny * distance);
+    if (!isInsideImage(image, x, y)) break;
+    if (isNearForeign({ x, y })) { profile.cutBy = "foreign"; return profile; }
+    const onSheet = maskAt(mask, x, y);
+    profile.values.push(onSheet ? 255 : 0);
+    if (onSheet) { lastInside = distance; gap = 0; }
+    else if ((gap += GRID.marchStep) >= gapEnd) { profile.end = lastInside; return profile; }
+  }
+  return profile; // still the sheet's colour when the march ran out: no verdict
+}
+
+/**
+ * The sheet edge from where its colour ends, for one border. Same shape of
+ * evidence as the shadow search, so the same scorer reads it.
+ */
+function sheetEdgeFromColour(image, mask, border, centre, exclusions, reference) {
+  const shortSide = Math.min(image.width, image.height);
+  const normal = outwardNormalFrom(border, centre);
+  // A colour boundary is a plain fact, not a scored dip: every stop carries
+  // the full shadow signal and no step, which caps the confidence at the
+  // shadow weight — a colour lock is never surer than a good shadow lock.
+  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null, curled: false,
+                     uniformity: 1, reference, excluded: 0, exclusions: { skin: 0, foreign: 0 },
+                     distance: null, border, normal, profiles: [],
+                     signals: { shadow: 1, step: 0, prior: 1 } };
+  // The march runs on past the search depth by one gap, so an end found at
+  // the depth can still be confirmed as final.
+  const maxDepth = GRID.searchDepth * shortSide;
+  const depth = maxDepth + GRID.colourGapEnd * shortSide;
+  const minDepth = GRID.colourMinDepth * shortSide;
+  let usable = 0;
+  for (const t of SIDE_SAMPLE_FRACTIONS) {
+    const point = pointAlong(border.a, border.b, t);
+    const profile = colourEndAlong(image, mask, point, normal, depth, exclusions.isNearForeign);
+    const end = profile.end;
+    evidence.profiles.push({ t, point, values: profile.values, cutBy: profile.cutBy, stop: end });
+    if (profile.cutBy) {
+      evidence.excluded++;
+      evidence.exclusions[profile.cutBy]++;
+      continue;
+    }
+    usable++;
+    if (end === null || end < minDepth || end > maxDepth) continue;
+    const distance = end + GRID.marchStep; // the first pixel past the colour
+    evidence.stops.push({ x: point.x + normal.nx * distance, y: point.y + normal.ny * distance,
+                          distance, score: 1, shadow: 1, step: 0, prior: priorScore(distance, shortSide) });
+  }
+  evidence.coverage = usable / SIDE_SAMPLE_FRACTIONS.length;
+  return finishSideEvidence(image, evidence, border, shortSide, exclusions, reference, /* uniform */ false);
+}
+
+/**
+ * Every side the printed grid can vouch for, as lock candidates. Two kinds of
+ * evidence are read per side — the shadow line and, when a sheet-colour mask
+ * is available, where the sheet's colour ends — and the stronger one is
+ * offered. Where both would lock, the shadow wins: it lies on the sheet's
+ * edge, while a colour boundary can run on to a neighbour of the same colour.
  * @param image   { gray, img, width, height }
  * @param grid    from findPrintedGrid
- * @returns [{ type, side, confidence, evidence }] for each side that has a
- *          printed border, whether or not it reaches lockConfidence — the
- *          caller decides what to lock; the trace wants all of them.
+ * @param mask    CV_8UC1 sheet-colour mask, or null
+ * @returns [{ type, side, confidence, evidence, source, other }] for each
+ *          side that has a printed border, whether or not it reaches
+ *          lockConfidence — the caller decides what to lock; the trace wants
+ *          all of them. `other` is the kind of evidence that lost, or null.
  */
-function gridSideEvidence(image, grid) {
+function gridSideEvidence(image, grid, mask) {
   const centre = gridCentre(grid.frame);
   const radius = GRID.foreignRulingRadius * Math.min(image.width, image.height);
+  const isNearForeign = (point) => isNearForeignRuling(point, grid.foreign, radius);
   const exclusions = {
-    isExcluded: (point, paperGray) => {
-      if (isSkinAt(image, point.x, point.y, paperGray)) return "skin";
-      if (isNearForeignRuling(point, grid.foreign, radius)) return "foreign";
-      return null;
+    isNearForeign,
+    // A pixel of the sheet's own colour is the sheet, whatever YCrCb says: a
+    // pink carbon copy in shadow sits inside the skin band, while a hand sits
+    // outside the sheet's chroma tolerance. So the mask outranks the skin test.
+    isExcluded: (point, normal, paperGray) => {
+      const onSheet = mask && maskAt(mask, point.x, point.y);
+      if (!onSheet && isOccluderAt(image, point, normal, paperGray)) return "skin";
+      return isNearForeign(point) ? "foreign" : null;
     },
   };
   const results = [];
   grid.frame.forEach((border, type) => {
     if (!border) return;
-    const evidence = sheetEdgeForBorder(image, border, centre, exclusions);
-    results.push({ type, side: evidence.side, confidence: scoreSideEvidence(evidence), evidence });
+    const shadow = sheetEdgeForBorder(image, border, centre, exclusions);
+    let best = { type, side: shadow.side, confidence: scoreSideEvidence(shadow), evidence: shadow, source: "shadow", other: null };
+    if (mask && best.confidence < GRID.lockConfidence) {
+      const colour = sheetEdgeFromColour(image, mask, border, centre, exclusions, shadow.reference);
+      const confidence = scoreSideEvidence(colour);
+      const asColour = { type, side: colour.side, confidence, evidence: colour, source: "colour" };
+      if (confidence > best.confidence) best = { ...asColour, other: best };
+      else best.other = asColour;
+    }
+    results.push(best);
   });
   return results;
 }
