@@ -21,8 +21,10 @@
   "use strict";
 
   // How often a frame is offered to the detector. The detector's own time per
-  // frame sets the real rate whenever it is slower than this.
-  const PREVIEW_INTERVAL_MS = 150;
+  // frame sets the real rate whenever it is slower than this. Was 150ms; the
+  // preview's single-mask pass made a frame a quarter cheaper, and that
+  // saving is spent here on a steadier outline at the same cost.
+  const PREVIEW_INTERVAL_MS = 120;
 
   // Share of each new position taken per frame. Raw per-frame quads jitter;
   // blending settles the outline without making it lag noticeably.

@@ -725,12 +725,12 @@ function detect({ width, height, buffer, debug, withoutGrid }) {
 
 /**
  * Where the document appears to be, for the live viewfinder outline. The
- * first third of `detect` — gray, blur, the two Otsu masks — through the same
- * contour, hull and scoring code, with no fusion, refinement, snap or net.
- * Runs at a quarter of detection's pixels and two masks instead of five, so it
- * can keep up with a camera feed; the price is that it misses scenes the full
- * detector catches. It only ever draws an outline. The crop still comes from
- * `detect` on the captured photo.
+ * first third of `detect` — gray, blur, the Otsu mask and its inverse as a
+ * fallback — through the same contour, hull and scoring code, with no fusion,
+ * refinement, snap or net. Runs at a quarter of detection's pixels and one or
+ * two masks instead of five, so it can keep up with a camera feed; the price
+ * is that it misses scenes the full detector catches. It only ever draws an
+ * outline. The crop still comes from `detect` on the captured photo.
  */
 function previewQuad({ width, height, buffer }) {
   const pipeline = createPipeline(width, height, false);
@@ -738,7 +738,12 @@ function previewQuad({ width, height, buffer }) {
     allocatePipelineMats(pipeline, buffer, PREVIEW_KERNELS);
     prepareGray(pipeline);
     addThresholdCandidates(pipeline, cv.THRESH_BINARY + cv.THRESH_OTSU, "otsu");
-    addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
+    // The inverted mask is the fallback, not a second opinion: on every scene
+    // in the set where the bright mask finds a quad, that quad is the one
+    // that wins, and the second mask costs as much again as the first.
+    if (!selectBestCandidate(pipeline.candidates)) {
+      addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
+    }
     const best = selectBestCandidate(pipeline.candidates);
     return { corners: best ? best.corners : null };
   } finally {
