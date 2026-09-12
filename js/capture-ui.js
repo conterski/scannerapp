@@ -14,7 +14,7 @@
   const STRIP_MAX = 4;   // thumbnails kept in the bottom strip
 
   const IDS = [
-    "captureView", "captureVideo", "captureFlash", "captureControls",
+    "captureView", "captureVideo", "captureOutline", "captureFlash", "captureControls",
     "shotCount", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
@@ -44,6 +44,7 @@
     const onFallback = (opts && opts.onFallback) || null;
     const els = collectElements();
     const camera = CameraStream.create();
+    const outline = CaptureOutline.create(els.captureOutline, els.captureVideo);
     const binder = createBinder();
 
     return new Promise((resolve) => {
@@ -134,7 +135,9 @@
 
       // Reviewing never ends the session — the stream keeps running behind
       // the gallery, so closing it is an instant return to the live preview.
+      // The outline rests while the gallery covers it: nothing to draw on.
       function openGallery() {
+        outline.stop();
         renderGallery();
         els.captureControls.hidden = true; // shutter/counter belong to the preview
         els.galleryView.hidden = false;
@@ -142,6 +145,7 @@
       function closeGallery() {
         els.galleryView.hidden = true;
         els.captureControls.hidden = false;
+        outline.start();
       }
 
       function deleteShot(id) {
@@ -155,6 +159,7 @@
       function finish() {
         if (!accepting) return;
         accepting = false;
+        outline.stop(); // the session is ending; nothing more to frame
         els.shutterBtn.disabled = true;
         els.captureDoneBtn.disabled = true;
         encodeChain.then(() => {
@@ -166,6 +171,7 @@
 
       function teardown() {
         binder.offAll();
+        outline.stop();
         clearTimeout(flashTimer);
         isTorchOn = false;
         els.torchBtn.hidden = true;
@@ -259,6 +265,7 @@
           if (!accepting) return;
           els.shutterBtn.disabled = false;
           els.torchBtn.hidden = !camera.supportsTorch();
+          outline.start(); // frames are flowing now
         },
         (err) => {
           // Leaving early makes start() reject on purpose (it releases the

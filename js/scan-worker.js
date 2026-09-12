@@ -1,11 +1,13 @@
 /* scan-worker.js — runs OpenCV.js off the main thread: document detection and
- * its perspective warp, plus the capture-time denoise.
+ * its perspective warp, the capture-time denoise, and the quick look the live
+ * viewfinder outline is drawn from.
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
- *   init    → loads OpenCV
- *   detect  {width, height, buffer}                      → {corners|null}
- *   warp    {width, height, buffer, corners, dstW, dstH} → {buffer}
- *   denoise {width, height, buffer}                      → {buffer}
+ *   init        → loads OpenCV
+ *   detect      {width, height, buffer}                      → {corners|null}
+ *   previewQuad {width, height, buffer}                      → {corners|null}
+ *   warp        {width, height, buffer, corners, dstW, dstH} → {buffer}
+ *   denoise     {width, height, buffer}                      → {buffer}
  *
  * The detector itself lives in worker/: geometry (pure math), pixel-probes
  * (what the pixels say), candidates (mask → scored quads), edge-fusion
@@ -30,10 +32,15 @@ importScripts(...[
 ].map((path) => path + ASSET_VERSION));
 
 // Morphology: an aggressive OPEN severs thin bright bridges between the paper
-// and adjacent objects (other papers, glare) so blobs don't merge.
-const OPEN_KERNEL_SIZE = 13;
-const CLOSE_KERNEL_SIZE = 7;
-const DILATE_KERNEL_SIZE = 7;
+// and adjacent objects (other papers, glare) so blobs don't merge. Sized for
+// the ~800px frame detection runs at.
+const DETECT_KERNELS = { open: 13, close: 7, dilate: 7 };
+
+// The live viewfinder outline runs the same masks at ~400px, so its kernels
+// are scaled to match — the detection sizes would swallow a page at that
+// scale. This is a quick look for framing, not the crop.
+const PREVIEW_KERNELS = { open: 7, close: 3, dilate: 3 };
+
 const BLUR_KERNEL_SIZE = 5;
 
 // Local adaptive threshold: survives shadow gradients across the paper.
@@ -226,11 +233,15 @@ function createSegmentSource(pipeline) {
   };
 }
 
-function collectCandidates(pipeline) {
+/** The blurred grayscale every mask and every probe reads from. */
+function prepareGray(pipeline) {
   cv.cvtColor(pipeline.img, pipeline.gray, cv.COLOR_RGBA2GRAY);
   cv.GaussianBlur(pipeline.gray, pipeline.gray,
     new cv.Size(BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), 0);
+}
 
+function collectCandidates(pipeline) {
+  prepareGray(pipeline);
   addThresholdCandidates(pipeline, cv.THRESH_BINARY + cv.THRESH_OTSU, "otsu");
   addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
   addAdaptiveCandidates(pipeline);
@@ -452,16 +463,18 @@ function createPipeline(width, height, debug) {
   };
 }
 
-function allocatePipelineMats(pipeline, buffer) {
+function squareKernel(size) {
+  return cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(size, size));
+}
+
+/** @param kernels { open, close, dilate } — DETECT_KERNELS or PREVIEW_KERNELS */
+function allocatePipelineMats(pipeline, buffer, kernels) {
   pipeline.img = cv.matFromImageData(toImageData(pipeline.width, pipeline.height, buffer));
   pipeline.gray = new cv.Mat();
   pipeline.bin = new cv.Mat();
-  pipeline.kOpen = cv.getStructuringElement(cv.MORPH_RECT,
-    new cv.Size(OPEN_KERNEL_SIZE, OPEN_KERNEL_SIZE));
-  pipeline.kClose = cv.getStructuringElement(cv.MORPH_RECT,
-    new cv.Size(CLOSE_KERNEL_SIZE, CLOSE_KERNEL_SIZE));
-  pipeline.kDilate = cv.getStructuringElement(cv.MORPH_RECT,
-    new cv.Size(DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE));
+  pipeline.kOpen = squareKernel(kernels.open);
+  pipeline.kClose = squareKernel(kernels.close);
+  pipeline.kDilate = squareKernel(kernels.dilate);
 }
 
 function releasePipeline(pipeline) {
@@ -472,7 +485,7 @@ function releasePipeline(pipeline) {
 function detect({ width, height, buffer, debug }) {
   const pipeline = createPipeline(width, height, debug);
   try {
-    allocatePipelineMats(pipeline, buffer);
+    allocatePipelineMats(pipeline, buffer, DETECT_KERNELS);
     collectCandidates(pipeline);
     pipeline.getSegments = createSegmentSource(pipeline);
     const candidates = pipeline.candidates;
@@ -500,6 +513,33 @@ function detect({ width, height, buffer, debug }) {
       splitDiag: pipeline.splitDiag,
       debug: debugPayload(candidates),
     };
+  } finally {
+    releasePipeline(pipeline);
+  }
+}
+
+// ------------------------------------------------------------------
+// previewQuad
+// ------------------------------------------------------------------
+
+/**
+ * Where the document appears to be, for the live viewfinder outline. The
+ * first third of `detect` — gray, blur, the two Otsu masks — through the same
+ * contour, hull and scoring code, with no fusion, refinement, snap or net.
+ * Runs at a quarter of detection's pixels and two masks instead of five, so it
+ * can keep up with a camera feed; the price is that it misses scenes the full
+ * detector catches. It only ever draws an outline. The crop still comes from
+ * `detect` on the captured photo.
+ */
+function previewQuad({ width, height, buffer }) {
+  const pipeline = createPipeline(width, height, false);
+  try {
+    allocatePipelineMats(pipeline, buffer, PREVIEW_KERNELS);
+    prepareGray(pipeline);
+    addThresholdCandidates(pipeline, cv.THRESH_BINARY + cv.THRESH_OTSU, "otsu");
+    addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
+    const best = selectBestCandidate(pipeline.candidates);
+    return { corners: best ? best.corners : null };
   } finally {
     releasePipeline(pipeline);
   }
@@ -586,6 +626,7 @@ function denoise({ width, height, buffer }) {
 const HANDLERS = new Map([
   ["init", () => ({ result: {} })],
   ["detect", (payload) => ({ result: detect(payload) })],
+  ["previewQuad", (payload) => ({ result: previewQuad(payload) })],
   ["warp", (payload) => {
     const buffer = warp(payload);
     return { result: { buffer }, transferables: [buffer] };

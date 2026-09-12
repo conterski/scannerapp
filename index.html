@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="css/style.css?v=a1845b8b51">
+<link rel="stylesheet" href="css/style.css?v=64eb4bf09c">
 </head>
 <body>
 
@@ -137,6 +137,7 @@
 <!-- ============ RAPID CAPTURE (in-page camera) ============ -->
 <div id="captureView" class="capture-view" hidden>
   <video id="captureVideo" class="capture-video" playsinline webkit-playsinline muted autoplay></video>
+  <svg id="captureOutline" class="capture-outline" aria-hidden="true" hidden></svg>
   <div id="captureFlash" class="capture-flash" hidden></div>
 
   <div id="captureControls" class="capture-controls">
@@ -169,28 +170,29 @@
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>
-<script src="js/promise-utils.js?v=a1845b8b51"></script>
-<script src="js/image-utils.js?v=a1845b8b51"></script>
-<script src="js/page-scroll.js?v=a1845b8b51"></script>
-<script src="js/choice-prompt.js?v=a1845b8b51"></script>
-<script src="js/pointer-drag.js?v=a1845b8b51"></script>
-<script src="js/persisted-flag.js?v=a1845b8b51"></script>
-<script src="js/capture-quality.js?v=a1845b8b51"></script>
-<script src="js/scan-quality.js?v=a1845b8b51"></script>
-<script src="js/scan-enhance.js?v=a1845b8b51"></script>
-<script src="js/detect.js?v=a1845b8b51"></script>
-<script src="js/scan-render.js?v=a1845b8b51"></script>
-<script src="js/camera.js?v=a1845b8b51"></script>
-<script src="js/photo-store.js?v=a1845b8b51"></script>
-<script src="js/capture-ui.js?v=a1845b8b51"></script>
-<script src="js/editor.js?v=a1845b8b51"></script>
-<script src="js/page-list-view.js?v=a1845b8b51"></script>
-<script src="js/export.js?v=a1845b8b51"></script>
-<script src="js/store.js?v=a1845b8b51"></script>
-<script src="js/job-queue.js?v=a1845b8b51"></script>
-<script src="js/app-chrome.js?v=a1845b8b51"></script>
-<script src="js/source-cache.js?v=a1845b8b51"></script>
-<script src="js/render-tracker.js?v=a1845b8b51"></script>
-<script src="js/app.js?v=a1845b8b51"></script>
+<script src="js/promise-utils.js?v=64eb4bf09c"></script>
+<script src="js/image-utils.js?v=64eb4bf09c"></script>
+<script src="js/page-scroll.js?v=64eb4bf09c"></script>
+<script src="js/choice-prompt.js?v=64eb4bf09c"></script>
+<script src="js/pointer-drag.js?v=64eb4bf09c"></script>
+<script src="js/persisted-flag.js?v=64eb4bf09c"></script>
+<script src="js/capture-quality.js?v=64eb4bf09c"></script>
+<script src="js/scan-quality.js?v=64eb4bf09c"></script>
+<script src="js/scan-enhance.js?v=64eb4bf09c"></script>
+<script src="js/detect.js?v=64eb4bf09c"></script>
+<script src="js/scan-render.js?v=64eb4bf09c"></script>
+<script src="js/camera.js?v=64eb4bf09c"></script>
+<script src="js/photo-store.js?v=64eb4bf09c"></script>
+<script src="js/capture-outline.js?v=64eb4bf09c"></script>
+<script src="js/capture-ui.js?v=64eb4bf09c"></script>
+<script src="js/editor.js?v=64eb4bf09c"></script>
+<script src="js/page-list-view.js?v=64eb4bf09c"></script>
+<script src="js/export.js?v=64eb4bf09c"></script>
+<script src="js/store.js?v=64eb4bf09c"></script>
+<script src="js/job-queue.js?v=64eb4bf09c"></script>
+<script src="js/app-chrome.js?v=64eb4bf09c"></script>
+<script src="js/source-cache.js?v=64eb4bf09c"></script>
+<script src="js/render-tracker.js?v=64eb4bf09c"></script>
+<script src="js/app.js?v=64eb4bf09c"></script>
 </body>
 </html>

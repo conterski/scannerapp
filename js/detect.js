@@ -16,6 +16,10 @@
   // size and it keeps the worker's OpenCV heap small.
   const DETECTION_MAX_EDGE = 800;
 
+  // The live viewfinder outline runs at half that again: a quarter of the
+  // pixels, for something that has to keep up with a camera feed.
+  const PREVIEW_MAX_EDGE = 400;
+
   // A quad smaller than this share of the photo is noise, not a document.
   const MIN_DOCUMENT_AREA_FRACTION = 0.08;
 
@@ -184,6 +188,58 @@
     };
   }
 
+  // ---------------------------------------------------------------
+  // Live preview
+  // ---------------------------------------------------------------
+
+  // One scratch canvas for every preview frame. A fresh canvas per tick, ten
+  // times a second, would be nothing but allocation churn.
+  let previewCanvas = null;
+
+  /** Draws the current frame into the scratch canvas at preview size.
+   *  @returns { imageData, scale } */
+  function grabPreviewFrame(frameSource) {
+    const { width, height } = ImageUtils.sourceDimensions(frameSource);
+    const scale = Math.min(1, PREVIEW_MAX_EDGE / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    if (!previewCanvas) previewCanvas = document.createElement("canvas");
+    if (previewCanvas.width !== targetWidth || previewCanvas.height !== targetHeight) {
+      previewCanvas.width = targetWidth;
+      previewCanvas.height = targetHeight;
+    }
+    // Read back every tick, which is the case willReadFrequently exists for:
+    // it keeps the pixels where getImageData can reach them without a copy
+    // off the GPU each time.
+    const context = previewCanvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(frameSource, 0, 0, targetWidth, targetHeight);
+    return { imageData: imageDataOf(previewCanvas), scale: targetWidth / width };
+  }
+
+  /**
+   * Where the document appears to be, for the live viewfinder outline — not
+   * where it will be cropped. Runs on the detector, which is idle while the
+   * camera is open; each call also re-arms its idle shutdown, which is what
+   * keeps it warm for the whole session.
+   * @param frameSource  anything drawable with a size: the <video> element
+   * @returns corners {tl,tr,br,bl} in the frame's own pixels, or null when
+   *          nothing plausible is in view
+   */
+  async function previewCorners(frameSource) {
+    const bounds = ImageUtils.sourceDimensions(frameSource);
+    if (!bounds.width || !bounds.height) return null;
+    await detector.ensureReady();
+    const { imageData, scale } = grabPreviewFrame(frameSource);
+    const response = await callDetector("previewQuad", {
+      width: imageData.width,
+      height: imageData.height,
+      buffer: imageData.data.buffer,
+    }, [imageData.data.buffer]);
+    if (!response.corners) return null;
+    const corners = toFullResolutionCorners(response.corners, scale, bounds);
+    return isPlausibleDocumentQuad(corners, bounds) ? corners : null;
+  }
+
   async function runDetection(sourceCanvas, wantsDebug) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
     const imageData = imageDataOf(canvas);
@@ -330,7 +386,7 @@
   }
 
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, warpPerspective, denoiseCanvas,
-    fullImageCorners,
+    ensureOpenCV, detectCorners, detectDebug, previewCorners, warpPerspective,
+    denoiseCanvas, fullImageCorners,
   };
 })();
