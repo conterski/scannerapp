@@ -25,12 +25,19 @@
 const SCORE = Object.freeze({
   samplesPerSide: 32,
   previewSamplesPerSide: 20,
-  minValidSamples: 8,          // fewer, and the side is unobserved: it gets the benefit of the doubt
-  unobservedEdge: 0.5,
+  minValidSamples: 8,          // fewer, and the side is unobserved
+  // An unobserved side (along the frame's border) is a guess, and a guess
+  // must lose to any side with real support behind it, or the frame's edge
+  // would win whenever a true edge is faint or partly hidden.
+  unobservedEdge: 0.2,
 
-  // Probe depths, px at 800px (scaled by shortSide / 800).
+  // Probe depths, px at 800px (scaled by shortSide / 800). A candidate's
+  // side is often a few px off the edge it found, so each sample is also
+  // read at small offsets across the side and the strongest reading stands:
+  // refinement is what closes the gap, and it needs the edge to be seen.
   referenceShortSide: 800,
   depths: { near: 3, mid: 6, far: 10, band: 20 },
+  sampleOffsets: [0, -2, 2],
 
   // The profile classifier. A step of 25 gray levels is full contrast — the
   // old probes' calibrated value; 9 is where paper-on-paper seams begin to
@@ -41,16 +48,25 @@ const SCORE = Object.freeze({
   shadowStep: { minDip: 9, minRemainingDrop: 6, dipWeight: 0.6, dipFullScale: 15 },
 
   edge: { trimmedShare: 0.75 },        // the best three quarters: a hand or a fold over the rest costs nothing
-  background: { maxDeltaE: 18 },       // inside matches outside this closely: the same desk
+  // Inside is the desk when it is nearer the frame's border colour than the
+  // sheet's paper — the desk's, not merely whatever lies outside the side: a
+  // hand across an edge lies on both sides of it too, and is not the desk.
+  // Nearest-of-two, so a light desk close to paper still separates from it;
+  // where the two are closer than the margin the test says nothing.
+  background: { maxDeltaE: 30, minDeskToPaper: 15 },
   paperOutside: { maxAcrossDifference: 12 },
   // Content is looked for from past the widest shadow a sheet casts (the
   // grid evidence measured 4px) so a dark seam never reads as print, and
   // print is dark against its own neighbours a few px away — a cast shadow
-  // on a light desk is as dark, but it ramps.
-  content: { startDepth: 8, reachInBands: 2, step: 2, paperGap: 6, inkContrast: 50 },
+  // on a light desk is as dark, but it ramps. At this scale a blurred
+  // stroke or rule is 25-60 levels below the paper beside it.
+  content: { startDepth: 8, reachOfShortSide: 0.08, step: 2, paperGap: 5, inkContrast: 25 },
   // The nested edge must be paper meeting paper — a seam, not a printed box
-  // or the desk. The desk case is B's; a thick rule steps far harder.
-  nested: { from: 0.025, to: 0.12, step: 2, blankMagnitudeShare: 0.25, maxStep: 35 },
+  // or the desk. The desk case is B's; a thick rule steps far harder. A thin
+  // dark line with the same paper on both sides is a seam or a printed rule,
+  // and at this scale the two look alike; what tells them apart is where the
+  // print is — a rule sits at the table, a seam sits clear of it.
+  nested: { from: 0.025, to: 0.12, step: 2, blankMagnitudeShare: 0.25, maxStep: 35, minSeamFromPrint: 0.015 },
 
   // Paper and ink in Lab (8-bit, a/b offset 128). The chroma tolerance and
   // lightness allowance are the sheet-colour mask's calibrated values: a
@@ -74,6 +90,7 @@ const SAMPLE_KIND_NONE = "none";
 const SAMPLE_KIND_STEP = "step";
 const SAMPLE_KIND_SHADOW_STEP = "shadowStep";
 const SAMPLE_KIND_LINE = "line";
+const SAMPLE_KIND_SEAM = "seam"; // a line-like dip clear of the print: the sheet's edge over its pad
 
 // ------------------------------------------------------------------
 // Paper and ink
@@ -85,7 +102,7 @@ const SAMPLE_KIND_LINE = "line";
  */
 function paletteFor(frame, quad) {
   if (frame.lab) {
-    const paper = paperColourInside(frame, quad) || frame.backgroundLab;
+    const paper = paperLabInside(frame, quad) || frame.backgroundLab;
     return labPalette(frame, paper);
   }
   return grayPalette(frame, paperGrayInside(frame, quad));
@@ -96,6 +113,7 @@ function labPalette(frame, paper) {
   const at = (x, y) => frameLabAt(frame, x, y);
   return {
     paper,
+    desk: frame.backgroundLab,
     isPaper(x, y) {
       const pixel = at(x, y);
       return Math.abs(pixel.a - paper.a) <= chromaTolerance && Math.abs(pixel.b - paper.b) <= chromaTolerance &&
@@ -120,6 +138,7 @@ function grayPalette(frame, paperGray) {
   const { lightnessAllowance, inkLightnessDrop } = SCORE.paper;
   return {
     paper: { l: paperGray },
+    desk: null, // the preview reads no colour; the side's own outside stands in
     isPaper: (x, y) => frameGrayAt(frame, x, y) >= paperGray - lightnessAllowance,
     isInk: (x, y) => frameGrayAt(frame, x, y) <= paperGray - inkLightnessDrop,
     colourAt: (x, y) => ({ l: frameGrayAt(frame, x, y) }),
@@ -129,7 +148,7 @@ function grayPalette(frame, paperGray) {
 }
 
 /** Bilinear point inside a quad at (u, v) in 0..1. */
-function pointInsideQuad({ tl, tr, br, bl }, u, v) {
+function pointWithinQuad({ tl, tr, br, bl }, u, v) {
   const top = { x: tl.x + (tr.x - tl.x) * u, y: tl.y + (tr.y - tl.y) * u };
   const bottom = { x: bl.x + (br.x - bl.x) * u, y: bl.y + (br.y - bl.y) * u };
   return { x: top.x + (bottom.x - top.x) * v, y: top.y + (bottom.y - top.y) * v };
@@ -141,7 +160,7 @@ function interiorSamplePoints(frame, quad) {
   const points = [];
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
-      const point = pointInsideQuad(quad, inset + (1 - 2 * inset) * (i + 0.5) / n, inset + (1 - 2 * inset) * (j + 0.5) / n);
+      const point = pointWithinQuad(quad, inset + (1 - 2 * inset) * (i + 0.5) / n, inset + (1 - 2 * inset) * (j + 0.5) / n);
       const x = Math.round(point.x), y = Math.round(point.y);
       if (insideFrame(frame, x, y)) points.push({ x, y });
     }
@@ -151,7 +170,7 @@ function interiorSamplePoints(frame, quad) {
 
 /** The paper's Lab: the median of the brightest share of interior samples, so
  *  ink and rulings do not vote. Null when too little of the quad is in frame. */
-function paperColourInside(frame, quad) {
+function paperLabInside(frame, quad) {
   const points = interiorSamplePoints(frame, quad);
   if (points.length < SCORE.paper.samplesPerAxis) return null;
   const samples = points.map(({ x, y }) => frameLabAt(frame, x, y)).sort((p, q) => q.l - p.l);
@@ -190,21 +209,45 @@ function classifyProfile(values) {
   const step = outer - inner;
   const dip = Math.min(inner, outer) - centre;
   const acrossDifference = Math.abs(values[p.outFar] - values[p.inFar]);
+  const { minDip, minRemainingDrop, dipWeight, dipFullScale } = SCORE.shadowStep;
+  const dipStrength = dip >= minDip ? dipWeight * Math.min(1, dip / dipFullScale) : 0;
   if (dip >= SCORE.line.minDip && acrossDifference < SCORE.line.maxAcrossDifference) {
-    return { kind: SAMPLE_KIND_LINE, strength: 0, step, inner, outer };
+    return { kind: SAMPLE_KIND_LINE, strength: 0, dipStrength, step, inner, outer };
   }
   const stepStrength = Math.abs(step) >= SCORE.step.min ? Math.min(1, Math.abs(step) / SCORE.step.fullScale) : 0;
-  const { minDip, minRemainingDrop, dipWeight, dipFullScale } = SCORE.shadowStep;
   // The seam of a sheet on its pad: a dark line, and the far side stays a
   // little darker than the near side once it has recovered.
   const isShadowStep = dip >= minDip && Math.abs(step) >= minRemainingDrop;
-  if (!stepStrength && !isShadowStep) return { kind: SAMPLE_KIND_NONE, strength: 0, step, inner, outer };
-  const dipStrength = dip >= minDip ? dipWeight * Math.min(1, dip / dipFullScale) : 0;
+  if (!stepStrength && !isShadowStep) return { kind: SAMPLE_KIND_NONE, strength: 0, dipStrength, step, inner, outer };
   return {
     kind: isShadowStep && !stepStrength ? SAMPLE_KIND_SHADOW_STEP : SAMPLE_KIND_STEP,
     strength: Math.max(stepStrength, dipStrength),
-    step, inner, outer,
+    dipStrength, step, inner, outer,
   };
+}
+
+/**
+ * A printed rule and a sheet's seam over its pad look alike across the
+ * side — a thin dark line with the same paper on both sides — and at this
+ * scale their depths overlap. Where the print is tells them apart: a rule
+ * sits at the table, a seam sits clear of it. Reclassifies a line as a seam
+ * when it lies outside the print by the margin.
+ */
+function classifyAt(frame, point, normal, depths, type) {
+  const values = profileAcross(frame, point, normal, depths);
+  if (!values) return null;
+  const profile = classifyProfile(values);
+  if (profile.kind === SAMPLE_KIND_LINE && frame.printExtent &&
+      distanceOutsidePrint(point, type, frame.printExtent) >= SCORE.nested.minSeamFromPrint * frame.shortSide) {
+    profile.kind = SAMPLE_KIND_SEAM;
+    profile.strength = profile.dipStrength;
+  }
+  profile.values = values;
+  return profile;
+}
+
+function isBoundaryKind(kind) {
+  return kind === SAMPLE_KIND_STEP || kind === SAMPLE_KIND_SHADOW_STEP || kind === SAMPLE_KIND_SEAM;
 }
 
 // ------------------------------------------------------------------
@@ -212,12 +255,16 @@ function classifyProfile(values) {
 // ------------------------------------------------------------------
 
 /** Everything read at one sample point, before the terms are drawn. */
-function readSample(frame, point, normal, depths, palette, scale) {
-  const values = profileAcross(frame, point, normal, depths);
-  if (!values) return null;
-  const x = Math.round(point.x), y = Math.round(point.y);
-  const { kind, strength } = classifyProfile(values);
-  const edge = strength * gradientAcross(frame, x, y, normal);
+function readSample(frame, centre, normal, depths, palette, scale, type) {
+  let point = centre, profile = null;
+  for (const offset of SCORE.sampleOffsets) {
+    const candidate = { x: centre.x + normal.nx * offset * scale, y: centre.y + normal.ny * offset * scale };
+    const read = classifyAt(frame, candidate, normal, depths, type);
+    if (!read) { if (offset === 0) return null; continue; }
+    if (!profile || read.strength > profile.strength) { profile = read; point = candidate; }
+  }
+  const { kind, strength, values } = profile;
+  const edge = strength * gradientAcrossNear(frame, point, normal, depths[PROBE_INDEX.outNear]);
   const p = PROBE_INDEX;
   const pixelAt = (depth) => ({ x: Math.round(point.x + normal.nx * depth), y: Math.round(point.y + normal.ny * depth) });
   const outBand = pixelAt(depths[p.outBand]);
@@ -231,19 +278,37 @@ function readSample(frame, point, normal, depths, palette, scale) {
   };
 }
 
-/** Print just outside a side: ink between paper-like pixels, marching
- *  outward. Wood grain is dark on wood, not ink on paper, so it fails the
- *  paper test on both sides; a seam's shadow is thinner than the start. */
+/** The strongest across-the-side gradient direction within `reach` px of
+ *  the sample: the step the classifier saw may sit a few px off the side,
+ *  and refinement is what moves the side onto it. */
+function gradientAcrossNear(frame, point, normal, reach) {
+  let best = 0;
+  for (let depth = -reach; depth <= reach; depth++) {
+    const x = Math.round(point.x + normal.nx * depth), y = Math.round(point.y + normal.ny * depth);
+    if (insideFrame(frame, x, y)) best = Math.max(best, gradientAcross(frame, x, y, normal));
+  }
+  return best;
+}
+
+/** Print just outside a side, on paper that runs unbroken from the side to
+ *  it: ink between paper-like pixels, marching outward over paper only. A
+ *  neighbouring sheet's print does not count — the desk or shadow between
+ *  the sheets stops the march — and wood grain is dark on wood, not ink on
+ *  paper. A seam's shadow is thinner than the start. */
 function contentOutside(frame, sample, normal, palette) {
-  const { startDepth, reachInBands, step, paperGap, inkContrast } = SCORE.content;
-  const reach = SCORE.depths.band * sample.scale * reachInBands;
+  const { startDepth, reachOfShortSide, step, paperGap, inkContrast } = SCORE.content;
+  const reach = reachOfShortSide * frame.shortSide;
   const at = (depth) => ({ x: Math.round(sample.point.x + normal.nx * depth), y: Math.round(sample.point.y + normal.ny * depth) });
   for (let depth = startDepth * sample.scale; depth <= reach; depth += step) {
     const pixel = at(depth), before = at(depth - paperGap), after = at(depth + paperGap);
     if (!insideFrame(frame, after.x, after.y) || !insideFrame(frame, before.x, before.y)) return false;
     const neighbours = Math.min(frameGrayAt(frame, before.x, before.y), frameGrayAt(frame, after.x, after.y));
     const isStroke = frameGrayAt(frame, pixel.x, pixel.y) <= neighbours - inkContrast;
-    if (isStroke && palette.isPaper(before.x, before.y) && palette.isPaper(after.x, after.y)) return true;
+    if (isStroke) {
+      if (palette.isPaper(before.x, before.y) && palette.isPaper(after.x, after.y)) return true;
+      return false; // dark, but not print on paper: the paper has ended
+    }
+    if (!palette.isPaper(pixel.x, pixel.y)) return false;
   }
   return false;
 }
@@ -252,24 +317,37 @@ function contentOutside(frame, sample, normal, palette) {
  *  band between: the band is a pad's border or a neighbour, not this sheet.
  *  A printed rule (kind line) never counts, and neither does a band that is
  *  not paper (a banner) or an inner edge whose far side is not paper. */
-function nestedBoundary(frame, sample, normal, depths, palette) {
+/** How far a point lies outside the print on the side's outward axis. */
+function distanceOutsidePrint(point, type, extent) {
+  switch (type) {
+    case SIDE_TOP: return extent.top - point.y;
+    case SIDE_RIGHT: return point.x - extent.right;
+    case SIDE_BOTTOM: return point.y - extent.bottom;
+    default: return extent.left - point.x;
+  }
+}
+
+function nestedBoundary(frame, sample, normal, depths, palette, type) {
   const { from, to, step, blankMagnitudeShare } = SCORE.nested;
   const inward = { nx: -normal.nx, ny: -normal.ny };
   const at = (depth) => ({ x: sample.point.x + inward.nx * depth, y: sample.point.y + inward.ny * depth });
   const start = from * frame.shortSide, end = to * frame.shortSide;
   for (let depth = start; depth <= end; depth += step) {
     const inner = at(depth);
-    const values = profileAcross(frame, inner, normal, depths);
-    if (!values) return false;
-    const { kind, step: innerStep, inner: innerGray } = classifyProfile(values);
-    if (kind !== SAMPLE_KIND_STEP && kind !== SAMPLE_KIND_SHADOW_STEP) continue;
+    const profile = classifyAt(frame, inner, normal, depths, type);
+    if (!profile) return false;
+    const { kind, step: innerStep, inner: innerGray } = profile;
+    if (!isBoundaryKind(kind)) continue;
+    sample.nestedAt = { depth: Math.round(depth), kind, step: innerStep }; // for the overlay page
     const paperMeetsPaper = Math.abs(innerStep) <= SCORE.nested.maxStep &&
       innerGray >= palette.paper.l - SCORE.paper.inkLightnessDrop;
     if (!paperMeetsPaper) return false;
     const beyond = { x: Math.round(inner.x + inward.nx * SCORE.depths.far * sample.scale),
                      y: Math.round(inner.y + inward.ny * SCORE.depths.far * sample.scale) };
     if (!insideFrame(frame, beyond.x, beyond.y) || !palette.isPaper(beyond.x, beyond.y)) return false;
-    return bandIsBlankPaper(frame, sample, inward, SCORE.depths.near * sample.scale, depth - SCORE.depths.near * sample.scale, palette, blankMagnitudeShare);
+    const nested = bandIsBlankPaper(frame, sample, inward, SCORE.depths.near * sample.scale, depth - SCORE.depths.near * sample.scale, palette, blankMagnitudeShare);
+    sample.nestedAt.counted = nested;
+    return nested;
   }
   return false;
 }
@@ -286,6 +364,21 @@ function bandIsBlankPaper(frame, sample, inward, fromDepth, toDepth, palette, bl
   return count > 0 && magnitudeSum / count < blankMagnitudeShare * frame.magnitudeScale;
 }
 
+/** Whether the pixels just inside the side belong to the desk. */
+function insideIsDesk(sample, palette, outside) {
+  const { maxDeltaE, minDeskToPaper } = SCORE.background;
+  const inFar = palette.colourAt(sample.inFar.x, sample.inFar.y);
+  const inBand = palette.colourAt(sample.inBand.x, sample.inBand.y);
+  const desk = palette.desk;
+  if (desk && palette.distance(desk, palette.paper) >= minDeskToPaper) {
+    const nearerDesk = (colour) => palette.distance(colour, desk) <= maxDeltaE &&
+      palette.distance(colour, desk) < palette.distance(colour, palette.paper);
+    return nearerDesk(inFar) && nearerDesk(inBand);
+  }
+  return !palette.isPaper(sample.inFar.x, sample.inFar.y) && !palette.isPaper(sample.inBand.x, sample.inBand.y) &&
+    palette.distance(inBand, outside) <= maxDeltaE;
+}
+
 /**
  * The five terms for one side of `quad`.
  * @returns { edge, background, paperOutside, content, nested, valid, unobserved,
@@ -299,7 +392,7 @@ function scoreSide(frame, quad, type, palette, options) {
   const count = options && options.preview ? SCORE.previewSamplesPerSide : SCORE.samplesPerSide;
   const samples = [];
   for (let i = 0; i < count; i++) {
-    const sample = readSample(frame, pointAlong(side.a, side.b, (i + 0.5) / count), normal, depths, palette, scale);
+    const sample = readSample(frame, pointAlong(side.a, side.b, (i + 0.5) / count), normal, depths, palette, scale, type);
     if (sample) samples.push(sample);
   }
   const result = { edge: SCORE.unobservedEdge, background: 0, paperOutside: 0, content: 0, nested: 0,
@@ -310,14 +403,13 @@ function scoreSide(frame, quad, type, palette, options) {
   const outside = palette.medianColour(samples.map((s) => s.outsideColour));
   let background = 0, paperOutside = 0, content = 0, nested = 0;
   for (const sample of samples) {
-    const noBoundary = sample.kind === SAMPLE_KIND_NONE || sample.kind === SAMPLE_KIND_LINE;
-    const insideIsDesk = !palette.isPaper(sample.inFar.x, sample.inFar.y) && !palette.isPaper(sample.inBand.x, sample.inBand.y) &&
-      palette.distance(palette.colourAt(sample.inBand.x, sample.inBand.y), outside) <= SCORE.background.maxDeltaE;
-    if (insideIsDesk) background++;
+    const noBoundary = !isBoundaryKind(sample.kind);
+    if (insideIsDesk(sample, palette, outside)) { background++; sample.desk = true; }
+    sample.inside = palette.colourAt(sample.inBand.x, sample.inBand.y); // for the overlay page
     if (noBoundary && palette.isPaper(sample.outFar.x, sample.outFar.y) && palette.isPaper(sample.outBand.x, sample.outBand.y) &&
         sample.acrossBands < SCORE.paperOutside.maxAcrossDifference) paperOutside++;
     if (contentOutside(frame, sample, normal, palette)) content++;
-    if (nestedBoundary(frame, sample, normal, depths, palette)) nested++;
+    if (!(options && options.withoutNested) && nestedBoundary(frame, sample, normal, depths, palette, type)) nested++;
   }
   const edges = samples.map((s) => s.edge).sort((a, b) => b - a);
   const kept = edges.slice(0, Math.max(1, Math.round(edges.length * SCORE.edge.trimmedShare)));
@@ -381,15 +473,23 @@ function geometryPenalty(quad) {
 
 /**
  * The score of one quad, with its breakdown.
- * @param options { preview, keepSamples }
+ * @param options { preview, keepSamples, withoutNested, palette, reuseSides }
+ *                — withoutNested skips the inward march, the costliest term,
+ *                for a search's trial moves; the verdict on a quad always
+ *                includes it. `palette` and `reuseSides` (side scores by
+ *                type, null to re-score) let a search that moved one side
+ *                re-read that side alone.
  * @returns { total, rejected, geometry, area, sides: [4 × side terms] }
  */
 function scoreQuad(frame, quad, options) {
   const rejected = geometryRejection(quad, frame);
   if (rejected) return { total: -Infinity, rejected, geometry: 0, area: 0, sides: [] };
-  const palette = paletteFor(frame, quad);
+  const palette = (options && options.palette) || paletteFor(frame, quad);
+  const reuse = options && options.reuseSides;
   const sides = [];
-  for (let type = 0; type < SIDE_COUNT; type++) sides.push(scoreSide(frame, quad, type, palette, options));
+  for (let type = 0; type < SIDE_COUNT; type++) {
+    sides.push(reuse && reuse[type] ? reuse[type] : scoreSide(frame, quad, type, palette, options));
+  }
   const geometry = geometryPenalty(quad);
   const area = shoelaceArea(quad) / (frame.width * frame.height);
   return { total: totalOf(sides, geometry, area), rejected: null, geometry, area, sides, paper: palette.paper };

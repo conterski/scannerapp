@@ -244,7 +244,7 @@
    * @returns corners {tl,tr,br,bl} in the frame's own pixels, or null when
    *          nothing plausible is in view
    */
-  async function previewCorners(frameSource) {
+  async function previewCorners(frameSource, options) {
     const bounds = ImageUtils.sourceDimensions(frameSource);
     if (!bounds.width || !bounds.height) return null;
     await detector.ensureReady();
@@ -253,11 +253,18 @@
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
+      engine: engineFor(options),
     }, [imageData.data.buffer]);
     if (!response.corners) return null;
     const corners = toFullResolutionCorners(response.corners, scale, bounds);
     return isPlausibleDocumentQuad(corners, bounds) ? corners : null;
   }
+
+  // Which detector answers, while the generate-and-score engine is compared
+  // against the legacy pipeline: the page may ask for either; the app gets
+  // the default.
+  const DEFAULT_ENGINE = "legacy";
+  function engineFor(options) { return (options && options.engine) || DEFAULT_ENGINE; }
 
   async function runDetection(sourceCanvas, wantsDebug, options) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
@@ -269,6 +276,7 @@
       buffer: imageData.data.buffer,
       debug: wantsDebug,
       withoutGrid: !!(options && options.withoutGrid),
+      engine: engineFor(options),
     }, [imageData.data.buffer]);
     return { response, scale };
   }

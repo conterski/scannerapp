@@ -31,6 +31,10 @@ importScripts(...[
   "worker/grid-evidence.js",
   "worker/frame.js",
   "worker/quad-score.js",
+  "worker/line-candidates.js",
+  "worker/mask-candidates.js",
+  "worker/quad-search.js",
+  "worker/detector.js",
   "worker/guided-filter.js",
   "worker/enhance.js",
 ].map((path) => path + ASSET_VERSION));
@@ -679,7 +683,24 @@ function releasePipeline(pipeline) {
     pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges, pipeline.sheetMask);
 }
 
-function detect({ width, height, buffer, debug, withoutGrid }) {
+/** The generate-and-score engine, behind the same message as the legacy
+ *  pipeline while the two are compared; `engine: "score"` selects it. */
+function detectByScore({ width, height, buffer, debug, preview }) {
+  let img = null;
+  try {
+    img = cv.matFromImageData(toImageData(width, height, buffer));
+    return detectDocument(img, { debug, preview });
+  } finally {
+    releaseMats(img);
+  }
+}
+
+function detect(payload) {
+  if (payload.engine === "score") return detectByScore(payload);
+  return detectByLegacy(payload);
+}
+
+function detectByLegacy({ width, height, buffer, debug, withoutGrid }) {
   const pipeline = createPipeline(width, height, debug);
   pipeline.withoutGrid = !!withoutGrid;
   try {
@@ -734,7 +755,12 @@ function detect({ width, height, buffer, debug, withoutGrid }) {
  * is that it misses scenes the full detector catches. It only ever draws an
  * outline. The crop still comes from `detect` on the captured photo.
  */
-function previewQuad({ width, height, buffer }) {
+function previewQuad(payload) {
+  if (payload.engine === "score") return detectByScore({ ...payload, preview: true });
+  return previewByLegacy(payload);
+}
+
+function previewByLegacy({ width, height, buffer }) {
   const pipeline = createPipeline(width, height, false);
   try {
     allocatePipelineMats(pipeline, buffer, PREVIEW_KERNELS);

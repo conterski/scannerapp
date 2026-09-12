@@ -5,8 +5,9 @@
  * Every pixel the scorer reads goes through these arrays and never through a
  * Mat: `ucharPtr` builds a typed-array view per call, and the scorer reads
  * hundreds of thousands of pixels per photo. The Mats are released before
- * the frame is returned; only the Canny edge map, which Hough needs as a Mat,
- * stays alive until `release()`.
+ * the frame is returned, except the two the candidate generators need as
+ * Mats — the blurred gray for thresholding and the Canny map for Hough —
+ * which live until `release()`.
  *
  * Worker-global, like every worker module.
  */
@@ -35,7 +36,7 @@ const FRAME = Object.freeze({
  *                 milliseconds the preview cannot spare
  * @returns frame { width, height, shortSide, gray, dx, dy, mag,
  *                  magnitudeScale, lab|null, backgroundLab|null,
- *                  canny|null, release() }
+ *                  grayMat, canny|null, release() }
  */
 function buildFrame(img, options) {
   const wantLab = !options || options.lab !== false;
@@ -72,10 +73,16 @@ function buildFrame(img, options) {
       gray: new Uint8Array(gray.data), dx, dy, mag,
       magnitudeScale: magnitudeScaleOf(mag),
       lab, backgroundLab: null,
-      canny,
-      release() { if (frame.canny) { frame.canny.delete(); frame.canny = null; } },
+      printExtent: null, // set by the detector once the lines are known
+      img, grayMat: gray, canny, // img is the caller's: read here, released there
+      release() {
+        releaseMats(frame.grayMat, frame.canny);
+        frame.grayMat = null;
+        frame.canny = null;
+      },
     };
     frame.backgroundLab = lab ? backgroundColourOf(frame) : null;
+    gray = null; // now the frame's to release
     return frame;
   } catch (error) {
     if (canny) canny.delete();
@@ -89,15 +96,29 @@ function buildFrame(img, options) {
  *  copy, and the orientation test needs the components, not an angle. */
 function magnitudeOf(dx, dy) {
   const mag = new Float32Array(dx.length);
-  for (let i = 0; i < dx.length; i++) mag[i] = Math.hypot(dx[i], dy[i]) / FRAME.scharrStepUnits;
+  const units = FRAME.scharrStepUnits;
+  for (let i = 0; i < dx.length; i++) {
+    const gx = dx[i], gy = dy[i];
+    mag[i] = Math.sqrt(gx * gx + gy * gy) / units;
+  }
   return mag;
 }
 
+/** The percentile from a histogram in whole gray-step units — no sort of a
+ *  hundred thousand values. */
 function magnitudeScaleOf(mag) {
-  const values = [];
-  for (let i = 0; i < mag.length; i += FRAME.magnitudeStride) values.push(mag[i]);
-  values.sort(ascending);
-  const percentile = values[Math.min(values.length - 1, Math.floor(values.length * FRAME.magnitudePercentile))];
+  const bins = new Uint32Array(256);
+  let count = 0;
+  for (let i = 0; i < mag.length; i += FRAME.magnitudeStride) {
+    bins[Math.min(255, Math.round(mag[i]))]++;
+    count++;
+  }
+  const target = count * FRAME.magnitudePercentile;
+  let seen = 0, percentile = 255;
+  for (let bin = 0; bin < 256; bin++) {
+    seen += bins[bin];
+    if (seen >= target) { percentile = bin; break; }
+  }
   return Math.min(FRAME.magnitudeScaleMax, Math.max(FRAME.magnitudeScaleMin, percentile));
 }
 
