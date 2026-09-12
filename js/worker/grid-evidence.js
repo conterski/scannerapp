@@ -47,8 +47,10 @@ const GRID = Object.freeze({
   referenceOutset: 4,          // px past the border: blank margin, never print
   rulingClearance: 6,          // px: the border's own ink, never a shadow candidate
   plateauSteps: 5,             // steps of clean paper that must precede a shadow dip
-  plateauAfterSteps: 3,        // and of pad paper that must follow its recovery
-  plateauTolerance: 14,        // gray levels those steps may sit below the reference
+  plateauTolerance: 14,        // gray levels the sheet's own margin may sit below the reference
+  plateauAfterSteps: 3,        // steps of pad paper that must follow the shadow's recovery
+  padTolerance: 24,            // the pad lies beneath the sheet and reads darker — the
+                               // "small, consistently signed step" — so its plateau is looser
   minUsableDepth: 0.03,        // a march cut short before this by a hand has no say
   shadowMinDip: 9,             // gray levels below paper that read as a cast shadow
   shadowMaxWidth: 7,           // px — a shadow line is thin; wider is a real step
@@ -74,6 +76,7 @@ const GRID = Object.freeze({
   uniformitySamples: 24,
   uniformityMinUsable: 12,
   uniformityWindow: 6,         // px either side of the line that is read
+  shadowRunMinDip: 15,         // a shadow pixel is well below paper; a darker pad is not
   maxShadowRunWidth: 4,        // px of dark across the line that still reads as shadow
   minShadowUniformity: 0.8,    // share of the length that reads as a thin shadow
 
@@ -348,11 +351,11 @@ function shadowScore(values, index, reference) {
   }
   if (recoveredAt < 0) return 0;
   // Pad paper beyond the shadow: a dip inside text recovers into more text,
-  // not into a clean plateau.
+  // not into a clean plateau. The pad may read darker than the sheet.
   for (let after = 0; after < GRID.plateauAfterSteps; after++) {
     const at = recoveredAt + after;
     if (at >= values.length) break;
-    if (reference - values[at] > GRID.plateauTolerance) return 0;
+    if (reference - values[at] > GRID.padTolerance) return 0;
   }
   return Math.min(1, dip / (2 * GRID.shadowMinDip));
 }
@@ -509,7 +512,7 @@ function darkRunAcross(image, point, normal, reference) {
   for (let offset = -GRID.uniformityWindow; offset <= GRID.uniformityWindow; offset += GRID.marchStep) {
     const x = Math.round(point.x + normal.nx * offset), y = Math.round(point.y + normal.ny * offset);
     if (!isInsideImage(image, x, y)) continue;
-    if (reference - grayAt(image, x, y) >= GRID.shadowMinDip) run += GRID.marchStep;
+    if (reference - grayAt(image, x, y) >= GRID.shadowRunMinDip) run += GRID.marchStep;
   }
   return run;
 }
