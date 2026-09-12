@@ -1,6 +1,7 @@
 /* photo-store.js — storage for one capture session: the shots in capture
- * order plus the object URLs used to preview them. This module is the only
- * place those URLs are created or revoked.
+ * order, each with the viewfinder outline it was taken under, plus the
+ * object URLs used to preview them. This module is the only place those URLs
+ * are created or revoked.
  *
  * Exposes window.PhotoStore. `create()` is a factory — a store belongs to the
  * session that created it and is passed explicitly to whoever needs it.
@@ -22,11 +23,14 @@
   }
 
   function create() {
-    const shots = []; // { id, blob, url } in capture order
+    const shots = []; // { id, blob, url, viewfinderCorners } in capture order
     let nextId = 1;
 
-    function add(blob) {
-      const shot = { id: nextId++, blob, url: URL.createObjectURL(blob) };
+    /** @param viewfinderCorners the outline shown at the tap, as fractions of
+     *                           the frame, or null when none was showing */
+    function add(blob, viewfinderCorners) {
+      const shot = { id: nextId++, blob, url: URL.createObjectURL(blob),
+                     viewfinderCorners: viewfinderCorners || null };
       shots.push(shot);
       return shot;
     }
@@ -42,10 +46,15 @@
     function list() { return shots.slice(); }
     function count() { return shots.length; }
 
-    /** Hands the session's photos to the app as named files. The files own
-     *  their bytes, so the store may be disposed straight afterwards. */
-    function toFiles() {
-      return shots.map((s, i) => toFile(s.blob, `${FILE_PREFIX}${i + 1}.jpg`));
+    /** Hands the session's photos to the app as named files, each paired
+     *  with its viewfinder outline. The files own their bytes, so the store
+     *  may be disposed straight afterwards.
+     *  @returns [{ file, viewfinderCorners }] */
+    function toShots() {
+      return shots.map((s, i) => ({
+        file: toFile(s.blob, `${FILE_PREFIX}${i + 1}.jpg`),
+        viewfinderCorners: s.viewfinderCorners,
+      }));
     }
 
     /** Revokes every preview URL and empties the store. */
@@ -54,7 +63,7 @@
       shots.length = 0;
     }
 
-    return { add, remove, list, count, toFiles, dispose };
+    return { add, remove, list, count, toShots, dispose };
   }
 
   window.PhotoStore = { create };

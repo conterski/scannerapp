@@ -3,9 +3,10 @@
  * device is driven through CameraStream and the photos live in the
  * PhotoStore it is handed. Exposes window.CaptureUI.
  *
- * CaptureUI.open(store, {onFallback}) resolves with the captured files when
- * the user taps Done (or leaves via the fallback), after releasing the
- * camera, every listener and every object URL.
+ * CaptureUI.open(store, {onFallback}) resolves with the captured shots —
+ * [{ file, viewfinderCorners }], see PhotoStore.toShots — when the user taps
+ * Done (or leaves via the fallback), after releasing the camera, every
+ * listener and every object URL.
  */
 (function () {
   "use strict";
@@ -116,6 +117,10 @@
        *  process it off the critical path, and stay on the live preview. No
        *  confirmation, no interstitial.
        *
+       *  The outline is read on the tap itself, before focus and the frame
+       *  burst: that is the quad the user judged when pressing, and it goes
+       *  with the shot as its crop.
+       *
        *  The frames are taken as soon as the tap lands, ahead of the encode
        *  chain, so a burst of taps captures a burst of moments rather than one
        *  moment per finished encode. The frame is this chain's to own, so it
@@ -125,6 +130,7 @@
         if (!accepting) return;
         flash();
         const region = outline.region();
+        const viewfinderCorners = outline.corners();
         const frame = camera.focusOnce()
           .then(() => CameraStream.grabSharpest(els.captureVideo, region));
         encodeChain = encodeChain
@@ -133,7 +139,7 @@
             if (!canvas) return; // the stream had no frame yet
             return CameraStream.captureJpeg(canvas)
               .then((blob) => {
-                store.add(blob);
+                store.add(blob, viewfinderCorners);
                 renderCount();
                 renderStrip();
               })
@@ -172,9 +178,9 @@
         els.shutterBtn.disabled = true;
         els.captureDoneBtn.disabled = true;
         encodeChain.then(() => {
-          const files = store.toFiles(); // files own their bytes…
+          const shots = store.toShots(); // the files own their bytes…
           teardown();                    // …so the store can be released now
-          resolve(files);
+          resolve(shots);
         });
       }
 

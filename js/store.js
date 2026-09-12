@@ -4,8 +4,8 @@
  * Layout (three stores, keyed by page id):
  *   blobs {id, blob}                              — the original photo, written
  *                                                   once and never rewritten
- *   pages {id, corners, quarter, outputBlob}      — lightweight edit state plus
- *                                                   the rendered scan
+ *   pages {id, corners, viewfinderCorners,        — lightweight edit state plus
+ *          quarter, outputBlob}                     the rendered scan
  *   meta  {key:"order", ids:[...]}                — page order
  *
  * Every method returns a promise; callers fire-and-forget and swallow failures
@@ -71,7 +71,7 @@
    * Loads the saved session in page order. A record is skipped unless BOTH its
    * blob and its metadata are present, which makes partial or racing writes
    * self-healing rather than corrupting.
-   * @returns Promise<Array<{id, blob, corners, quarter, outputBlob}>>
+   * @returns Promise<Array<{id, blob, corners, viewfinderCorners, quarter, outputBlob}>>
    */
   function loadAll() {
     return runTransaction(ALL_STORES, "readonly", async (transaction) => {
@@ -96,7 +96,7 @@
       const blob = blobById.get(id);
       if (page && blob) {
         restored.push({
-          id, blob, corners: page.corners,
+          id, blob, corners: page.corners, viewfinderCorners: page.viewfinderCorners || null,
           quarter: page.quarter, outputBlob: page.outputBlob,
         });
       }
@@ -110,6 +110,7 @@
     return {
       id: page.id,
       corners: page.corners,
+      viewfinderCorners: page.viewfinderCorners || null, // absent in sessions saved before it existed
       quarter: page.quarterTurns,
       outputBlob: page.outputBlob,
     };

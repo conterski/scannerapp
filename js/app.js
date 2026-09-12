@@ -171,49 +171,61 @@
     return IMAGE_FILE_EXTENSIONS.test(file.name || "");
   }
 
-  /** Entry points that run inside a DOM event can't await addFiles, so a
+  /** Entry points that run inside a DOM event can't await the add, so a
    *  failure outside its own try would be an unhandled rejection with the busy
    *  overlay left up and nothing on screen to explain it. */
-  function addFilesReportingFailure(fileList, insertAt) {
-    addFiles(fileList, insertAt).catch((error) => {
+  function reportingFailure(adding) {
+    adding.catch((error) => {
       console.error("Adding photos failed:", error);
       AppChrome.showTemporaryStatus("Couldn't add those photos.");
     });
   }
 
+  function addFilesReportingFailure(fileList, insertAt) {
+    reportingFailure(addFiles(fileList, insertAt));
+  }
+
+  /** Photos from the picker or the single-shot fallback: files alone, so the
+   *  crop of each is the detector's to find. */
+  function addFiles(fileList, insertAt) {
+    return addPhotos(Array.from(fileList).map((file) => ({ file, viewfinderCorners: null })), insertAt);
+  }
+
   /**
+   * @param items    [{ file, viewfinderCorners }] — the outline shown when a
+   *                 camera shot was taken, as fractions of the frame, becomes
+   *                 that page's crop; null leaves the crop to the detector.
    * @param insertAt where the new pages go, as an index into `pages`. Omit it
    *                 to ask the user — the picker, rapid capture and the
    *                 single-shot fallback all come through here, so asking once
    *                 here covers all three. Passing it explicitly skips the
    *                 dialog, which is what the console and tests use.
    */
-  async function addFiles(fileList, insertAt) {
-    const selected = Array.from(fileList);
-    const files = selected.filter(isImageFile);
-    if (!files.length) {
-      if (selected.length) {
-        AppChrome.showTemporaryStatus(selected.length === 1
+  async function addPhotos(items, insertAt) {
+    const photos = items.filter((item) => isImageFile(item.file));
+    if (!photos.length) {
+      if (items.length) {
+        AppChrome.showTemporaryStatus(items.length === 1
           ? "That file isn't an image — nothing was added."
           : "Those files aren't images — nothing was added.");
       }
       return;
     }
     const position = insertAt === undefined
-      ? await chooseInsertPosition(files.length)
+      ? await chooseInsertPosition(photos.length)
       : insertAt;
     if (position === null) return; // cancelled — the photos are discarded
     // Only the processing queues: asking where the photos go has already
     // happened, so the dialog never waits behind another job.
-    return libraryJobs.run(() => processChosenFiles(files, position));
+    return libraryJobs.run(() => processChosenPhotos(photos, position));
   }
 
-  async function processChosenFiles(files, position) {
-    const busy = AppChrome.beginBusy(`Processing 1 / ${files.length}…`);
+  async function processChosenPhotos(items, position) {
+    const busy = AppChrome.beginBusy(`Processing 1 / ${items.length}…`);
     try {
       if (!(await loadScannerEngine())) return;
       const wasAppended = position === pages.length;
-      const tally = await addPhotoBatch(files, position, busy);
+      const tally = await addPhotoBatch(items, position, busy);
       persistPageOrder();
       if (!wasAppended) reportInsertPosition(position);
       // Last, so it replaces the placement note: an uncropped page is the more
@@ -285,7 +297,7 @@
   /** Pipelined: detection in the worker is the long pole, so the next photo's
    *  decode and the previous page's warp+encode run on the main thread while
    *  the worker detects — their cost hides almost entirely. */
-  async function addPhotoBatch(files, insertAt, busy) {
+  async function addPhotoBatch(items, insertAt, busy) {
     const renders = [];
     // Counted rather than reported per photo: a dead worker fails every
     // remaining photo, and one message is enough to explain the whole run.
@@ -293,15 +305,15 @@
     // Advances only when a page is actually registered, so a photo that fails
     // to process leaves no gap in the run.
     let cursor = insertAt;
-    let nextDecode = decodeOrCaptureError(files[0]);
-    for (let index = 0; index < files.length; index++) {
-      busy.update(`Processing ${index + 1} / ${files.length}…`);
+    let nextDecode = decodeOrCaptureError(items[0].file);
+    for (let index = 0; index < items.length; index++) {
+      busy.update(`Processing ${index + 1} / ${items.length}…`);
       const decoded = await nextDecode;
-      if (index + 1 < files.length) nextDecode = decodeOrCaptureError(files[index + 1]);
-      const page = await detectAndRegisterPage(files[index], decoded, cursor, tally);
+      if (index + 1 < items.length) nextDecode = decodeOrCaptureError(items[index + 1].file);
+      const page = await registerPage(items[index], decoded, cursor, tally);
       if (!page) continue;
       cursor++;
-      renders.push(renderAndPersistNewPage(page, decoded, files[index]));
+      renders.push(renderAndPersistNewPage(page, decoded, items[index].file));
     }
     await Promise.all(renders);
     return tally;
@@ -313,12 +325,15 @@
     return ImageUtils.decodeImageToCanvas(file, DECODE_MAX_EDGE).catch((error) => error);
   }
 
-  async function detectAndRegisterPage(file, decoded, index, tally) {
+  /** The outline the user framed against is the crop they expect of a camera
+   *  shot; the detector, run on the saved photo, is what a shot taken with no
+   *  outline showing and every library photo get. */
+  async function registerPage({ file, viewfinderCorners }, decoded, index, tally) {
     try {
       if (decoded instanceof Error) throw decoded;
-      const { corners, failed } = await Detect.detectCorners(decoded);
-      if (failed) tally.detectionFailures++;
-      const page = createPage(await blobToStore(file, decoded), corners);
+      const outline = viewfinderCorners && cornersAtSize(viewfinderCorners, decoded);
+      const corners = outline || await detectCornersTallying(decoded, tally);
+      const page = createPage(await blobToStore(file, decoded), corners, outline);
       // splice at pages.length is a push, so appending needs no special case.
       pages.splice(index, 0, page);
       return page;
@@ -326,6 +341,22 @@
       reportPhotoFailure(file, error);
       return null;
     }
+  }
+
+  async function detectCornersTallying(decoded, tally) {
+    const { corners, failed } = await Detect.detectCorners(decoded);
+    if (failed) tally.detectionFailures++;
+    return corners;
+  }
+
+  /** Corners given as fractions of the frame, in the pixels of `size`. The
+   *  saved photo is the frame scaled uniformly, so the fractions carry over. */
+  function cornersAtSize(fractions, { width, height }) {
+    const corners = {};
+    for (const key of Object.keys(fractions)) {
+      corners[key] = { x: fractions[key].x * width, y: fractions[key].y * height };
+    }
+    return corners;
   }
 
   /** Deliberately not awaited by the batch loop: the render overlaps the next
@@ -355,11 +386,16 @@
    *  after an await checks this first. */
   function isPagePresent(page) { return pages.indexOf(page) >= 0; }
 
-  function createPage(blob, corners) {
+  /** @param viewfinderCorners the crop the viewfinder proposed, kept apart
+   *                           from `corners` so the editor's Auto can return
+   *                           to it after the user has dragged; null for a
+   *                           photo that had no viewfinder */
+  function createPage(blob, corners, viewfinderCorners) {
     return {
       id: nextPageId++,
       blob,
       corners,
+      viewfinderCorners: viewfinderCorners || null,
       quarterTurns: 0,
       outputBlob: null,
       outputURL: null,
@@ -400,7 +436,7 @@
     // that started it, so the destination is read now rather than at Done.
     const insertAt = pendingInsertAt;
     CaptureUI.open(PhotoStore.create(), { onFallback: () => cameraInput.click() })
-      .then((files) => { if (files.length) addFilesReportingFailure(files, insertAt); });
+      .then((shots) => { if (shots.length) reportingFailure(addPhotos(shots, insertAt)); });
   }
 
   // ---------------------------------------------------------------
@@ -751,6 +787,7 @@
       id: record.id,
       blob: record.blob,
       corners: record.corners,
+      viewfinderCorners: record.viewfinderCorners || null,
       quarterTurns: record.quarter || 0,
       outputBlob: record.outputBlob || null,
       outputURL: record.outputBlob ? URL.createObjectURL(record.outputBlob) : null,
@@ -799,7 +836,7 @@
 
   // Exposed for debugging/testing.
   window.Scanner = {
-    pages, addFiles, startCapture, movePage,
+    pages, addFiles, addPhotos, startCapture, movePage,
     renderList: renderPageList, clearAll: clearAllPages,
   };
 })();

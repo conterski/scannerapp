@@ -64,7 +64,9 @@
   /**
    * Opens the editor on one page.
    * @param source        full-res normalized canvas of the original photo
-   * @param settings      { corners, quarterTurns }
+   * @param settings      { corners, viewfinderCorners, quarterTurns } — the
+   *                      viewfinder's crop, when the page has one, is what
+   *                      Auto returns to
    * @param navigation    { hasPrev, hasNext } — enables the ◀/▶ page buttons
    * @returns Promise<null | {corners, quarterTurns, nav}> — null on cancel;
    *          nav is -1/+1 when a page arrow closed the editor, else 0
@@ -75,6 +77,7 @@
       session = {
         source,
         corners: cloneCorners(settings.corners),
+        viewfinderCorners: settings.viewfinderCorners ? cloneCorners(settings.viewfinderCorners) : null,
         quarterTurns: settings.quarterTurns || 0,
         scale: 1,
         resolve,
@@ -171,7 +174,16 @@
   /** Detection is slow enough that the editor can be closed or moved to
    *  another page before it lands, so the result is applied only to the
    *  session that asked for it — the same guard renderPreview uses. */
+  /** Auto: the automatic crop. For a camera shot that is the crop the
+   *  viewfinder proposed, which the user has already judged against the
+   *  detector's; for anything else, the detector on the stored photo. */
   async function redetectCorners() {
+    if (session.viewfinderCorners) {
+      session.corners = cloneCorners(session.viewfinderCorners); // the handles move these; the original stays
+      positionHandles();
+      schedulePreview();
+      return;
+    }
     const openId = session.openId;
     try {
       const { corners } = await Detect.detectCorners(session.source);

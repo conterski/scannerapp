@@ -2,17 +2,18 @@
  *
  * While the camera is open, this asks the detector where the page seems to be
  * and draws that quad over the video, so the user can frame the shot before
- * taking it. It is feedback only: the crop still comes from the full detector
- * running on the captured photo after Done, and nothing here can change a
- * saved page.
+ * taking it. Nothing here changes a saved page; but the quad on screen at
+ * the moment of the tap is what the shot keeps as its crop — it is the one
+ * the user judged when pressing.
  *
  * The loop never queues. A tick that finds a request still in flight skips,
  * so a phone that takes longer per frame simply shows fewer frames — there is
  * no backlog to catch up on and no growing pile of frames in memory.
  *
- * The one thing a shot reads back from it is `region()`, the box the outline
- * occupies: the frames a tap compares are judged for sharpness there, on the
- * document rather than on the desk around it.
+ * A shot reads two things back from it at the tap: `corners()`, the quad
+ * itself, which becomes the page's crop, and `region()`, the box it occupies,
+ * where the frames a tap compares are judged for sharpness — on the document
+ * rather than on the desk around it.
  *
  * Exposes window.CaptureOutline. `create()` is a factory: one instance per
  * capture session, owning its loop and its polygon.
@@ -176,7 +177,20 @@
       return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
     }
 
-    return { start, stop, region, isRunning: () => isRunning };
+    /** The outline as drawn, as fractions of the frame ({tl,tr,br,bl} in
+     *  0..1), or null while none is shown. Fractions rather than video
+     *  pixels: the shot is scaled at grab, capped at encode and decoded again
+     *  before these are used, and only a size-free form survives that
+     *  unchanged. A fresh object, since `shown` moves every tick. */
+    function corners() {
+      const { width, height } = ImageUtils.sourceDimensions(video);
+      if (!shown || !width || !height) return null;
+      const fractions = {};
+      for (const key of CORNER_KEYS) fractions[key] = { x: shown[key].x / width, y: shown[key].y / height };
+      return fractions;
+    }
+
+    return { start, stop, region, corners, isRunning: () => isRunning };
   }
 
   window.CaptureOutline = { create, coverTransform };
