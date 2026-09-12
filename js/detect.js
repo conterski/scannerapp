@@ -179,6 +179,22 @@
     }
   }
 
+  /** The new engine's score breakdown for `corners` (full-res), for the
+   *  overlay page: how the cost function reads a quad before any search
+   *  exists to find one. */
+  async function scoreQuad(sourceCanvas, corners) {
+    await detector.ensureReady();
+    const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
+    const imageData = imageDataOf(canvas);
+    ImageUtils.releaseCanvas(canvas);
+    const scaled = {};
+    for (const key of Object.keys(corners)) scaled[key] = { x: corners[key].x * scale, y: corners[key].y * scale };
+    const response = await callDetector("scoreQuad", {
+      width: imageData.width, height: imageData.height, buffer: imageData.data.buffer, corners: scaled,
+    }, [imageData.data.buffer]);
+    return { score: response.score, frame: response.frame, scale };
+  }
+
   /** Debug variant: returns the per-candidate scoring info at detection scale.
    *  @param options { withoutGrid } — the overlay page's before/after switch */
   async function detectDebug(sourceCanvas, options) {
@@ -390,7 +406,7 @@
   }
 
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, previewCorners, warpPerspective,
+    ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewCorners, warpPerspective,
     denoiseCanvas, fullImageCorners,
   };
 })();

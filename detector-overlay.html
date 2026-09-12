@@ -289,6 +289,102 @@
     return names;
   };
 
+  // ---------------------------------------------------------------
+  // The new engine's cost function, before it has a search: score any quad
+  // and check that the right quad outscores its own perturbations.
+  // ---------------------------------------------------------------
+
+  /** Each side moved along its outward normal by `offsets[type]` px
+   *  (top, right, bottom, left), positive outward. */
+  function offsetQuad(quad, offsets) {
+    const sides = [["tl", "tr"], ["tr", "br"], ["br", "bl"], ["bl", "tl"]];
+    const cx = KEYS.reduce((sum, k) => sum + quad[k].x, 0) / 4, cy = KEYS.reduce((sum, k) => sum + quad[k].y, 0) / 4;
+    const lines = sides.map(([a, b], type) => {
+      const A = quad[a], B = quad[b];
+      const length = Math.hypot(B.x - A.x, B.y - A.y) || 1;
+      let nx = -(B.y - A.y) / length, ny = (B.x - A.x) / length;
+      if (nx * (cx - (A.x + B.x) / 2) + ny * (cy - (A.y + B.y) / 2) > 0) { nx = -nx; ny = -ny; }
+      return { px: A.x + nx * offsets[type], py: A.y + ny * offsets[type], dx: (B.x - A.x) / length, dy: (B.y - A.y) / length };
+    });
+    const meet = (first, second) => {
+      const d = first.dx * second.dy - first.dy * second.dx;
+      const t = ((second.px - first.px) * second.dy - (second.py - first.py) * second.dx) / d;
+      return { x: first.px + t * first.dx, y: first.py + t * first.dy };
+    };
+    return { tl: meet(lines[3], lines[0]), tr: meet(lines[0], lines[1]), br: meet(lines[1], lines[2]), bl: meet(lines[2], lines[3]) };
+  }
+
+  function groundTruthQuad(truth, name, canvas) {
+    const marks = name.startsWith("receipt") && truth.receipts[name.replace(/\D/g, "")];
+    if (!marks) return null;
+    const quad = {};
+    for (const k of KEYS) quad[k] = { x: marks[k][0] / 100 * canvas.width, y: marks[k][1] / 100 * canvas.height };
+    return quad;
+  }
+
+  /** The legacy engine's crop for a scene, in the decoded canvas's pixels. */
+  function legacyQuad(name) {
+    const base = JSON.parse(localStorage.getItem("legacyBaseline") || "{}")[name];
+    if (!base) return null;
+    const quad = {};
+    for (const k of KEYS) quad[k] = { x: base.corners[k].x / base.scale, y: base.corners[k].y / base.scale };
+    return quad;
+  }
+
+  const round = (value) => Math.round(value * 1000) / 1000;
+  function summariseScore(score) {
+    return { total: round(score.total), rejected: score.rejected, geometry: round(score.geometry), area: round(score.area),
+      sides: score.sides.map((s) => `E${round(s.edge)} B${round(s.background)} P${round(s.paperOutside)} C${round(s.content)} N${round(s.nested)}${s.unobserved ? " ?" : ""}`) };
+  }
+
+  /** Score any quad (default: the legacy crop) on a scene. */
+  window.scoreScene = async function (name, quad) {
+    await Detect.ensureOpenCV();
+    const canvas = await canvasFor(name);
+    const target = quad || legacyQuad(name);
+    const { score, frame } = await Detect.scoreQuad(canvas, target);
+    return { ...summariseScore(score), paper: score.paper, frame };
+  };
+
+  /**
+   * Stage-1 gate: the right quad must outscore its perturbations. Receipts
+   * use their ground truth; every scene uses the legacy crop against the
+   * same crop loosened by 3% of the short side.
+   */
+  window.gate1 = async function (percent = 3) {
+    await Detect.ensureOpenCV();
+    const truth = await fetch("testdata/ground-truth.json").then((r) => r.json());
+    const rows = [];
+    for (const name of SCENES) {
+      const canvas = await canvasFor(name);
+      const d = percent / 100 * Math.min(canvas.width, canvas.height);
+      const scoreOf = async (quad) => (await Detect.scoreQuad(canvas, quad)).score.total;
+      const checks = [];
+      const reference = groundTruthQuad(truth, name, canvas);
+      if (reference) {
+        const own = await scoreOf(reference);
+        const variants = { out: [d, d, d, d], in: [-d, -d, -d, -d] };
+        SIDE_NAMES.forEach((side, type) => {
+          const out = [0, 0, 0, 0], inward = [0, 0, 0, 0];
+          out[type] = d; inward[type] = -d;
+          variants[side + "+"] = out; variants[side + "-"] = inward;
+        });
+        for (const [label, offsets] of Object.entries(variants)) {
+          const other = await scoreOf(offsetQuad(reference, offsets));
+          checks.push(`${label}${other < own ? "✓" : "✗"}${round(own - other)}`);
+        }
+      }
+      const legacy = legacyQuad(name);
+      if (legacy) {
+        const own = await scoreOf(legacy);
+        const loose = await scoreOf(offsetQuad(legacy, [d, d, d, d]));
+        checks.push(`legacy-vs-loose${loose < own ? "✓" : "✗"}${round(own - loose)} (${round(own)})`);
+      }
+      rows.push(`${name.padEnd(13)} ${checks.join("  ")}`);
+    }
+    return rows;
+  };
+
   show(SCENES[0]);
 })();
 </script>

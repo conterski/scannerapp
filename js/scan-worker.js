@@ -29,6 +29,8 @@ importScripts(...[
   "worker/edge-fusion.js",
   "worker/quad-refine.js",
   "worker/grid-evidence.js",
+  "worker/frame.js",
+  "worker/quad-score.js",
   "worker/guided-filter.js",
   "worker/enhance.js",
 ].map((path) => path + ASSET_VERSION));
@@ -829,9 +831,25 @@ function denoise({ width, height, buffer }) {
 /** One entry per message type, each returning the fields to merge into the
  *  reply plus any buffers to hand over rather than copy. A Map rather than an
  *  object literal so an unknown type can never resolve to Object.prototype. */
+/** The score breakdown of a hand-given quad, for the overlay page's tuning
+ *  loop. Nothing in the app sends this. */
+function scoreGivenQuad({ width, height, buffer, corners }) {
+  let img = null, frame = null;
+  try {
+    img = cv.matFromImageData(toImageData(width, height, buffer));
+    frame = buildFrame(img, { edges: false });
+    return { score: scoreQuad(frame, corners, { keepSamples: true }),
+             frame: { magnitudeScale: frame.magnitudeScale, backgroundLab: frame.backgroundLab } };
+  } finally {
+    if (frame) frame.release();
+    releaseMats(img);
+  }
+}
+
 const HANDLERS = new Map([
   ["init", () => ({ result: {} })],
   ["detect", (payload) => ({ result: detect(payload) })],
+  ["scoreQuad", (payload) => ({ result: scoreGivenQuad(payload) })],
   ["previewQuad", (payload) => ({ result: previewQuad(payload) })],
   ["warp", (payload) => {
     const buffer = warp(payload);
