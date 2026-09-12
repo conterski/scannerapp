@@ -109,11 +109,12 @@ function buildSideOptions(type, context) {
   return fromContributors.concat(splitSideOptions(type, context));
 }
 
-/** A locked side (the cut chord of a winning safe split, or a reunited
- *  section's seam) is the doc/occluder boundary: no pool, no outward walk,
- *  no Hough extension. */
-function lockedSideChoice(type, context) {
-  const side = sideOf(context.best.corners, type);
+/** A locked side is a boundary the pools must not argue with — the cut chord
+ *  of a winning safe split, a reunited section's seam, or a sheet edge the
+ *  printed grid established: no pool, no outward walk, no Hough extension.
+ *  @param lockedSide the line to lock to, or null for best's own side */
+function lockedSideChoice(type, lockedSide, context) {
+  const side = lockedSide || sideOf(context.best.corners, type);
   return Object.assign(sideOptionFrom(side, type, context), { locked: true });
 }
 
@@ -349,12 +350,14 @@ function quadFromChosenSides(chosen, bounds) {
 
 /**
  * Fuses the four document edges from across candidates.
- * @param options { gray, width, height, getSegments, trace, lockedTypes, meta }
+ * @param options { gray, width, height, getSegments, trace, locks, meta }
  *                `getSegments` is called only if a side needs a Hough
- *                extension; `meta` receives `contributors` and `rules`
+ *                extension; `locks` maps a side type to the line it is
+ *                locked to (null = best's own side); `meta` receives
+ *                `contributors` and `rules`
  */
 function fuseQuad(candidates, best, options) {
-  const { gray, width, height, getSegments, trace, lockedTypes, meta } = options;
+  const { gray, width, height, getSegments, trace, locks, meta } = options;
   const contributors = collectContributors(candidates, best);
   if (!contributors.length) return null;
   if (meta) meta.contributors = contributors;
@@ -368,8 +371,8 @@ function fuseQuad(candidates, best, options) {
 
   const chosen = [];
   for (let type = 0; type < SIDE_COUNT; type++) {
-    chosen.push(lockedTypes && lockedTypes.has(type)
-      ? lockedSideChoice(type, context)
+    chosen.push(locks && locks.has(type)
+      ? lockedSideChoice(type, locks.get(type), context)
       : chooseSideForType(type, context));
   }
 

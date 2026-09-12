@@ -157,16 +157,18 @@
    * Detects document corners in `sourceCanvas` (full-res normalized image),
    * falling back to the whole image when no plausible document quad is found
    * and when detection itself fails.
+   * @param options { withoutGrid } — the overlay page's and the timing
+   *                harness's switch; the app never passes it
    * @returns { corners, failed } — corners {tl,tr,br,bl} in full-res
    *          coordinates; `failed` separates the engine giving up from the
    *          photo simply having no document in it, so a caller can say so.
    */
-  async function detectCorners(sourceCanvas) {
+  async function detectCorners(sourceCanvas, options) {
     const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
     const wholeImage = fullImageCorners(bounds.width, bounds.height);
     try {
       await detector.ensureReady();
-      const { response, scale } = await runDetection(sourceCanvas, false);
+      const { response, scale } = await runDetection(sourceCanvas, false, options);
       if (!response.corners) return { corners: wholeImage, failed: false };
       const corners = toFullResolutionCorners(response.corners, scale, bounds);
       const isDocument = isPlausibleDocumentQuad(corners, bounds);
@@ -177,10 +179,11 @@
     }
   }
 
-  /** Debug variant: returns the per-candidate scoring info at detection scale. */
-  async function detectDebug(sourceCanvas) {
+  /** Debug variant: returns the per-candidate scoring info at detection scale.
+   *  @param options { withoutGrid } — the overlay page's before/after switch */
+  async function detectDebug(sourceCanvas, options) {
     await detector.ensureReady();
-    const { response, scale } = await runDetection(sourceCanvas, true);
+    const { response, scale } = await runDetection(sourceCanvas, true, options);
     return {
       corners: response.corners, debug: response.debug, scale,
       fusedOk: response.fusedOk, trace: response.trace,
@@ -240,7 +243,7 @@
     return isPlausibleDocumentQuad(corners, bounds) ? corners : null;
   }
 
-  async function runDetection(sourceCanvas, wantsDebug) {
+  async function runDetection(sourceCanvas, wantsDebug, options) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
     const imageData = imageDataOf(canvas);
     ImageUtils.releaseCanvas(canvas); // the pixels live in imageData now
@@ -249,6 +252,7 @@
       height: imageData.height,
       buffer: imageData.data.buffer,
       debug: wantsDebug,
+      withoutGrid: !!(options && options.withoutGrid),
     }, [imageData.data.buffer]);
     return { response, scale };
   }

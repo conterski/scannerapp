@@ -216,7 +216,9 @@ function snappedLineForSide(image, quad, type) {
  * through those stop points. Works from the pixels, so it recovers document
  * strips that every candidate mask missed.
  */
-function snapSidesOutward(image, quad, lockedTypes) {
+/** @param locks anything with `has(sideType)` — the lock map from
+ *               scan-worker.js; a locked side is never marched */
+function snapSidesOutward(image, quad, locks) {
   const { width, height } = image;
   const originalArea = shoelaceArea(quad);
   const lines = [];
@@ -225,7 +227,7 @@ function snapSidesOutward(image, quad, lockedTypes) {
     const side = sideOf(quad, type);
     // Locked seam side (a safe-split cut chord): never march outward across
     // the occluder.
-    const snapped = lockedTypes && lockedTypes.has(type)
+    const snapped = locks && locks.has(type)
       ? null
       : snappedLineForSide(image, quad, type);
     if (snapped) { lines.push(snapped); moved = true; }

@@ -11,7 +11,8 @@
  *
  * The detector itself lives in worker/: geometry (pure math), pixel-probes
  * (what the pixels say), candidates (mask → scored quads), edge-fusion
- * (assembling the best four sides) and quad-refine (the anti-cut passes).
+ * (assembling the best four sides), quad-refine (the anti-cut passes) and
+ * grid-evidence (the printed grid as proof of where a sheet on a pad ends).
  * This file owns the pipeline that runs them in order.
  */
 "use strict";
@@ -27,6 +28,7 @@ importScripts(...[
   "worker/candidates.js",
   "worker/edge-fusion.js",
   "worker/quad-refine.js",
+  "worker/grid-evidence.js",
   "worker/guided-filter.js",
   "worker/enhance.js",
 ].map((path) => path + ASSET_VERSION));
@@ -76,6 +78,17 @@ const HULL_CUT_THRESHOLD = 0.09;
 
 // Final margin, so hairline errors land on background rather than content.
 const SAFETY_MARGIN_FRACTION = 0.004;
+
+// A quad assembled around grid locks must still look like a sheet, or the
+// locks are dropped and the pipeline's own answer stands. These notas are
+// roughly half-A4 portrait; widen the aspect band only if other templates
+// enter the set.
+const GRID_GATES = Object.freeze({
+  minAngleDeg: 60, maxAngleDeg: 120,
+  minAreaFraction: 0.12, maxAreaFraction: 0.98,
+  maxOppositeRatio: 2.5,
+  minAspect: 1.2, maxAspect: 2.6,
+});
 
 // ------------------------------------------------------------------
 // OpenCV bootstrap
@@ -353,13 +366,21 @@ function applySafeSplitOverride(best, candidates, trace) {
   return strongest;
 }
 
-/** The cut chord of a winning safe split is the doc/occluder seam, and a
- *  reunion's extended sides are the severing band: both are locked against
- *  outward fusion walks and snap marches. */
+/**
+ * The cut chord of a winning safe split is the doc/occluder seam, and a
+ * reunion's extended sides are the severing band: both are locked against
+ * outward fusion walks and snap marches.
+ *
+ * @returns Map<sideType, side|null> — a locked side with `null` keeps best's
+ *          own side (these two sources); a side value locks to that line
+ *          (grid evidence). Null when nothing is locked.
+ */
 function lockedSidesFor(best, reuniteLock) {
   const splitLock = best.split && best.safe && best.cutSides ? best.cutSides : [];
   if (!splitLock.length && !reuniteLock) return null;
-  return new Set([...splitLock, ...(reuniteLock || [])]);
+  const locks = new Map();
+  for (const type of [...splitLock, ...(reuniteLock || [])]) locks.set(type, null);
+  return locks;
 }
 
 /**
@@ -402,27 +423,100 @@ function applyHullCutNet(corners, options) {
 // detect
 // ------------------------------------------------------------------
 
-/** Fusion, refinement, snap and the anti-cut net, in that order. */
-function buildCorners(best, pipeline, trace) {
+/**
+ * Sides the printed grid can vouch for, added to the locks already in force.
+ * Nothing changes for a photo with no grid, and a side another lock already
+ * owns is left to it — a split's cut chord outranks a margin estimate.
+ * @returns the widened lock map, or null when the grid added nothing
+ */
+function gridLocksFor(pipeline, baseLocks, trace) {
+  const grid = findPrintedGrid(pipeline, pipeline.getSegments(), pipeline);
+  if (trace) {
+    trace.push({ grid: grid
+      ? { inliers: grid.inliers, borders: grid.frame.map(Boolean), foreign: grid.foreign.length }
+      : null });
+  }
+  if (!grid) return null;
+
+  const locks = new Map(baseLocks || []);
+  let added = 0;
+  for (const { type, side, confidence, evidence } of gridSideEvidence(pipeline, grid)) {
+    const locked = confidence >= GRID.lockConfidence && !locks.has(type);
+    if (trace) {
+      trace.push({ gridSide: type, confidence: +confidence.toFixed(2),
+        coverage: +evidence.coverage.toFixed(2), stops: evidence.stops.length,
+        shadow: +evidence.signals.shadow.toFixed(2), prior: +evidence.signals.prior.toFixed(2),
+        residual: evidence.residual === null ? null : +evidence.residual.toFixed(4),
+        reference: evidence.reference, excluded: evidence.excluded, exclusions: evidence.exclusions,
+        agreement: evidence.agreement === null ? null : +evidence.agreement.toFixed(2),
+        uniformity: evidence.uniformity === null ? null : +evidence.uniformity.toFixed(2),
+        distance: evidence.distance === null ? null : +evidence.distance.toFixed(3), locked,
+        // For the overlay page: where the search ran and what it read.
+        border: evidence.border, normal: evidence.normal, side, profiles: evidence.profiles,
+        stopPoints: evidence.stops.map((stop) => ({ x: stop.x, y: stop.y })) });
+    }
+    if (locked) { locks.set(type, side); added++; }
+  }
+  return added ? locks : null;
+}
+
+/** Why a grid-locked quad is not a sheet, or null when it passes. */
+function gridGateFailure(corners, bounds) {
+  const { minAngleDeg, maxAngleDeg, minAreaFraction, maxAreaFraction,
+          maxOppositeRatio, minAspect, maxAspect } = GRID_GATES;
+  if (internalAngles(corners).some((angle) => angle < minAngleDeg || angle > maxAngleDeg)) return "angle";
+  const areaFraction = shoelaceArea(corners) / (bounds.width * bounds.height);
+  if (areaFraction < minAreaFraction || areaFraction > maxAreaFraction) return "area";
+  const length = (type) => segmentLength(sideOf(corners, type));
+  const ratio = (first, second) => Math.max(first, second) / Math.min(first, second);
+  const top = length(SIDE_TOP), bottom = length(SIDE_BOTTOM);
+  const left = length(SIDE_LEFT), right = length(SIDE_RIGHT);
+  if (ratio(top, bottom) > maxOppositeRatio || ratio(left, right) > maxOppositeRatio) return "opposite";
+  const aspect = ratio((top + bottom) / 2, (left + right) / 2);
+  if (aspect < minAspect || aspect > maxAspect) return "aspect";
+  return null;
+}
+
+/** Fusion, refinement, snap and the anti-cut net, in that order, all
+ *  honouring `locks`. */
+function assembleCorners(best, pipeline, locks, trace) {
   const { gray, width, height, candidates, getSegments } = pipeline;
-  const locked = lockedSidesFor(best, pipeline.reuniteLock);
   const fuseMeta = {};
   const fused = fuseQuad(candidates, best,
-    { gray, width, height, getSegments, trace, lockedTypes: locked, meta: fuseMeta });
+    { gray, width, height, getSegments, trace, locks, meta: fuseMeta });
 
   // refineQuadEdges returns its input unchanged without hull evidence, so this
   // needs no guard of its own — the same condition the net applies below.
   let corners = fused || refineQuadEdges(best.corners, best.hullPts, pipeline);
-  corners = snapSidesOutward(pipeline, corners, locked);
+  corners = snapSidesOutward(pipeline, corners, locks);
 
   if (fused && best.hullPts && best.hullPts.length >= 3) {
     corners = applyHullCutNet(corners, {
-      best, candidates, contributors: fuseMeta.contributors, locked,
+      best, candidates, contributors: fuseMeta.contributors, locked: locks,
       width, height, trace, rules: fuseMeta.rules,
     });
   }
   const margin = SAFETY_MARGIN_FRACTION * Math.min(width, height);
   return { corners: expandQuad(corners, margin, pipeline), fusedOk: !!fused };
+}
+
+/**
+ * The corners: assembled around the grid's locks when the grid can vouch for
+ * any side and the result still looks like a sheet; otherwise assembled the
+ * way the pipeline always has. The second path is the fallback, not a retry —
+ * it is the detector that works on everything without a printed grid.
+ */
+function buildCorners(best, pipeline, trace) {
+  const baseLocks = lockedSidesFor(best, pipeline.reuniteLock);
+  // `withoutGrid` is the overlay page's before/after switch, nothing more.
+  const gridLocks = pipeline.withoutGrid ? null : gridLocksFor(pipeline, baseLocks, trace);
+  if (gridLocks) {
+    const built = assembleCorners(best, pipeline, gridLocks, trace);
+    const failure = gridGateFailure(built.corners, pipeline);
+    if (trace) trace.push({ gridGate: failure || "passed" });
+    if (!failure) return built;
+  }
+  return assembleCorners(best, pipeline, baseLocks, trace);
 }
 
 function debugPayload(candidates) {
@@ -482,8 +576,9 @@ function releasePipeline(pipeline) {
     pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges);
 }
 
-function detect({ width, height, buffer, debug }) {
+function detect({ width, height, buffer, debug, withoutGrid }) {
   const pipeline = createPipeline(width, height, debug);
+  pipeline.withoutGrid = !!withoutGrid;
   try {
     allocatePipelineMats(pipeline, buffer, DETECT_KERNELS);
     collectCandidates(pipeline);
