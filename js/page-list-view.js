@@ -106,8 +106,7 @@
     $("pdfBtn").disabled = !hasPages;
     $("photosBtn").disabled = !hasPages;
     $("listToolbar").hidden = !hasPages || isSelectModeActive;
-    $("addBar").hidden = isSelectModeActive;
-    $("exportBar").hidden = isSelectModeActive;
+    $("actionBar").hidden = isSelectModeActive;
     $("exportHint").hidden = isSelectModeActive;
     $("compactToggle").hidden = isSelectModeActive;
     $("selectBar").hidden = !isSelectModeActive;

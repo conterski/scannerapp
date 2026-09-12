@@ -8,6 +8,7 @@
   --accent-press: #2563eb;
   --danger: #ef4444;
   --radius: 12px;
+  --action-bar-height: 64px; /* shared by the bar, the list's padding and the anchors */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -38,6 +39,8 @@ html, body {
 .status { font-size: 12px; color: var(--text-dim); }
 
 .view { padding: 8px 16px calc(24px + env(safe-area-inset-bottom)); max-width: 720px; margin: 0 auto; }
+/* The list scrolls clear of its fixed action bar; the editor has no bar. */
+#listView { padding-bottom: calc(var(--action-bar-height) + 24px + env(safe-area-inset-bottom)); }
 
 /* ---------- Empty state ---------- */
 .empty-state { text-align: center; padding: 48px 24px 32px; color: var(--text-dim); }
@@ -67,13 +70,50 @@ html, body {
 .btn-small { padding: 10px 14px; font-size: 14px; }
 .btn-tiny { padding: 6px 10px; font-size: 13px; border-radius: 8px; }
 
-.add-bar, .export-bar {
+.export-hint { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 12px; }
+
+/* ---------- Action bar: the four actions, pinned to the bottom ---------- */
+/* Same frosted treatment as the header, on the header's layer: under the
+   anchors (50), busy (100) and capture (200), so those cover it with no extra
+   logic. */
+.action-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
-  gap: 10px;
-  margin-top: 14px;
+  justify-content: center;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--surface-2);
+  z-index: 10;
 }
-.add-bar .btn, .export-bar .btn { flex: 1; }
-.export-hint { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 8px; }
+/* Four tabs fill a phone and cap at the content width on a desktop. */
+.action-tab {
+  appearance: none;
+  border: none;
+  background: none;
+  flex: 1 1 0;
+  max-width: 180px;
+  min-height: 52px;           /* the iOS touch minimum, with room */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+.action-icon { font-size: 22px; line-height: 1; }
+.action-tab:not(:disabled):active { background: var(--surface-2); }
+.action-tab:disabled { opacity: 0.4; cursor: default; }
 
 /* Compact scans storage toggle */
 .compact-toggle {
@@ -362,7 +402,7 @@ html, body {
 .scroll-anchors {
   position: fixed;
   right: 16px;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  bottom: calc(var(--action-bar-height) + 16px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 8px;
