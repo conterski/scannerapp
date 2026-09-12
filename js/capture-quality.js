@@ -7,13 +7,14 @@
  * that was never captured. High detail asks the camera for more, keeps more of
  * it, and pays for the pixels with a lower JPEG quality.
  *
- * The numbers are measured end to end on the real pipeline, not modelled.
- * High detail keeps 2200x1238 where standard keeps 1600x900 — 2.7 MP against
- * 1.4 MP, for 46% larger exports. Against the 1800px profile this replaces it
- * is 1.5x the pixels for 22% larger exports: less than the 38% the resolution
- * alone would have cost, because denoising removes the grain JPEG was
- * spending bits on. The quality drop to 0.70 is part of the profile rather
- * than an oversight — it is what pays for the pixels.
+ * The numbers are measured on the real pipeline, not modelled. High detail
+ * keeps 2200x1238 where standard keeps 1600x900 — 2.7 MP against 1.4 MP. At
+ * quality 0.70 that was 46% larger exports than standard; denoising removes
+ * the grain JPEG would otherwise spend bits on, which is what made the
+ * pixels that cheap. The quality now sits at 0.85 for the fine detail of
+ * handwriting and small print — on the sample set, 26% more bytes per photo
+ * than 0.70 (0.90 would be 38%), inside the 50% growth the profile is
+ * allowed.
  *
  * Exposes window.CaptureQuality.
  */
@@ -49,7 +50,7 @@
   // full frame before the downscale — see CameraStream.captureJpeg.
   const HIGH_DETAIL_PROFILE = {
     maxEdge: 2200,
-    jpegQuality: 0.70,
+    jpegQuality: 0.85,
     denoise: true,
     video: {
       width: { ideal: 2560 },

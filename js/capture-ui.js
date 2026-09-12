@@ -111,26 +111,35 @@
 
       // ----- actions -----
 
-      /** One tap: grab the frame now, process it off the critical path, and
-       *  stay on the live preview. No confirmation, no interstitial.
+      /** One tap: focus if the camera needs telling, keep the sharpest of the
+       *  next few frames — judged where the outline says the document is —
+       *  process it off the critical path, and stay on the live preview. No
+       *  confirmation, no interstitial.
        *
-       *  The frame is this chain's to own, so it is released the moment the
-       *  JPEG exists rather than left for the collector — taps can outrun the
-       *  chain, and each waiting frame is a full-resolution one. */
+       *  The frames are taken as soon as the tap lands, ahead of the encode
+       *  chain, so a burst of taps captures a burst of moments rather than one
+       *  moment per finished encode. The frame is this chain's to own, so it
+       *  is released the moment the JPEG exists rather than left for the
+       *  collector — each waiting frame is a full-resolution one. */
       function shoot() {
         if (!accepting) return;
-        const frame = CameraStream.grabFrame(els.captureVideo);
-        if (!frame) return; // stream has no frame yet
         flash();
+        const region = outline.region();
+        const frame = camera.focusOnce()
+          .then(() => CameraStream.grabSharpest(els.captureVideo, region));
         encodeChain = encodeChain
-          .then(() => CameraStream.captureJpeg(frame))
-          .then((blob) => {
-            store.add(blob);
-            renderCount();
-            renderStrip();
+          .then(() => frame)
+          .then((canvas) => {
+            if (!canvas) return; // the stream had no frame yet
+            return CameraStream.captureJpeg(canvas)
+              .then((blob) => {
+                store.add(blob);
+                renderCount();
+                renderStrip();
+              })
+              .finally(() => ImageUtils.releaseCanvas(canvas));
           })
-          .catch((err) => console.error("Capture failed:", err))
-          .then(() => ImageUtils.releaseCanvas(frame));
+          .catch((err) => console.error("Capture failed:", err));
       }
 
       // Reviewing never ends the session — the stream keeps running behind

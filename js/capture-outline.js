@@ -10,6 +10,10 @@
  * so a phone that takes longer per frame simply shows fewer frames — there is
  * no backlog to catch up on and no growing pile of frames in memory.
  *
+ * The one thing a shot reads back from it is `region()`, the box the outline
+ * occupies: the frames a tap compares are judged for sharpness there, on the
+ * document rather than on the desk around it.
+ *
  * Exposes window.CaptureOutline. `create()` is a factory: one instance per
  * capture session, owning its loop and its polygon.
  */
@@ -84,11 +88,16 @@
     let missedFrames = 0;
 
     function draw(corners) {
+      // The stream can end between a frame being offered and its result
+      // arriving — the OS taking the camera back — and a video with no size
+      // has nothing to map the corners onto.
+      const videoSize = ImageUtils.sourceDimensions(video);
+      if (!videoSize.width || !videoSize.height) { hide(); return; }
       // The video's box, not the svg's: they share it (both inset: 0), and a
       // hidden svg measures 0x0, which is exactly the state the first draw
       // starts from.
       const box = { width: video.clientWidth, height: video.clientHeight };
-      const { scale, offsetX, offsetY } = coverTransform(ImageUtils.sourceDimensions(video), box);
+      const { scale, offsetX, offsetY } = coverTransform(videoSize, box);
       svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
       polygon.setAttribute("points", CORNER_KEYS
         .map((key) => `${corners[key].x * scale + offsetX},${corners[key].y * scale + offsetY}`)
@@ -155,7 +164,17 @@
       hide();
     }
 
-    return { start, stop, isRunning: () => isRunning };
+    /** The box around the outline as drawn, in video pixels — where the
+     *  document is, for a shot to judge its sharpness on — or null while no
+     *  outline is shown. */
+    function region() {
+      if (!shown) return null;
+      const xs = CORNER_KEYS.map((key) => shown[key].x), ys = CORNER_KEYS.map((key) => shown[key].y);
+      const x = Math.min(...xs), y = Math.min(...ys);
+      return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+    }
+
+    return { start, stop, region, isRunning: () => isRunning };
   }
 
   window.CaptureOutline = { create, coverTransform };

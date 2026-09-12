@@ -26,6 +26,24 @@
   // shutter stays disabled and the camera light stays on, with no error shown.
   const FIRST_FRAME_TIMEOUT_MS = 10000;
 
+  // How many successive frames a tap compares, keeping the sharpest. Three
+  // span two frame intervals — under 70ms at 30fps — long enough for a hand's
+  // tremor to pass through a still moment, too short for the scene to change.
+  const FRAMES_PER_SHOT = 3;
+
+  // The share of the frame scored for sharpness when the outline has nothing
+  // to offer: the middle, which is where a document being framed is.
+  const CENTRAL_REGION_SHARE = 0.6;
+
+  // The longest a shot waits for the video's next frame. A frame arrives far
+  // sooner from a running camera; the deadline is for a tab sent to the
+  // background mid-shot, whose frame callbacks stop until it returns.
+  const FRAME_WAIT_MAX_MS = 100;
+
+  // How long a lens is given to settle after a focus request. The API reports
+  // no completion, so this is the budget a shot waits, not a measurement.
+  const FOCUS_SETTLE_MS = 300;
+
   const MESSAGES = {
     insecure: "The camera needs a secure (HTTPS) connection.",
     unsupported: "This browser can’t open the camera inside the page.",
@@ -97,6 +115,66 @@
     return ImageUtils.createScaledCanvas(video, grabEdge).canvas;
   }
 
+  function centralRegion(video) {
+    const { width, height } = ImageUtils.sourceDimensions(video);
+    const regionWidth = width * CENTRAL_REGION_SHARE, regionHeight = height * CENTRAL_REGION_SHARE;
+    return { x: (width - regionWidth) / 2, y: (height - regionHeight) / 2,
+             width: regionWidth, height: regionHeight };
+  }
+
+  /** Resolves on the video's next frame — on the next paint where the frame
+   *  callback is missing, which delivers a new frame often enough — or at the
+   *  deadline, whichever comes first. */
+  function nextVideoFrame(video) {
+    return new Promise((resolve) => {
+      const deadline = setTimeout(resolve, FRAME_WAIT_MAX_MS);
+      const onFrame = () => { clearTimeout(deadline); resolve(); };
+      if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(onFrame);
+      else requestAnimationFrame(onFrame);
+    });
+  }
+
+  /** Sharpness of the grabbed `frame` over `region`, given in video pixels.
+   *  Read from the grab, not the video: the video may already be showing the
+   *  next frame by the time it is read again. */
+  function sharpnessOf(frame, video, region) {
+    const scale = frame.width / ImageUtils.sourceDimensions(video).width;
+    return FrameSharpness.measure(frame, {
+      x: region.x * scale, y: region.y * scale, width: region.width * scale, height: region.height * scale,
+    });
+  }
+
+  /**
+   * The sharpest of the next FRAMES_PER_SHOT frames, as grabFrame returns
+   * them, or null while the stream has no frame. The first is taken
+   * synchronously, so a tap still captures what the user saw; the rest follow
+   * on the video's own frame callbacks. A frame that loses is released at
+   * once — each is a full-resolution one.
+   * @param region  { x, y, width, height } in video pixels to score, or null
+   *                for the middle of the frame
+   */
+  async function grabSharpest(video, region) {
+    let best = grabFrame(video);
+    if (!best) return null;
+    // A degenerate box — an outline collapsed to a line — is no region at all.
+    const scored = region && region.width >= 1 && region.height >= 1 ? region : centralRegion(video);
+    let bestSharpness = sharpnessOf(best, video, scored);
+    for (let taken = 1; taken < FRAMES_PER_SHOT; taken++) {
+      await nextVideoFrame(video);
+      const frame = grabFrame(video);
+      if (!frame) break; // the stream ended under us; the best so far stands
+      const sharpness = sharpnessOf(frame, video, scored);
+      if (sharpness > bestSharpness) {
+        ImageUtils.releaseCanvas(best);
+        best = frame;
+        bestSharpness = sharpness;
+      } else {
+        ImageUtils.releaseCanvas(frame);
+      }
+    }
+    return best;
+  }
+
   /** Denoises a frame, falling back to it unchanged if the worker can't. A
    *  failed filter must cost sharpness, never the photo. */
   function reduceNoise(frame) {
@@ -138,17 +216,40 @@
       return stream ? stream.getVideoTracks()[0] || null : null;
     }
 
-    /** Whether this device exposes its camera light. iOS Safari's support is
-     *  patchy, so it is probed rather than assumed and the control is hidden
-     *  when absent. Some browsers throw instead of omitting getCapabilities. */
-    function supportsTorch() {
+    /** What the running track says it can do — {} when it says nothing, as
+     *  iOS Safari mostly does. Some browsers throw instead of omitting
+     *  getCapabilities, and a probe must never take the session down. */
+    function capabilities() {
       const track = videoTrack();
-      if (!track || typeof track.getCapabilities !== "function") return false;
+      if (!track || typeof track.getCapabilities !== "function") return {};
       try {
-        return track.getCapabilities().torch === true;
+        return track.getCapabilities() || {};
       } catch (error) {
-        return false;
+        return {};
       }
+    }
+
+    /** Whether this device exposes its camera light. Probed rather than
+     *  assumed, and the control is hidden when absent. */
+    function supportsTorch() {
+      return capabilities().torch === true;
+    }
+
+    /** Asks the lens to focus once, ahead of a shot, when the camera is not
+     *  already keeping focus by itself — a camera in continuous mode is
+     *  focused already, and forcing a fresh sweep would only blur the frames
+     *  it passes through. Resolves once the lens has had its settling time,
+     *  or at once when there is no focus control to speak to; a refusal is
+     *  logged, never surfaced, since the shot goes ahead regardless. */
+    function focusOnce() {
+      const track = videoTrack();
+      const modes = capabilities().focusMode || [];
+      if (!track || !modes.includes("single-shot")) return Promise.resolve();
+      const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+      if (settings.focusMode === "continuous") return Promise.resolve();
+      return track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] })
+        .then(() => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)))
+        .catch((error) => console.warn("The camera wouldn't focus on request:", error));
     }
 
     /** Switches the camera light. Rejects if the device refuses, so the caller
@@ -203,10 +304,10 @@
       if (video) video.srcObject = null;
     }
 
-    return { start, stop, supportsTorch, setTorch };
+    return { start, stop, supportsTorch, setTorch, focusOnce };
   }
 
   window.CameraStream = {
-    isSupported, describeError, grabFrame, captureJpeg, create,
+    isSupported, describeError, grabFrame, grabSharpest, captureJpeg, create,
   };
 })();
