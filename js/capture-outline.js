@@ -69,8 +69,12 @@
    * @param video  the <video> the frames come from
    */
   function create(svg, video) {
+    // The svg is shared across capture sessions; this session's polygon is
+    // its only child. Appending instead would leave every earlier session's
+    // polygon in place, still holding its last points, to reappear together
+    // the moment the svg is shown again.
     const polygon = document.createElementNS(SVG_NS, "polygon");
-    svg.appendChild(polygon);
+    svg.replaceChildren(polygon);
 
     let isRunning = false;
     let isInFlight = false;
@@ -94,6 +98,7 @@
 
     function hide() {
       setSvgHidden(svg, true);
+      polygon.removeAttribute("points"); // nothing stale to show if the svg is shown again
       shown = null;
       missedFrames = 0;
     }
