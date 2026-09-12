@@ -16,6 +16,14 @@
 
 const SEARCH = Object.freeze({
   contendersRefined: 6,        // the best region quads are refined; the rest were not close
+  // Refining another detector's crop: its result is trusted unless the
+  // refined one scores clearly better — the score judges moves of a few
+  // px well and whole relocations badly, so it is only asked the first.
+  // And it may only tighten: the legacy crop's failure is looseness, never
+  // a cut, and the score, offered outward moves, took a pad's edge or a
+  // fold for the sheet's on the very scenes the refinement is for.
+  acceptGain: 0.03,
+  outwardAllowance: 2,         // px at 800px a side may still move outward, to sit on its edge
   refine: {
     offsets: [1, 2, 4, 8],     // px along the normal, both ways, at 800px
     previewOffsets: [1, 2, 4],
@@ -66,11 +74,21 @@ function rotatedLine(quad, type, line, degrees) {
   return { px: mid.x, py: mid.y, dx: line.dx * cos - line.dy * sin, dy: line.dx * sin + line.dy * cos };
 }
 
-/** Perpendicular distance between a side's midpoint and a line. */
-function driftOf(quad, type, line) {
+/** How far a line lies from a side at each of the side's ends, signed along
+ *  the side's outward normal: positive is outward. Both ends, so a line that
+ *  crosses the side near its middle cannot pass as a small move. */
+function driftsOf(quad, type, line) {
   const side = sideOf(quad, type);
-  const mid = { x: (side.a.x + side.b.x) / 2, y: (side.a.y + side.b.y) / 2 };
-  return Math.abs((mid.x - line.px) * line.dy - (mid.y - line.py) * line.dx);
+  const normal = outwardNormal(quad, side);
+  return [side.a, side.b].map((end) => {
+    const along = (end.x - line.px) * line.dx + (end.y - line.py) * line.dy;
+    const nearest = { x: line.px + line.dx * along, y: line.py + line.dy * along };
+    return (nearest.x - end.x) * normal.nx + (nearest.y - end.y) * normal.ny;
+  });
+}
+
+function driftOf(quad, type, line) {
+  return Math.max(...driftsOf(quad, type, line).map(Math.abs));
 }
 
 /**
@@ -78,7 +96,9 @@ function driftOf(quad, type, line) {
  * without the nested term — an inward march per sample, the costliest part
  * of a score, and one that barely moves under a shift of a few px — and the
  * refined quad gets its full score at the end.
- * @param pools  the line pools, for the jump-to-a-line moves; null without
+ * @param options { preview, inwardOnly } — inwardOnly caps outward drift at
+ *                SEARCH.outwardAllowance
+ * @param pools   the line pools, for the jump-to-a-line moves; null without
  * @returns { quad, score, moves: [{ side, kind, amount, gain }] }
  */
 function refineQuad(frame, start, options, pools) {
@@ -88,6 +108,7 @@ function refineQuad(frame, start, options, pools) {
   const offsets = (preview ? SEARCH.refine.previewOffsets : SEARCH.refine.offsets).map((px) => px * scale);
   const maxIterations = preview ? SEARCH.refine.previewMaxIterations : SEARCH.refine.maxIterations;
   const maxDrift = maxDriftOfShortSide * frame.shortSide;
+  const maxOutward = options && options.inwardOnly ? SEARCH.outwardAllowance * scale : maxDrift;
   // One palette for the whole descent — the paper does not change colour
   // as a side moves a few px — and only the moved side is re-read: its
   // neighbours' endpoints shift by less than a sample spacing.
@@ -99,7 +120,7 @@ function refineQuad(frame, start, options, pools) {
     const lines = sideLinesOf(current.quad);
     let best = null;
     const consider = (type, kind, amount, line) => {
-      if (driftOf(start, type, line) > maxDrift) return;
+      if (driftsOf(start, type, line).some((drift) => drift < -maxDrift || drift > maxOutward)) return;
       const trial = lines.slice();
       trial[type] = line;
       const quad = quadFromSideLines(trial, frame);
@@ -132,6 +153,20 @@ function refineQuad(frame, start, options, pools) {
 }
 
 const POOL_NAMES = ["top", "right", "bottom", "left"]; // by side type
+
+/**
+ * `quad` refined on the score, or `quad` itself when refinement gains less
+ * than SEARCH.acceptGain — a crop that arrived here is a detector's answer,
+ * and a marginal preference is not a reason to move it.
+ * @returns { quad, refined: bool, scoreBefore, scoreAfter, moves }
+ */
+function refineGivenQuad(frame, quad, pools) {
+  const before = scoreQuad(frame, quad);
+  if (before.rejected) return { quad, refined: false, scoreBefore: before.total, scoreAfter: before.total, moves: [] };
+  const result = refineQuad(frame, quad, { inwardOnly: true }, pools);
+  const refined = result.score.total - before.total >= SEARCH.acceptGain;
+  return { quad: refined ? result.quad : quad, refined, scoreBefore: before.total, scoreAfter: result.score.total, moves: result.moves };
+}
 
 /**
  * The best quad among the candidates, refined. The best few are refined —

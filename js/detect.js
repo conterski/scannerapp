@@ -204,6 +204,7 @@
       corners: response.corners, debug: response.debug, scale,
       fusedOk: response.fusedOk, trace: response.trace,
       segments: response.segments, splitDiag: response.splitDiag,
+      refinement: response.refinement,
     };
   }
 
@@ -260,10 +261,11 @@
     return isPlausibleDocumentQuad(corners, bounds) ? corners : null;
   }
 
-  // Which detector answers, while the generate-and-score engine is compared
-  // against the legacy pipeline: the page may ask for either; the app gets
-  // the default.
-  const DEFAULT_ENGINE = "legacy";
+  // Which detector answers. "refined" is the legacy pipeline's crop
+  // tightened by the score within a bounded, inward-only drift; "legacy" is
+  // that crop alone; "score" is the generate-and-score engine on its own,
+  // which the overlay page compares and the app never uses.
+  const DEFAULT_ENGINE = "refined";
   function engineFor(options) { return (options && options.engine) || DEFAULT_ENGINE; }
 
   async function runDetection(sourceCanvas, wantsDebug, options) {

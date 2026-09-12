@@ -12,8 +12,8 @@
      for the app.
 
      Console API (all async):
-       compareEngines()            every scene: new crop vs the legacy baseline, receipts' IoU, timing
-       showEngines(names?, h?)     contact sheet, new (blue) over legacy (red dashed)
+       compareEngines(engine?)     every scene: the engine's crop vs the legacy baseline, receipts' IoU, timing
+       showEngines(names?, h?, engine?)  contact sheet, the engine's crop (blue) over legacy (red dashed)
        scoreScene(name, quad?)     the score breakdown of any quad (default: the legacy crop)
        gate1(percent?)             the right quad must outscore its own perturbations
        storeBaseline() / compareToBaseline() / showMovers()  the stored-crop regression check
@@ -41,6 +41,7 @@
   <strong>Detector overlay</strong>
   <select id="pick"></select>
   <button id="prev">◀</button><button id="next">▶</button>
+  <select id="engine"><option value="refined">refined</option><option value="score">score</option></select>
   <label><input type="checkbox" id="showCandidates"> candidates</label>
   <label><input type="checkbox" id="showLines"> pool lines</label>
   <span class="legend">red dashed: legacy crop · blue: winner · light blue dashed: winner before refinement · green: ground truth · yellow: inspected candidate · click a candidate row to inspect it</span>
@@ -68,6 +69,8 @@
   document.getElementById("next").addEventListener("click", () => step(1));
   document.getElementById("showCandidates").addEventListener("change", () => current && render(current));
   document.getElementById("showLines").addEventListener("change", () => current && render(current));
+  document.getElementById("engine").addEventListener("change", () => show(pick.value));
+  const chosenEngine = () => document.getElementById("engine").value;
 
   function step(delta) {
     pick.selectedIndex = (pick.selectedIndex + delta + SCENES.length) % SCENES.length;
@@ -121,9 +124,10 @@
   async function show(name) {
     await Detect.ensureOpenCV();
     const canvas = await canvasFor(name);
-    const result = await Detect.detectDebug(canvas, { engine: "score" });
+    const engine = chosenEngine();
+    const result = await Detect.detectDebug(canvas, { engine });
     const truth = groundTruthQuad(await groundTruth(), name, canvas);
-    current = { name, canvas, result, truth, selected: null };
+    current = { name, canvas, result, truth, selected: null, engine };
     pick.value = name;
     render(current);
   }
@@ -135,6 +139,15 @@
     host.appendChild(drawPhoto(scene));
     const column = document.createElement("div");
     column.className = "side";
+    if (scene.engine === "refined") {
+      column.appendChild(describeRefinement(scene));
+      const strips = document.createElement("div");
+      strips.className = "side";
+      column.appendChild(strips);
+      drawProfiles(scene, { corners: scene.result.corners, label: "refined crop" }, strips);
+      host.appendChild(column);
+      return;
+    }
     column.appendChild(describe(scene));
     column.appendChild(candidateTable(scene));
     const inspected = scene.selected || (scene.result.debug.winner && { corners: scene.result.debug.winner.after, label: "winner" });
@@ -149,13 +162,20 @@
 
   function drawPhoto(scene) {
     const { canvas, result, truth } = scene;
-    const debug = result.debug;
     const view = document.createElement("canvas");
     view.className = "photo";
     view.width = Math.round(canvas.width * result.scale);
     view.height = Math.round(canvas.height * result.scale);
     const ctx = view.getContext("2d");
     ctx.drawImage(canvas, 0, 0, view.width, view.height);
+    if (scene.engine === "refined") {
+      const r = result.refinement;
+      if (truth) strokeQuad(ctx, scaleQuad(truth, result.scale), "#22c55e", 2, [2, 4]);
+      if (r) strokeQuad(ctx, r.legacy, "#ef4444", 2, [8, 6]);
+      strokeQuad(ctx, result.corners, "#3b82f6", 2.5, []);
+      return view;
+    }
+    const debug = result.debug;
     if (document.getElementById("showLines").checked) {
       for (const line of debug.lines) strokeSegment(ctx, line, line.pool.length ? "rgba(249,115,22,.6)" : "rgba(255,255,255,.2)", 1);
     }
@@ -196,6 +216,16 @@
       (w ? `winner: ${w.from.source} #${w.from.rank}, ${w.scoreBefore} → ${w.scoreAfter} after ${w.moves.length} moves ` +
            `<span class="muted mono">${w.moves.map((m) => `${SIDE_NAMES[m.side][0]}${m.kind === "offset" ? (m.amount > 0 ? "+" : "") + m.amount : "∠" + m.amount}`).join(" ")}</span>`
          : "no quad");
+    return p;
+  }
+
+  function describeRefinement(scene) {
+    const p = document.createElement("div");
+    const r = scene.result.refinement;
+    if (!r) { p.textContent = `${scene.name}: no legacy crop to refine`; return p; }
+    p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
+      `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
+      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${m.kind === "offset" ? (m.amount > 0 ? "+" : "") + m.amount : m.kind === "line" ? "→line" + m.amount : "∠" + m.amount}`).join(" ")}</span>`;
     return p;
   }
 
@@ -362,7 +392,7 @@
     return rows;
   };
 
-  window.compareEngines = async function () {
+  window.compareEngines = async function (engine = "refined") {
     await Detect.ensureOpenCV();
     const truth = await groundTruth();
     const rows = [], times = [], receipts = [];
@@ -370,7 +400,7 @@
     for (const name of SCENES) {
       const canvas = await canvasFor(name);
       const t0 = performance.now();
-      const result = await Detect.detectDebug(canvas, { engine: "score" });
+      const result = await Detect.detectDebug(canvas, { engine });
       times.push(performance.now() - t0);
       window.__scoreResults[name] = result;
       const legacy = legacyQuad(name);
@@ -385,9 +415,10 @@
         receipts.push({ name, before: +before.toFixed(3), after: +after.toFixed(3) });
         iouText = ` IoU ${before.toFixed(3)}->${after.toFixed(3)}`;
       }
-      const w = result.debug.winner;
-      const t = result.debug.timing;
-      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${iouText}  ${w ? `${w.from.source}#${w.from.rank} ${w.scoreBefore}->${w.scoreAfter}` : "none"}  ${t.frame}+${t.lines}+${t.masks}+${t.search}`);
+      const detail = engine === "refined"
+        ? (result.refinement ? `${result.refinement.refined ? "REFINED" : "kept"} ${round(result.refinement.scoreBefore, 3)}->${round(result.refinement.scoreAfter, 3)} ${result.refinement.moves.length} moves` : "no legacy crop")
+        : (() => { const w = result.debug.winner, t = result.debug.timing; return `${w ? `${w.from.source}#${w.from.rank} ${w.scoreBefore}->${w.scoreAfter}` : "none"}  ${t.frame}+${t.lines}+${t.masks}+${t.search}`; })();
+      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${iouText}  ${detail}`);
     }
     times.sort((a, b) => a - b);
     const mean = (key) => +(receipts.reduce((a, r) => a + r[key], 0) / receipts.length).toFixed(3);
@@ -402,7 +433,7 @@
     host.style.flexWrap = "wrap";
     for (const name of names) {
       const canvas = await canvasFor(name);
-      const result = (engine === "score" && (window.__scoreResults || {})[name]) || await Detect.detectDebug(canvas, { engine });
+      const result = (window.__scoreResults || {})[name] || await Detect.detectDebug(canvas, { engine });
       const view = document.createElement("canvas");
       view.className = "photo";
       view.width = Math.round(canvas.width * result.scale);
@@ -418,8 +449,8 @@
     }
   }
 
-  window.showEngines = function (names, tileHeight = 300) {
-    return contactSheet(names || SCENES, tileHeight, "score", (name, scale) => {
+  window.showEngines = function (names, tileHeight = 300, engine = "refined") {
+    return contactSheet(names || SCENES, tileHeight, engine, (name, scale) => {
       const legacy = legacyQuad(name);
       return legacy && scaleQuad(legacy, scale);
     });

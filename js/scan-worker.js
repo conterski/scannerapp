@@ -695,12 +695,40 @@ function detectByScore({ width, height, buffer, debug, preview }) {
   }
 }
 
+/**
+ * The legacy crop, refined by the score within a bounded drift: the score
+ * judges small side moves well — inward too, which the legacy passes never
+ * could — and whole relocations badly, so it is asked only the first. The
+ * legacy pipeline's Hough segments feed the line pools and the print extent.
+ */
+function detectRefined(payload) {
+  const legacy = detectByLegacy({ ...payload, wantSegments: true });
+  if (!legacy.corners) return legacy;
+  let img = null, frame = null;
+  try {
+    img = cv.matFromImageData(toImageData(payload.width, payload.height, payload.buffer));
+    frame = buildFrame(img, { edges: false });
+    const lines = linePools(frame, null, legacy.segments);
+    frame.printExtent = printedExtent(lines.all, frame);
+    const outcome = refineGivenQuad(frame, legacy.corners, lines.pools);
+    const corners = outcome.refined
+      ? expandQuad(outcome.quad, DETECTOR_SAFETY_MARGIN_OF_SHORT_SIDE * frame.shortSide, frame)
+      : legacy.corners;
+    if (!payload.debug) return { corners };
+    return { ...legacy, corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent } };
+  } finally {
+    if (frame) frame.release();
+    releaseMats(img);
+  }
+}
+
 function detect(payload) {
   if (payload.engine === "score") return detectByScore(payload);
+  if (payload.engine === "refined") return detectRefined(payload);
   return detectByLegacy(payload);
 }
 
-function detectByLegacy({ width, height, buffer, debug, withoutGrid }) {
+function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegments }) {
   const pipeline = createPipeline(width, height, debug);
   pipeline.withoutGrid = !!withoutGrid;
   try {
@@ -729,7 +757,7 @@ function detectByLegacy({ width, height, buffer, debug, withoutGrid }) {
       fusedOk = built.fusedOk;
     }
 
-    if (!debug) return { corners };
+    if (!debug) return wantSegments ? { corners, segments: pipeline.getSegments() } : { corners };
     // Debug callers expect the segment list regardless of whether fusion
     // needed it, so force it here rather than reporting a lazy null.
     return {

@@ -116,14 +116,16 @@ function finishLine(line, frame) {
  * three, and the combinations supply the fourth from elsewhere — what the
  * old detector did with a fusion pass, done here by enumeration.
  * @param extraSides  [{a, b}] segments to add, from the mask quads
+ * @param segments    Hough segments to use instead of running Hough here —
+ *                    the legacy pipeline already has its own
  * @returns { pools: { top, right, bottom, left }, all } — lines with `id`
  */
-function linePools(frame, extraSides) {
-  const segments = houghSegments(frame);
+function linePools(frame, extraSides, segments) {
   const isHorizontal = (s) => angleGapDeg(segmentAngleOf(s), 0) <= LINES.familyBandDeg;
   const isVertical = (s) => angleGapDeg(segmentAngleOf(s), 90) <= LINES.familyBandDeg;
-  const horizontal = mergeCollinear(segments.filter(isHorizontal), frame);
-  const vertical = mergeCollinear(segments.filter(isVertical), frame);
+  const found = segments || houghSegments(frame);
+  const horizontal = mergeCollinear(found.filter(isHorizontal), frame);
+  const vertical = mergeCollinear(found.filter(isVertical), frame);
   for (const side of extraSides || []) {
     const line = finishLine({ points: [side.a, side.b], support: segmentLengthOf(side), line: lineThrough(side.a, side.b), angle: segmentAngleOf(side) }, frame);
     if (isHorizontal(side)) horizontal.push(line);
