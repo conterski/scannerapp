@@ -5,11 +5,13 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 **Features**
 
 - **High detail capture** (on by default) — the in-page camera keeps more of
-  what the sensor delivers, and works to keep it clean: 2200px frames instead
-  of 1600px (~2.7 MP against ~1.4 MP), a 60fps stream so no frame is exposed
-  for longer than 1/60s and a handheld shot doesn't smear, and sensor grain
-  removed from the full frame before it is scaled down. Exports run ~46%
-  larger than with the setting off; turn it off to keep files smaller. It
+  what the sensor delivers, and works to keep it clean: 2400px frames instead
+  of 1600px (~3.2 MP against ~1.4 MP), a 60fps stream so no frame is exposed
+  for longer than 1/60s and a handheld shot doesn't smear, sensor grain
+  removed from the full frame before it is scaled down with an area
+  resample, and each tap keeping the sharpest of five frames, with the lens
+  aimed at the document where the camera allows it. Photos run roughly
+  twice the size of the setting off; turn it off to keep files smaller. It
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app

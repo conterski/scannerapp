@@ -131,7 +131,7 @@
         flash();
         const region = outline.region();
         const viewfinderCorners = outline.corners();
-        const frame = camera.focusOnce()
+        const frame = camera.focusOn(region)
           .then(() => CameraStream.grabSharpest(els.captureVideo, region));
         encodeChain = encodeChain
           .then(() => frame)

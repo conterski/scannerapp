@@ -15,8 +15,13 @@
   }
 
   /** Draws `source` into a new canvas whose longest side is at most `maxEdge`.
-   *  Returns the applied `scale` so callers can map coordinates back. */
-  function createScaledCanvas(source, maxEdge) {
+   *  Returns the applied `scale` so callers can map coordinates back.
+   *  @param options { smoothing: "high" } asks for the browser's best
+   *                 resample — area averaging rather than a bilinear pick,
+   *                 which keeps fine print clean on the way down. Costlier,
+   *                 so it is for the photo that gets kept, not for a preview
+   *                 frame or a thumbnail. */
+  function createScaledCanvas(source, maxEdge, options) {
     const { width, height } = sourceDimensions(source);
     // Without this the returned scale divides by zero: the caller would get an
     // Infinity scale and a 1x1 canvas instead of an error it can report.
@@ -25,7 +30,9 @@
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(width * requestedScale));
     canvas.height = Math.max(1, Math.round(height * requestedScale));
-    canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+    const context = canvas.getContext("2d");
+    if (options && options.smoothing) context.imageSmoothingQuality = options.smoothing;
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
     return { canvas, scale: canvas.width / width };
   }
 

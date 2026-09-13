@@ -11,9 +11,10 @@
   "use strict";
 
   // The region is read at this width at most. Sharpness is a relative
-  // measure, so a small read is enough, and a small read keeps the cost per
-  // frame well under a millisecond of the tap's latency.
-  const MEASURE_MAX_EDGE = 256;
+  // measure, so a small read is enough — but too small a read blurs the
+  // frames together, and a slightly soft one then ties with a sharp one.
+  // 384px separates them and costs a few milliseconds per frame.
+  const MEASURE_MAX_EDGE = 384;
 
   // One scratch canvas for every measurement, like the preview's: a new
   // canvas per frame would be allocation for nothing.

@@ -8,13 +8,14 @@
  * it, and pays for the pixels with a lower JPEG quality.
  *
  * The numbers are measured on the real pipeline, not modelled. High detail
- * keeps 2200x1238 where standard keeps 1600x900 — 2.7 MP against 1.4 MP. At
- * quality 0.70 that was 46% larger exports than standard; denoising removes
- * the grain JPEG would otherwise spend bits on, which is what made the
- * pixels that cheap. The quality now sits at 0.85 for the fine detail of
- * handwriting and small print — on the sample set, 26% more bytes per photo
- * than 0.70 (0.90 would be 38%), inside the 50% growth the profile is
- * allowed.
+ * keeps 2400x1350 where standard keeps 1600x900 — 3.2 MP against 1.4 MP —
+ * at JPEG quality 0.85, downscaled from the native frame with the
+ * browser's area resample. Denoising removes the grain JPEG would otherwise
+ * spend bits on, which is what makes the pixels this cheap. The budget went
+ * on pixels rather than encoder quality on purpose: on the sample set, 2400px
+ * at 0.85 costs 13% more bytes than 2200px did, while 2200px at 0.90 would
+ * have cost 26% for a far smaller visible gain; 2500px at 0.85 measured 20%,
+ * the whole allowance with nothing left for a noisier frame.
  *
  * Exposes window.CaptureQuality.
  */
@@ -31,8 +32,8 @@
   };
 
   // Asks for more than it keeps on purpose: downscaling from a larger frame
-  // averages out sensor noise and aliasing, so 2200px taken from a 2560px
-  // frame is cleaner than 2200px taken from a 2200px one. 2560x1440 rather
+  // averages out sensor noise and aliasing, so 2400px taken from a 2560px
+  // frame is cleaner than 2400px taken from a 2400px one. 2560x1440 rather
   // than 4K because too high an `ideal` can make Safari choose a
   // low-framerate capture mode, which is exactly what `frameRate` fights.
   //
@@ -49,7 +50,7 @@
   // and visible sensor grain, and the filter that removes it has to run on the
   // full frame before the downscale — see CameraStream.captureJpeg.
   const HIGH_DETAIL_PROFILE = {
-    maxEdge: 2200,
+    maxEdge: 2400,
     jpegQuality: 0.85,
     denoise: true,
     video: {

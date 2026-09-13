@@ -26,10 +26,11 @@
   // shutter stays disabled and the camera light stays on, with no error shown.
   const FIRST_FRAME_TIMEOUT_MS = 10000;
 
-  // How many successive frames a tap compares, keeping the sharpest. Three
-  // span two frame intervals — under 70ms at 30fps — long enough for a hand's
-  // tremor to pass through a still moment, too short for the scene to change.
-  const FRAMES_PER_SHOT = 3;
+  // How many successive frames a tap compares, keeping the sharpest. Five
+  // span four frame intervals — under 140ms at 30fps — long enough for a
+  // hand's tremor to pass through a still moment and for the lens to settle
+  // after a focus request, too short for the scene to change.
+  const FRAMES_PER_SHOT = 5;
 
   // The share of the frame scored for sharpness when the outline has nothing
   // to offer: the middle, which is where a document being framed is.
@@ -100,6 +101,10 @@
     });
   }
 
+  // The resample for the photo that gets kept: area-quality, since the
+  // downscale from the native frame is where fine print is won or lost.
+  const KEPT_PHOTO_RESAMPLE = { smoothing: "high" };
+
   /** Copies the current video frame into a canvas. Returns null while the
    *  stream has no frame yet. Synchronous, so a tap captures the frame the
    *  user actually saw.
@@ -112,7 +117,7 @@
     if (!width || !height) return null;
     const { maxEdge, denoise } = CaptureQuality.currentProfile();
     const grabEdge = denoise ? Math.max(width, height) : maxEdge;
-    return ImageUtils.createScaledCanvas(video, grabEdge).canvas;
+    return ImageUtils.createScaledCanvas(video, grabEdge, KEPT_PHOTO_RESAMPLE).canvas;
   }
 
   function centralRegion(video) {
@@ -189,7 +194,7 @@
    *  than the cap is the common case on a device that can't reach it. */
   function capLongestSide(canvas, maxEdge) {
     return Math.max(canvas.width, canvas.height) > maxEdge
-      ? ImageUtils.createScaledCanvas(canvas, maxEdge).canvas
+      ? ImageUtils.createScaledCanvas(canvas, maxEdge, KEPT_PHOTO_RESAMPLE).canvas
       : canvas;
   }
 
@@ -235,21 +240,50 @@
       return capabilities().torch === true;
     }
 
-    /** Asks the lens to focus once, ahead of a shot, when the camera is not
-     *  already keeping focus by itself — a camera in continuous mode is
-     *  focused already, and forcing a fresh sweep would only blur the frames
-     *  it passes through. Resolves once the lens has had its settling time,
-     *  or at once when there is no focus control to speak to; a refusal is
-     *  logged, never surfaced, since the shot goes ahead regardless. */
-    function focusOnce() {
+    function currentSettings(track) {
+      return typeof track.getSettings === "function" ? track.getSettings() : {};
+    }
+
+    /** Applies a track constraint that is a request, not a requirement: a
+     *  refusal is logged, never surfaced, since the session goes on the same. */
+    function request(track, constraint, what) {
+      return track.applyConstraints({ advanced: [constraint] })
+        .catch((error) => console.warn(`The camera wouldn't ${what}:`, error));
+    }
+
+    /** Once the stream is up: a camera that can keep focus by itself but
+     *  is not doing so is asked to. iOS exposes no focus control, and a
+     *  camera already in continuous mode is left alone. */
+    function keepFocusing() {
       const track = videoTrack();
       const modes = capabilities().focusMode || [];
-      if (!track || !modes.includes("single-shot")) return Promise.resolve();
-      const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
-      if (settings.focusMode === "continuous") return Promise.resolve();
-      return track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] })
-        .then(() => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)))
-        .catch((error) => console.warn("The camera wouldn't focus on request:", error));
+      if (!track || !modes.includes("continuous") || currentSettings(track).focusMode === "continuous") return;
+      PromiseUtils.markRejectionHandled(request(track, { focusMode: "continuous" }, "keep focusing"));
+    }
+
+    /** Points the lens at the document ahead of a shot. Where the track
+     *  takes a point of interest, autofocus is aimed at the centre of
+     *  `region` (video pixels; the frame's centre without one) so it works
+     *  on the sheet rather than the desk. A camera that cannot keep focus
+     *  by itself is asked to focus once and given its settling time —
+     *  forcing a fresh sweep on one that can would only blur the frames it
+     *  passes through. Resolves at once when there is no focus control. */
+    function focusOn(region) {
+      const track = videoTrack();
+      if (!track) return Promise.resolve();
+      const { focusMode = [], pointsOfInterest } = capabilities();
+      let asked = Promise.resolve();
+      if (pointsOfInterest) {
+        const { width, height } = currentSettings(track);
+        const centre = region
+          ? { x: (region.x + region.width / 2) / width, y: (region.y + region.height / 2) / height }
+          : { x: 0.5, y: 0.5 };
+        if (width && height) asked = request(track, { pointsOfInterest: [centre] }, "aim its focus");
+      }
+      if (!focusMode.includes("single-shot") || currentSettings(track).focusMode === "continuous") return asked;
+      return asked
+        .then(() => request(track, { focusMode: "single-shot" }, "focus on request"))
+        .then(() => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)));
     }
 
     /** Switches the camera light. Rejects if the device refuses, so the caller
@@ -281,7 +315,9 @@
         PromiseUtils.markRejectionHandled(video.play());
         // A start that fails must not leave the camera running behind the
         // error panel.
-        return whenSized(video).catch((error) => { stop(video); throw error; });
+        return whenSized(video)
+          .then(keepFocusing)
+          .catch((error) => { stop(video); throw error; });
       });
     }
 
@@ -304,7 +340,7 @@
       if (video) video.srcObject = null;
     }
 
-    return { start, stop, supportsTorch, setTorch, focusOnce };
+    return { start, stop, supportsTorch, setTorch, focusOn };
   }
 
   window.CameraStream = {
