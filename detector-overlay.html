@@ -20,7 +20,9 @@
        previewCompare()            the live outline's quad on every scene against the stored reference
        robustness(engine?)         every scene under six global changes vs its own crop (IoU) — the fragility check
        previewRobustness()         the same for the live outline's quad
-       showVariants(pairs, engine?) contact sheet of scene/variant pairs -->
+       showVariants(pairs, engine?) contact sheet of scene/variant pairs
+       showSides(pairs, engine?)   close-ups along one side: [["fail1.jpeg","T"], ...]
+       packSheet(columns?)         the tiles on show as one JPEG data URL -->
 <style>
   body { margin: 0; background: #14161c; color: #eceef2; font: 13px -apple-system, "Segoe UI", sans-serif; }
   header { padding: 8px 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -176,6 +178,11 @@
       if (truth) strokeQuad(ctx, scaleQuad(truth, result.scale), "#22c55e", 2, [2, 4]);
       if (r) strokeQuad(ctx, r.legacy, "#ef4444", 2, [8, 6]);
       strokeQuad(ctx, result.corners, "#3b82f6", 2.5, []);
+      // The refit's located edge points: yellow where a side was refitted, orange where refused.
+      for (const attempt of (r && r.refits) || []) {
+        ctx.fillStyle = attempt.refused ? "rgba(249,115,22,.9)" : "rgba(253,224,71,.9)";
+        for (const point of attempt.located) if (point) ctx.fillRect(point.x - 1.5, point.y - 1.5, 3, 3);
+      }
       return view;
     }
     const debug = result.debug;
@@ -228,8 +235,18 @@
     if (!r) { p.textContent = `${scene.name}: no legacy crop to refine`; return p; }
     p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
       `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
-      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${m.kind === "offset" ? (m.amount > 0 ? "+" : "") + m.amount : m.kind === "line" ? "→line" + m.amount : "∠" + m.amount}`).join(" ")}</span>`;
+      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${describeMove(m)}`).join(" ")}</span><br>` +
+      `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span>`;
     return p;
+  }
+
+  function describeMove(move) {
+    switch (move.kind) {
+      case "offset": return (move.amount > 0 ? "+" : "") + move.amount;
+      case "line": return "→line" + move.amount;
+      case "refit": return `refit-${move.amount}(${Math.round(move.consensus * 100)}%)`;
+      default: return "∠" + move.amount;
+    }
   }
 
   function sideCells(side) {
@@ -459,6 +476,72 @@
       const legacy = legacyQuad(name);
       return legacy && scaleQuad(legacy, scale);
     });
+  };
+
+  /** Close-ups: for each [scene, side letter T/R/B/L], the strip of the
+   *  photo along that side of the `engine` crop (blue) with the legacy crop
+   *  (red dashed) — `band` source px to either side of it. */
+  window.showSides = async function (pairs, engine = "refined", band = 160, tileWidth = 640) {
+    const host = document.getElementById("scene");
+    host.innerHTML = "";
+    host.style.flexWrap = "wrap";
+    for (const [name, letter] of pairs) {
+      const canvas = await canvasFor(name);
+      const result = (window.__scoreResults || {})[name] || await Detect.detectDebug(canvas, { engine });
+      const crop = scaleQuad(result.corners, 1 / result.scale);
+      const type = "TRBL".indexOf(letter);
+      const [a, b] = [[crop.tl, crop.tr], [crop.tr, crop.br], [crop.br, crop.bl], [crop.bl, crop.tl]][type];
+      const box = { x: Math.max(0, Math.min(a.x, b.x) - band), y: Math.max(0, Math.min(a.y, b.y) - band) };
+      box.w = Math.min(canvas.width, Math.max(a.x, b.x) + band) - box.x;
+      box.h = Math.min(canvas.height, Math.max(a.y, b.y) + band) - box.y;
+      const scale = Math.min(tileWidth / box.w, tileWidth / box.h); // fits a tileWidth square
+      const view = document.createElement("canvas");
+      view.className = "photo";
+      view.width = Math.round(box.w * scale); view.height = Math.round(box.h * scale);
+      view.style.height = view.height + "px";
+      const ctx = view.getContext("2d");
+      ctx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, view.width, view.height);
+      const into = (quad) => { const out = {}; for (const k of KEYS) out[k] = { x: (quad[k].x - box.x) * scale, y: (quad[k].y - box.y) * scale }; return out; };
+      const legacy = legacyQuad(name);
+      if (legacy) strokeQuad(ctx, into(legacy), "#ef4444", 2, [8, 6]);
+      strokeQuad(ctx, into(crop), "#3b82f6", 2, []);
+      const attempts = ((result.refinement && result.refinement.refits) || []).filter((a) => a.side === type);
+      const attempt = attempts[attempts.length - 1]; // the last pass's
+      if (attempt) {
+        const colour = attempt.refused ? "rgba(249,115,22,.9)" : "rgba(253,224,71,.9)";
+        const toView = (p) => ({ x: (p.x / result.scale - box.x) * scale, y: (p.y / result.scale - box.y) * scale });
+        ctx.fillStyle = colour;
+        for (const point of attempt.located) {
+          if (point) { const v = toView(point); ctx.fillRect(v.x - 2, v.y - 2, 4, 4); }
+        }
+        if (attempt.line) {
+          const { px, py, dx, dy } = attempt.line, reach = 4000;
+          strokeSegment(ctx, { a: toView({ x: px - dx * reach, y: py - dy * reach }), b: toView({ x: px + dx * reach, y: py + dy * reach }) }, colour, 1);
+        }
+      }
+      ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.fillText(`${name} ${letter}`, 8, 22);
+      host.appendChild(view);
+    }
+  };
+
+  /** The tiles on show, packed into one JPEG data URL `columns` wide — for
+   *  pulling a contact sheet out of the page in one string. */
+  window.packSheet = function (columns = 3, quality = 0.5) {
+    const tiles = [...document.querySelectorAll("#scene canvas")].map((canvas) => ({ canvas, width: canvas.offsetWidth, height: canvas.offsetHeight }));
+    const width = Math.max(...tiles.map((t) => t.width));
+    const rowHeights = [];
+    for (let i = 0; i < tiles.length; i += columns) rowHeights.push(Math.max(...tiles.slice(i, i + columns).map((t) => t.height)));
+    const sheet = document.createElement("canvas");
+    sheet.width = width * columns;
+    sheet.height = rowHeights.reduce((sum, h) => sum + h, 0);
+    const ctx = sheet.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, sheet.width, sheet.height);
+    let y = 0;
+    tiles.forEach((tile, i) => {
+      if (i && i % columns === 0) y += rowHeights[i / columns - 1];
+      ctx.drawImage(tile.canvas, (i % columns) * width, y, tile.width, tile.height);
+    });
+    return sheet.toDataURL("image/jpeg", quality);
   };
 
   window.storeBaseline = async function (engine = "score") {

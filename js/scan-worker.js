@@ -33,6 +33,7 @@ importScripts(...[
   "worker/quad-score.js",
   "worker/line-candidates.js",
   "worker/mask-candidates.js",
+  "worker/side-refit.js",
   "worker/quad-search.js",
   "worker/detector.js",
   "worker/guided-filter.js",

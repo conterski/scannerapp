@@ -157,15 +157,21 @@ const POOL_NAMES = ["top", "right", "bottom", "left"]; // by side type
 /**
  * `quad` refined on the score, or `quad` itself when refinement gains less
  * than SEARCH.acceptGain — a crop that arrived here is a detector's answer,
- * and a marginal preference is not a reason to move it.
- * @returns { quad, refined: bool, scoreBefore, scoreAfter, moves }
+ * and a marginal preference is not a reason to move it. Sides hidden in
+ * part by a fold are first refitted to their visible edge (side-refit.js),
+ * and the descent starts from there.
+ * @returns { quad, refined: bool, scoreBefore, scoreAfter, moves, refits, refitMs }
  */
 function refineGivenQuad(frame, quad, pools) {
   const before = scoreQuad(frame, quad);
   if (before.rejected) return { quad, refined: false, scoreBefore: before.total, scoreAfter: before.total, moves: [] };
-  const result = refineQuad(frame, quad, { inwardOnly: true }, pools);
+  const t0 = performance.now();
+  const refit = refitSides(frame, quad);
+  const refitMs = +(performance.now() - t0).toFixed(1);
+  const result = refineQuad(frame, refit.quad, { inwardOnly: true }, pools);
   const refined = result.score.total - before.total >= SEARCH.acceptGain;
-  return { quad: refined ? result.quad : quad, refined, scoreBefore: before.total, scoreAfter: result.score.total, moves: result.moves };
+  return { quad: refined ? result.quad : quad, refined, scoreBefore: before.total, scoreAfter: result.score.total,
+           moves: refit.moves.concat(result.moves), refits: refit.tried, refitMs };
 }
 
 /**
