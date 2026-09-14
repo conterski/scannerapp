@@ -1,20 +1,17 @@
-/* frame.js — the photo as the detector reads it: blurred gray, Scharr
+/* frame.js — the photo as the score reads it: blurred gray, Scharr
  * gradients, a per-image gradient scale, Lab colour and the background's
  * colour, all copied once into plain typed arrays.
  *
  * Every pixel the scorer reads goes through these arrays and never through a
  * Mat: `ucharPtr` builds a typed-array view per call, and the scorer reads
- * hundreds of thousands of pixels per photo. The Mats are released before
- * the frame is returned, except the two the candidate generators need as
- * Mats — the blurred gray for thresholding and the Canny map for Hough —
- * which live until `release()`.
+ * hundreds of thousands of pixels per photo. Every Mat is released before
+ * the frame is returned.
  *
  * Worker-global, like every worker module.
  */
+"use strict";
 
 const FRAME = Object.freeze({
-  blurKernel: 5,               // px, the gray every probe reads
-
   // The gradient scale M: a high percentile of the Scharr magnitude, in
   // gray-step units (a Scharr response of 16 is a one-level step), sampled on
   // a stride. Clamped, so one violent desk edge cannot squash paper edges to
@@ -26,27 +23,22 @@ const FRAME = Object.freeze({
   scharrStepUnits: 16,
 
   backgroundRing: 0.04,        // of each dimension: the frame's border, mostly desk
-
-  canny: { low: 50, high: 150 },
 });
 
 /**
- * @param img      RGBA cv.Mat
- * @param options  { lab: bool, edges: bool } — Lab and the Canny map cost
- *                 milliseconds the preview cannot spare
- * @returns frame { width, height, shortSide, gray, dx, dy, mag,
- *                  magnitudeScale, lab|null, backgroundLab|null,
- *                  grayMat, canny|null, release() }
+ * @param img  RGBA cv.Mat, the caller's to release
+ * @returns frame { width, height, shortSide, scale, gray, dx, dy, mag,
+ *                  magnitudeScale, lab, backgroundLab, printExtent }
+ *          — scale is shortSide over SCORE.referenceShortSide, the factor
+ *          every px-at-800px constant is multiplied by
  */
-function buildFrame(img, options) {
-  const wantLab = !options || options.lab !== false;
-  const wantEdges = !options || options.edges !== false;
+function buildFrame(img) {
   const { cols: width, rows: height } = img;
-  let gray = null, dxMat = null, dyMat = null, rgb = null, labMat = null, canny = null;
+  let gray = null, dxMat = null, dyMat = null, rgb = null, labMat = null;
   try {
     gray = new cv.Mat();
     cv.cvtColor(img, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(FRAME.blurKernel, FRAME.blurKernel), 0);
+    cv.GaussianBlur(gray, gray, new cv.Size(BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), 0);
     dxMat = new cv.Mat();
     dyMat = new cv.Mat();
     cv.Scharr(gray, dxMat, cv.CV_16S, 1, 0);
@@ -54,39 +46,21 @@ function buildFrame(img, options) {
     const dx = new Int16Array(dxMat.data16S);
     const dy = new Int16Array(dyMat.data16S);
     const mag = magnitudeOf(dx, dy);
+    rgb = new cv.Mat();
+    labMat = new cv.Mat();
+    cv.cvtColor(img, rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(rgb, labMat, cv.COLOR_RGB2Lab);
 
-    let lab = null;
-    if (wantLab) {
-      rgb = new cv.Mat();
-      labMat = new cv.Mat();
-      cv.cvtColor(img, rgb, cv.COLOR_RGBA2RGB);
-      cv.cvtColor(rgb, labMat, cv.COLOR_RGB2Lab);
-      lab = new Uint8Array(labMat.data);
-    }
-    if (wantEdges) {
-      canny = new cv.Mat();
-      cv.Canny(gray, canny, FRAME.canny.low, FRAME.canny.high);
-    }
-
+    const shortSide = Math.min(width, height);
     const frame = {
-      width, height, shortSide: Math.min(width, height),
+      width, height, shortSide, scale: shortSide / SCORE.referenceShortSide,
       gray: new Uint8Array(gray.data), dx, dy, mag,
       magnitudeScale: magnitudeScaleOf(mag),
-      lab, backgroundLab: null,
+      lab: new Uint8Array(labMat.data), backgroundLab: null,
       printExtent: null, // set by the detector once the lines are known
-      img, grayMat: gray, canny, // img is the caller's: read here, released there
-      release() {
-        releaseMats(frame.grayMat, frame.canny);
-        frame.grayMat = null;
-        frame.canny = null;
-      },
     };
-    frame.backgroundLab = lab ? backgroundColourOf(frame) : null;
-    gray = null; // now the frame's to release
+    frame.backgroundLab = backgroundColourOf(frame);
     return frame;
-  } catch (error) {
-    if (canny) canny.delete();
-    throw error;
   } finally {
     releaseMats(gray, dxMat, dyMat, rgb, labMat);
   }
@@ -119,7 +93,7 @@ function magnitudeScaleOf(mag) {
     seen += bins[bin];
     if (seen >= target) { percentile = bin; break; }
   }
-  return Math.min(FRAME.magnitudeScaleMax, Math.max(FRAME.magnitudeScaleMin, percentile));
+  return clamp(percentile, FRAME.magnitudeScaleMin, FRAME.magnitudeScaleMax);
 }
 
 /** The desk: the median Lab of the frame's border ring. Robust to a document
@@ -146,12 +120,8 @@ function backgroundColourOf(frame) {
 }
 
 // ------------------------------------------------------------------
-// Pixel access — integer coordinates, caller keeps them inside
+// Pixel access — integer coordinates, caller keeps them inside (insideBounds)
 // ------------------------------------------------------------------
-
-function insideFrame(frame, x, y) {
-  return x >= 0 && y >= 0 && x < frame.width && y < frame.height;
-}
 
 function pixelIndex(frame, x, y) { return y * frame.width + x; }
 function labIndex(frame, x, y) { return (y * frame.width + x) * 3; }
@@ -159,13 +129,23 @@ function labIndex(frame, x, y) { return (y * frame.width + x) * 3; }
 function frameGrayAt(frame, x, y) { return frame.gray[pixelIndex(frame, x, y)]; }
 function frameMagnitudeAt(frame, x, y) { return frame.mag[pixelIndex(frame, x, y)]; }
 
+/** The gradient's component along `normal`, as a raw Scharr response. */
+function gradientDot(frame, x, y, normal) {
+  const i = pixelIndex(frame, x, y);
+  return Math.abs(frame.dx[i] * normal.nx + frame.dy[i] * normal.ny);
+}
+
 /** The gradient's share running along `normal`: 1 across the side, 0 along
  *  it. A gradient too weak to have a direction counts as none. */
 function gradientAcross(frame, x, y, normal) {
   const i = pixelIndex(frame, x, y);
-  const gx = frame.dx[i], gy = frame.dy[i];
-  const length = Math.hypot(gx, gy);
-  return length < 1 ? 0 : Math.abs(gx * normal.nx + gy * normal.ny) / length;
+  const length = Math.hypot(frame.dx[i], frame.dy[i]);
+  return length < 1 ? 0 : gradientDot(frame, x, y, normal) / length;
+}
+
+/** The gradient's component along `normal`, in the frame's magnitude units. */
+function gradientAlong(frame, x, y, normal) {
+  return gradientDot(frame, x, y, normal) / FRAME.scharrStepUnits;
 }
 
 /** Lab at a pixel, as {l, a, b} on OpenCV's 8-bit scale (a, b offset 128). */
@@ -179,9 +159,8 @@ function frameLabAt(frame, x, y) {
 function profileAcross(frame, point, normal, depths) {
   const values = new Array(depths.length);
   for (let i = 0; i < depths.length; i++) {
-    const x = Math.round(point.x + normal.nx * depths[i]);
-    const y = Math.round(point.y + normal.ny * depths[i]);
-    if (!insideFrame(frame, x, y)) return null;
+    const { x, y } = alongNormal(point, normal, depths[i]);
+    if (!insideBounds(frame, x, y)) return null;
     values[i] = frameGrayAt(frame, x, y);
   }
   return values;

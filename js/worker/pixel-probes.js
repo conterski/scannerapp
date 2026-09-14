@@ -10,6 +10,21 @@
  */
 "use strict";
 
+// The Gaussian blur every gray the detector reads goes through — the legacy
+// pipeline's `prepareGray` and the score's `buildFrame` alike.
+const BLUR_KERNEL_SIZE = 5;
+
+// The sheet's own colour, read inside a quad and used to tell paper from
+// ink, desk and shadow: the legacy sheet-colour mask and the score's palette
+// share these calibrated values.
+const SHEET_COLOUR = Object.freeze({
+  samplesPerAxis: 7,
+  inset: 0.1,              // of the quad, clear of its rules
+  brightestShare: 0.6,     // the brightest share of samples is paper, not ink
+  chromaTolerance: 12,     // Lab a and b, either side of the paper's
+  lightnessAllowance: 70,  // Lab L below the paper's that still counts
+});
+
 // A side shorter than this has too few samples to judge.
 const MIN_PROBE_SIDE_LENGTH = 8;
 
@@ -89,16 +104,6 @@ const DEFAULT_INTERIOR_GRAY = 128;
  * context and the detect pipeline both already have that shape, so they can be
  * handed straight in. */
 
-function isInsideImage(image, x, y) {
-  return x >= 0 && y >= 0 && x < image.width && y < image.height;
-}
-
-/** The point `t` of the way from `a` to `b`. Every probe that walks a side
- *  goes through this, so they all sample the same way. */
-function pointAlong(a, b, t) {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-}
-
 function grayAt(image, x, y) { return image.gray.ucharPtr(y, x)[0]; }
 
 function probeDepthFor(image) {
@@ -112,22 +117,49 @@ function median(sortedValues) {
 
 function ascending(a, b) { return a - b; }
 
+/** The value `share` (0..1) of the way through an ascending array. */
+function percentileOf(sortedValues, share) {
+  return sortedValues[Math.min(sortedValues.length - 1, Math.floor(sortedValues.length * share))];
+}
+
+/** The median Lab colour of `colours` ({l, a, b}), channel by channel. */
+function medianLab(colours) {
+  const channel = (key) => median(colours.map((colour) => colour[key]).sort(ascending));
+  return { l: channel("l"), a: channel("a"), b: channel("b") };
+}
+
+/** The paper's Lab colour inside `quad`: the median of the brightest share
+ *  of a grid of samples, so ink and rulings do not vote. Null when too few
+ *  samples fall inside `bounds`.
+ *  @param labAt (x, y) => { l, a, b } at integer pixel coordinates */
+function paperColourInside(quad, bounds, labAt) {
+  const { samplesPerAxis: n, inset, brightestShare } = SHEET_COLOUR;
+  const samples = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const point = bilinearInQuad(quad, inset + (1 - 2 * inset) * (i + 0.5) / n, inset + (1 - 2 * inset) * (j + 0.5) / n);
+      const x = Math.round(point.x), y = Math.round(point.y);
+      if (insideBounds(bounds, x, y)) samples.push(labAt(x, y));
+    }
+  }
+  if (samples.length < n) return null;
+  samples.sort((p, q) => q.l - p.l);
+  return medianLab(samples.slice(0, Math.max(1, Math.round(samples.length * brightestShare))));
+}
+
 /** Gray difference across the line at one point, or null when either side of
  *  the probe falls outside the image.
  *  @param probe { point, normal, depth } */
 function crossEdgeStep(image, probe) {
   const { point, normal, depth } = probe;
-  const x1 = Math.round(point.x + normal.nx * depth);
-  const y1 = Math.round(point.y + normal.ny * depth);
-  const x2 = Math.round(point.x - normal.nx * depth);
-  const y2 = Math.round(point.y - normal.ny * depth);
-  if (!isInsideImage(image, x1, y1)) return null;
-  if (!isInsideImage(image, x2, y2)) return null;
-  return grayAt(image, x1, y1) - grayAt(image, x2, y2);
+  const outer = alongNormal(point, normal, depth), inner = alongNormal(point, normal, -depth);
+  if (!insideBounds(image, outer.x, outer.y)) return null;
+  if (!insideBounds(image, inner.x, inner.y)) return null;
+  return grayAt(image, outer.x, outer.y) - grayAt(image, inner.x, inner.y);
 }
 
 function unitNormalOf(a, b) {
-  const length = Math.hypot(b.x - a.x, b.y - a.y);
+  const length = segmentLength({ a, b });
   return { length, nx: -(b.y - a.y) / length, ny: (b.x - a.x) / length };
 }
 
@@ -206,11 +238,11 @@ function bandMatchesInside(context, inner, outer) {
       innerPoint.x + (centroid.x - innerPoint.x) / toCentroid * INSIDE_REFERENCE_OFFSET);
     const referenceY = Math.round(
       innerPoint.y + (centroid.y - innerPoint.y) / toCentroid * INSIDE_REFERENCE_OFFSET);
-    const bandX = Math.round((innerPoint.x + outerPoint.x) / 2);
-    const bandY = Math.round((innerPoint.y + outerPoint.y) / 2);
+    const band = midpointOf({ a: innerPoint, b: outerPoint });
+    const bandX = Math.round(band.x), bandY = Math.round(band.y);
 
-    if (!isInsideImage(context, bandX, bandY)) continue;
-    if (!isInsideImage(context, referenceX, referenceY)) continue;
+    if (!insideBounds(context, bandX, bandY)) continue;
+    if (!insideBounds(context, referenceX, referenceY)) continue;
     sampled++;
     if (Math.abs(grayAt(context, bandX, bandY) - grayAt(context, referenceX, referenceY))
         <= BAND_MATCH_TOLERANCE) {
@@ -228,7 +260,7 @@ function interiorGrayReference(image, centroid) {
     for (let dx = -INTERIOR_GRID_RADIUS; dx <= INTERIOR_GRID_RADIUS; dx++) {
       const x = Math.round(centroid.x + dx * INTERIOR_GRID_STEP_FRACTION * image.width);
       const y = Math.round(centroid.y + dy * INTERIOR_GRID_STEP_FRACTION * image.height);
-      if (isInsideImage(image, x, y)) values.push(grayAt(image, x, y));
+      if (insideBounds(image, x, y)) values.push(grayAt(image, x, y));
     }
   }
   if (!values.length) return DEFAULT_INTERIOR_GRAY;
@@ -243,7 +275,7 @@ function majorityAtDepths(image, probe, test) {
   for (const depth of BOUNDARY_PROBE_DEPTHS) {
     const x = Math.round(probe.point.x + probe.direction.x * depth);
     const y = Math.round(probe.point.y + probe.direction.y * depth);
-    if (!isInsideImage(image, x, y)) continue;
+    if (!insideBounds(image, x, y)) continue;
     sampled++;
     if (test(grayAt(image, x, y))) hits++;
   }

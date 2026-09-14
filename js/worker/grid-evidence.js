@@ -106,43 +106,17 @@ const GRID = Object.freeze({
   minStops: 4,
   coverageFloor: 0.4,          // spec: below this the side has no say
   stopSpreadRatio: 0.5,        // agreement: stops within this of the median distance
-  // These sheets curl. Stops that fit a line to within curlResidual are a flat
-  // edge; up to maxResidual they are a curled one — still the sheet's edge,
-  // flagged `curled` for the trace, and the straight fit stands in for it (the
+  // These sheets curl. Stops that fit a line to within maxResidual are one
+  // edge — flat, or curled with the straight fit standing in for it (the
   // spec's four-point contract). Beyond that they are not one edge at all.
-  curlResidual: 0.008,         // of the short side
-  maxResidual: 0.02,
+  maxResidual: 0.02,           // of the short side
   lockConfidence: 0.6,
 });
 
-const DEG = Math.PI / 180;
 
 // ------------------------------------------------------------------
 // Stage 1 — the grid
 // ------------------------------------------------------------------
-
-function segmentLength(segment) {
-  return Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y);
-}
-
-/** Angle of a segment in degrees, folded into (-90, 90]. */
-function segmentAngleDeg(segment) {
-  let angle = Math.atan2(segment.b.y - segment.a.y, segment.b.x - segment.a.x) / DEG;
-  if (angle > 90) angle -= 180;
-  if (angle <= -90) angle += 180;
-  return angle;
-}
-
-/** Vertical angles straddle ±90; folding them to [0, 180) makes them one cluster. */
-function verticalAngleDeg(segment) {
-  const angle = segmentAngleDeg(segment);
-  return angle < 0 ? angle + 180 : angle;
-}
-
-function angleDifferenceDeg(first, second) {
-  const difference = Math.abs(first - second) % 180;
-  return Math.min(difference, 180 - difference);
-}
 
 /** Length-weighted median angle: the dominant ruling direction of a family. */
 function dominantAngle(segments, angleOf) {
@@ -160,14 +134,11 @@ function dominantAngle(segments, angleOf) {
 
 /** Gray read a few px to one side of a segment, median over three positions. */
 function graySideOf(image, segment, sign) {
-  const length = segmentLength(segment) || 1;
-  const nx = -(segment.b.y - segment.a.y) / length * sign * GRID.rulingProbeOffset;
-  const ny = (segment.b.x - segment.a.x) / length * sign * GRID.rulingProbeOffset;
+  const normal = unitNormalOf(segment.a, segment.b);
   const values = [];
   for (const t of [0.25, 0.5, 0.75]) {
-    const point = pointAlong(segment.a, segment.b, t);
-    const x = Math.round(point.x + nx), y = Math.round(point.y + ny);
-    if (isInsideImage(image, x, y)) values.push(grayAt(image, x, y));
+    const { x, y } = alongNormal(pointAlong(segment.a, segment.b, t), normal, sign * GRID.rulingProbeOffset);
+    if (insideBounds(image, x, y)) values.push(grayAt(image, x, y));
   }
   return values.length ? median(values.sort(ascending)) : null;
 }
@@ -195,19 +166,9 @@ function rulingFamily(image, segments, options) {
   return { angle, inliers };
 }
 
-function midpointOf(segment) {
-  return { x: (segment.a.x + segment.b.x) / 2, y: (segment.a.y + segment.b.y) / 2 };
-}
-
 /** A segment along the least-squares line through `points`, spanning them. */
 function segmentThrough(points) {
-  const line = fitLinePts(points);
-  const along = points.map((point) => (point.x - line.px) * line.dx + (point.y - line.py) * line.dy);
-  const first = Math.min(...along), last = Math.max(...along);
-  return {
-    a: { x: line.px + line.dx * first, y: line.py + line.dy * first },
-    b: { x: line.px + line.dx * last, y: line.py + line.dy * last },
-  };
+  return spanAlongLine(fitLinePts(points), points);
 }
 
 /**
@@ -337,12 +298,11 @@ function isSkinAt(image, x, y, paperGray) {
  *  a hand, or a desk in the skin band — not the fringe of red print. */
 function isOccluderAt(image, point, normal, paperGray) {
   if (!isSkinAt(image, point.x, point.y, paperGray)) return false;
-  const run = GRID.occluderRun * Math.min(image.width, image.height);
+  const run = GRID.occluderRun * shortSideOf(image);
   let sampled = 0, skin = 0;
   for (let distance = 0; distance <= run; distance += GRID.marchStep) {
-    const x = Math.round(point.x + normal.nx * distance);
-    const y = Math.round(point.y + normal.ny * distance);
-    if (!isInsideImage(image, x, y)) break;
+    const { x, y } = alongNormal(point, normal, distance);
+    if (!insideBounds(image, x, y)) break;
     sampled++;
     if (isSkinAt(image, x, y, paperGray)) skin++;
   }
@@ -378,13 +338,13 @@ function paperReferenceOutside(image, border, normal, centre) {
   for (const t of SIDE_SAMPLE_FRACTIONS) {
     const point = pointAlong(border.a, border.b, t);
     for (const outset of GRID.referenceOutsets) {
-      const x = Math.round(point.x + normal.nx * outset), y = Math.round(point.y + normal.ny * outset);
-      if (isInsideImage(image, x, y)) samples.push(grayAt(image, x, y));
+      const { x, y } = alongNormal(point, normal, outset);
+      if (insideBounds(image, x, y)) samples.push(grayAt(image, x, y));
     }
   }
   if (samples.length < MIN_MARCH_SAMPLES) return null;
   samples.sort(ascending);
-  const margin = samples[Math.min(samples.length - 1, Math.floor(samples.length * GRID.referencePercentile))];
+  const margin = percentileOf(samples, GRID.referencePercentile);
   const interior = interiorGrayReference(image, centre);
   return margin < GRID.referenceMinShareOfInterior * interior ? interior : margin;
 }
@@ -395,9 +355,8 @@ function paperReferenceOutside(image, border, normal, centre) {
 function outwardProfile(image, point, normal, depth, exclusions, reference) {
   const values = [];
   for (let distance = 0; distance <= depth; distance += GRID.marchStep) {
-    const x = Math.round(point.x + normal.nx * distance);
-    const y = Math.round(point.y + normal.ny * distance);
-    if (!isInsideImage(image, x, y)) return { values, cutBy: null };
+    const { x, y } = alongNormal(point, normal, distance);
+    if (!insideBounds(image, x, y)) return { values, cutBy: null };
     const excluded = exclusions.isExcluded({ x, y }, normal, reference);
     if (excluded) return { values, cutBy: excluded, at: distance };
     values.push(grayAt(image, x, y));
@@ -493,14 +452,11 @@ function outermostStopOnProfile(values, reference, shortSide) {
  *          decides.
  */
 function sheetEdgeForBorder(image, border, centre, exclusions) {
-  const shortSide = Math.min(image.width, image.height);
+  const shortSide = shortSideOf(image);
   const normal = outwardNormalFrom(border, centre);
   const reference = paperReferenceOutside(image, border, normal, centre);
-  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null, curled: false,
-                     uniformity: null, reference, excluded: 0, exclusions: { skin: 0, foreign: 0 },
-                     distance: null, border, normal,
-                     profiles: [],   // one per sample, for the overlay page
-                     signals: { shadow: 0, step: 0, prior: 0 } };
+  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null,
+                     uniformity: null, reference, normal, signals: { shadow: 0, step: 0, prior: 0 } };
   if (reference === null) return evidence;
 
   const depth = GRID.searchDepth * shortSide;
@@ -512,15 +468,9 @@ function sheetEdgeForBorder(image, border, centre, exclusions) {
     // A hand or another paper across the march before it reached a usable
     // depth: this sample has no say. Cut later than that, the values it did
     // read are still evidence.
-    if (profile.cutBy && profile.at < usableDepth) {
-      evidence.excluded++;
-      evidence.exclusions[profile.cutBy]++;
-      continue;
-    }
+    if (profile.cutBy && profile.at < usableDepth) continue;
     usable++;
     const stop = outermostStopOnProfile(profile.values, reference, shortSide);
-    evidence.profiles.push({ t, point, values: profile.values, cutBy: profile.cutBy,
-                             stop: stop ? stop.distance : null });
     if (stop) {
       evidence.stops.push(Object.assign({
         x: point.x + normal.nx * stop.distance,
@@ -542,16 +492,13 @@ function finishSideEvidence(image, evidence, border, shortSide, exclusions, refe
   if (evidence.stops.length < GRID.minStops) return evidence;
   const distances = evidence.stops.map((stop) => stop.distance).sort(ascending);
   const medianDistance = median(distances);
-  evidence.distance = medianDistance / shortSide;
   const spread = Math.max(GRID.marchStep * 2, GRID.stopSpreadRatio * medianDistance);
   const agreeing = evidence.stops.filter((stop) => Math.abs(stop.distance - medianDistance) <= spread);
   evidence.agreement = agreeing.length / evidence.stops.length;
   if (agreeing.length < GRID.minStops) return evidence;
 
   const line = fitLinePts(agreeing);
-  evidence.residual = Math.max(...agreeing.map((stop) =>
-    Math.abs((stop.x - line.px) * line.dy - (stop.y - line.py) * line.dx))) / shortSide;
-  evidence.curled = evidence.residual > GRID.curlResidual;
+  evidence.residual = Math.max(...agreeing.map((stop) => distanceToLine(stop, line))) / shortSide;
   for (const key of Object.keys(evidence.signals)) {
     evidence.signals[key] = agreeing.reduce((sum, stop) => sum + stop[key], 0) / agreeing.length;
   }
@@ -562,20 +509,9 @@ function finishSideEvidence(image, evidence, border, shortSide, exclusions, refe
     b: { x: line.px + line.dx * half, y: line.py + line.dy * half },
   };
   if (checkUniformity) {
-    evidence.uniformity = shadowUniformity(image, spanOfStops(line, agreeing), evidence.normal, reference, exclusions);
+    evidence.uniformity = shadowUniformity(image, spanAlongLine(line, agreeing), evidence.normal, reference, exclusions);
   }
   return evidence;
-}
-
-/** The stretch of the fitted line the agreeing stops actually cover. Beyond
- *  it the line is extrapolation, and a thin shadow is not owed there. */
-function spanOfStops(line, stops) {
-  const along = stops.map((stop) => (stop.x - line.px) * line.dx + (stop.y - line.py) * line.dy);
-  const first = Math.min(...along), last = Math.max(...along);
-  return {
-    a: { x: line.px + line.dx * first, y: line.py + line.dy * first },
-    b: { x: line.px + line.dx * last, y: line.py + line.dy * last },
-  };
 }
 
 /** How many pixels across the line are dark at `point`, read through a
@@ -583,8 +519,8 @@ function spanOfStops(line, stops) {
 function darkRunAcross(image, point, normal, reference) {
   let run = 0;
   for (let offset = -GRID.uniformityWindow; offset <= GRID.uniformityWindow; offset += GRID.marchStep) {
-    const x = Math.round(point.x + normal.nx * offset), y = Math.round(point.y + normal.ny * offset);
-    if (!isInsideImage(image, x, y)) continue;
+    const { x, y } = alongNormal(point, normal, offset);
+    if (!insideBounds(image, x, y)) continue;
     if (reference - grayAt(image, x, y) >= GRID.shadowRunMinDip) run += GRID.marchStep;
   }
   return run;
@@ -601,7 +537,7 @@ function shadowUniformity(image, span, normal, reference, exclusions) {
   for (let i = 0; i < GRID.uniformitySamples; i++) {
     const point = pointAlong(span.a, span.b, (i + 0.5) / GRID.uniformitySamples);
     const x = Math.round(point.x), y = Math.round(point.y);
-    if (!isInsideImage(image, x, y) || exclusions.isExcluded({ x, y }, normal, reference)) continue;
+    if (!insideBounds(image, x, y) || exclusions.isExcluded({ x, y }, normal, reference)) continue;
     usable++;
     const run = darkRunAcross(image, point, normal, reference);
     if (run > 0 && run <= GRID.maxShadowRunWidth) thinAndDark++;
@@ -645,16 +581,14 @@ function maskAt(mask, x, y) { return mask.ucharPtr(y, x)[0] !== 0; }
  * printed sheet lies over the edge, and that sample has no verdict.
  */
 function colourEndAlong(image, mask, point, normal, depth, isNearForeign) {
-  const gapEnd = GRID.colourGapEnd * Math.min(image.width, image.height);
-  const profile = { values: [], cutBy: null, end: null }; // values: 255 on the sheet's colour
+  const gapEnd = GRID.colourGapEnd * shortSideOf(image);
+  const profile = { cutBy: null, end: null };
   let lastInside = -1, gap = 0;
   for (let distance = 0; distance <= depth; distance += GRID.marchStep) {
-    const x = Math.round(point.x + normal.nx * distance);
-    const y = Math.round(point.y + normal.ny * distance);
-    if (!isInsideImage(image, x, y)) break;
+    const { x, y } = alongNormal(point, normal, distance);
+    if (!insideBounds(image, x, y)) break;
     if (isNearForeign({ x, y })) { profile.cutBy = "foreign"; return profile; }
     const onSheet = maskAt(mask, x, y);
-    profile.values.push(onSheet ? 255 : 0);
     if (onSheet) { lastInside = distance; gap = 0; }
     else if ((gap += GRID.marchStep) >= gapEnd) { profile.end = lastInside; return profile; }
   }
@@ -666,15 +600,13 @@ function colourEndAlong(image, mask, point, normal, depth, isNearForeign) {
  * evidence as the shadow search, so the same scorer reads it.
  */
 function sheetEdgeFromColour(image, mask, border, centre, exclusions, reference) {
-  const shortSide = Math.min(image.width, image.height);
+  const shortSide = shortSideOf(image);
   const normal = outwardNormalFrom(border, centre);
   // A colour boundary is a plain fact, not a scored dip: every stop carries
   // the full shadow signal and no step, which caps the confidence at the
   // shadow weight — a colour lock is never surer than a good shadow lock.
-  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null, curled: false,
-                     uniformity: 1, reference, excluded: 0, exclusions: { skin: 0, foreign: 0 },
-                     distance: null, border, normal, profiles: [],
-                     signals: { shadow: 1, step: 0, prior: 1 } };
+  const evidence = { side: null, stops: [], coverage: 0, agreement: null, residual: null,
+                     uniformity: 1, reference, normal, signals: { shadow: 1, step: 0, prior: 1 } };
   // The march runs on past the search depth by one gap, so an end found at
   // the depth can still be confirmed as final.
   const maxDepth = GRID.searchDepth * shortSide;
@@ -685,12 +617,7 @@ function sheetEdgeFromColour(image, mask, border, centre, exclusions, reference)
     const point = pointAlong(border.a, border.b, t);
     const profile = colourEndAlong(image, mask, point, normal, depth, exclusions.isNearForeign);
     const end = profile.end;
-    evidence.profiles.push({ t, point, values: profile.values, cutBy: profile.cutBy, stop: end });
-    if (profile.cutBy) {
-      evidence.excluded++;
-      evidence.exclusions[profile.cutBy]++;
-      continue;
-    }
+    if (profile.cutBy) continue;
     usable++;
     if (end === null || end < minDepth || end > maxDepth) continue;
     const distance = end + GRID.marchStep; // the first pixel past the colour
@@ -710,14 +637,13 @@ function sheetEdgeFromColour(image, mask, border, centre, exclusions, reference)
  * @param image   { gray, img, width, height }
  * @param grid    from findPrintedGrid
  * @param mask    CV_8UC1 sheet-colour mask, or null
- * @returns [{ type, side, confidence, evidence, source, other }] for each
- *          side that has a printed border, whether or not it reaches
- *          lockConfidence — the caller decides what to lock; the trace wants
- *          all of them. `other` is the kind of evidence that lost, or null.
+ * @returns [{ type, side, confidence }] for each side that has a printed
+ *          border, whether or not it reaches lockConfidence — the caller
+ *          decides what to lock.
  */
 function gridSideEvidence(image, grid, mask) {
   const centre = gridCentre(grid.frame);
-  const radius = GRID.foreignRulingRadius * Math.min(image.width, image.height);
+  const radius = GRID.foreignRulingRadius * shortSideOf(image);
   const isNearForeign = (point) => isNearForeignRuling(point, grid.foreign, radius);
   const exclusions = {
     isNearForeign,
@@ -734,13 +660,11 @@ function gridSideEvidence(image, grid, mask) {
   grid.frame.forEach((border, type) => {
     if (!border) return;
     const shadow = sheetEdgeForBorder(image, border, centre, exclusions);
-    let best = { type, side: shadow.side, confidence: scoreSideEvidence(shadow), evidence: shadow, source: "shadow", other: null };
+    let best = { type, side: shadow.side, confidence: scoreSideEvidence(shadow) };
     if (mask && best.confidence < GRID.lockConfidence) {
       const colour = sheetEdgeFromColour(image, mask, border, centre, exclusions, shadow.reference);
       const confidence = scoreSideEvidence(colour);
-      const asColour = { type, side: colour.side, confidence, evidence: colour, source: "colour" };
-      if (confidence > best.confidence) best = { ...asColour, other: best };
-      else best.other = asColour;
+      if (confidence > best.confidence) best = { type, side: colour.side, confidence };
     }
     results.push(best);
   });

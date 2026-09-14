@@ -15,18 +15,84 @@
 
 const SIDE_COUNT = 4;
 const SIDE_TOP = 0, SIDE_RIGHT = 1, SIDE_BOTTOM = 2, SIDE_LEFT = 3;
+const DEG = Math.PI / 180;
 
 /** Sign per side that turns a midpoint coordinate into "how far out" it sits,
  *  so the four sides can be compared on one scale. */
 const OUTWARD_SIGN = [-1, 1, 1, -1];
 
-
-// A quad this far outside the frame came from a bad line fit, not a document.
+// A quad this far outside the frame (a share of each dimension) came from a
+// bad line fit, not a document.
 const OUT_OF_FRAME_TOLERANCE = 0.15;
 
 // Sliver and near-degenerate quads are never documents.
 const MIN_INTERNAL_ANGLE_DEG = 30;
 const MAX_INTERNAL_ANGLE_DEG = 150;
+
+// ------------------------------------------------------------------
+// Scalars, points, segments and bounds
+// ------------------------------------------------------------------
+
+function clamp(value, low, high) { return Math.min(high, Math.max(low, value)); }
+
+function shortSideOf(bounds) { return Math.min(bounds.width, bounds.height); }
+
+function insideBounds(bounds, x, y) {
+  return x >= 0 && y >= 0 && x < bounds.width && y < bounds.height;
+}
+
+/** Whether any of `points` lies further outside `bounds` than `tolerance`
+ *  (a share of each dimension) allows. */
+function outOfBounds(points, bounds, tolerance) {
+  const { width, height } = bounds;
+  return points.some((p) =>
+    p.x < -tolerance * width || p.x > (1 + tolerance) * width ||
+    p.y < -tolerance * height || p.y > (1 + tolerance) * height);
+}
+
+/** The point `t` of the way from `a` to `b`. Every probe that walks a side
+ *  goes through this, so they all sample the same way. */
+function pointAlong(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+/** The pixel `depth` px from `point` along `normal`, rounded. */
+function alongNormal(point, normal, depth) {
+  return { x: Math.round(point.x + normal.nx * depth), y: Math.round(point.y + normal.ny * depth) };
+}
+
+/** The point at `u`, `v` (0..1 each) of a quad, bilinear in its corners. */
+function bilinearInQuad({ tl, tr, br, bl }, u, v) {
+  return pointAlong(pointAlong(tl, tr, u), pointAlong(bl, br, u), v);
+}
+
+function midpointOf(segment) {
+  return { x: (segment.a.x + segment.b.x) / 2, y: (segment.a.y + segment.b.y) / 2 };
+}
+
+function segmentLength(segment) {
+  return Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y);
+}
+
+/** Angle of a segment in degrees, folded into (-90, 90]. */
+function segmentAngleDeg(segment) {
+  let angle = Math.atan2(segment.b.y - segment.a.y, segment.b.x - segment.a.x) / DEG;
+  if (angle > 90) angle -= 180;
+  if (angle <= -90) angle += 180;
+  return angle;
+}
+
+/** Vertical angles straddle ±90; folding them to [0, 180) makes them one cluster. */
+function verticalAngleDeg(segment) {
+  const angle = segmentAngleDeg(segment);
+  return angle < 0 ? angle + 180 : angle;
+}
+
+/** Smallest angle between two folded angles, 0..90. */
+function angleDifferenceDeg(first, second) {
+  const difference = Math.abs(first - second) % 180;
+  return Math.min(difference, 180 - difference);
+}
 
 // ------------------------------------------------------------------
 // Areas and corner ordering
@@ -77,7 +143,7 @@ function internalAngles(quad) {
     const dot = toPrevious.x * toNext.x + toPrevious.y * toNext.y;
     const magnitude = Math.hypot(toPrevious.x, toPrevious.y) * Math.hypot(toNext.x, toNext.y);
     angles.push(magnitude > 0
-      ? (Math.acos(Math.max(-1, Math.min(1, dot / magnitude))) * 180) / Math.PI
+      ? Math.acos(clamp(dot / magnitude, -1, 1)) / DEG
       : 0);
   }
   return angles;
@@ -88,14 +154,16 @@ function hasDegenerateAngle(quad) {
     (angle) => angle < MIN_INTERNAL_ANGLE_DEG || angle > MAX_INTERNAL_ANGLE_DEG);
 }
 
-function bboxOf(quad) {
-  const xs = quadPoints(quad).map((point) => point.x);
-  const ys = quadPoints(quad).map((point) => point.y);
-  return {
-    x0: Math.min(...xs), y0: Math.min(...ys),
-    x1: Math.max(...xs), y1: Math.max(...ys),
-  };
+function boundingBoxOfPoints(points) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const point of points) {
+    x0 = Math.min(x0, point.x); y0 = Math.min(y0, point.y);
+    x1 = Math.max(x1, point.x); y1 = Math.max(y1, point.y);
+  }
+  return { x0, y0, x1, y1 };
 }
+
+function bboxOf(quad) { return boundingBoxOfPoints(quadPoints(quad)); }
 
 function bboxIoU(a, b) {
   const overlapX = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
@@ -130,6 +198,27 @@ function sideOf(quad, type) {
   }
 }
 
+/** The side lines of a quad, indexed by side type. */
+function sideLinesOf(quad) {
+  const lines = [];
+  for (let type = 0; type < SIDE_COUNT; type++) {
+    const side = sideOf(quad, type);
+    lines.push(lineThrough(side.a, side.b));
+  }
+  return lines;
+}
+
+/** How far from a rectangle a quad's sides are: `opposite` is the larger
+ *  of the two opposite-side length ratios (top to bottom, left to right),
+ *  `aspect` the mean horizontal side over the mean vertical one — each the
+ *  longer over the shorter, so both are >= 1. */
+function sideRatios(quad) {
+  const length = (type) => segmentLength(sideOf(quad, type));
+  const ratio = (first, second) => Math.max(first, second) / Math.max(1e-6, Math.min(first, second));
+  const top = length(SIDE_TOP), bottom = length(SIDE_BOTTOM), left = length(SIDE_LEFT), right = length(SIDE_RIGHT);
+  return { opposite: Math.max(ratio(top, bottom), ratio(left, right)), aspect: ratio((top + bottom) / 2, (left + right) / 2) };
+}
+
 /** How far out this side sits, on the one scale all four sides share.
  *  Horizontal sides are measured by their mid-y, vertical ones by mid-x. */
 function sideOutwardness(side, type) {
@@ -145,12 +234,11 @@ function quadSideOutwardness(quad, type) {
  *  from a centroid they were handed rather than from a quad, so the flip lives
  *  here and outwardNormal is the quad-shaped wrapper around it. */
 function outwardNormalFrom(side, center) {
-  const length = Math.hypot(side.b.x - side.a.x, side.b.y - side.a.y) || 1;
+  const length = segmentLength(side) || 1;
   let nx = -(side.b.y - side.a.y) / length;
   let ny = (side.b.x - side.a.x) / length;
-  const midX = (side.a.x + side.b.x) / 2;
-  const midY = (side.a.y + side.b.y) / 2;
-  if (nx * (center.x - midX) + ny * (center.y - midY) > 0) { nx = -nx; ny = -ny; }
+  const mid = midpointOf(side);
+  if (nx * (center.x - mid.x) + ny * (center.y - mid.y) > 0) { nx = -nx; ny = -ny; }
   return { nx, ny };
 }
 
@@ -159,19 +247,46 @@ function outwardNormal(quad, side) {
   return outwardNormalFrom(side, centroidOf(quad));
 }
 
+/* A "line" is infinite: { px, py, dx, dy }, a point on it and its unit
+ * direction. A "segment" or "side" is { a, b }. */
+
 function lineThrough(a, b) {
   const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
   return { px: a.x, py: a.y, dx: (b.x - a.x) / length, dy: (b.y - a.y) / length };
 }
 
+/** `line` moved by `distance` along `normal`. */
+function shiftedLine(line, normal, distance) {
+  return { px: line.px + normal.nx * distance, py: line.py + normal.ny * distance, dx: line.dx, dy: line.dy };
+}
+
 /** The line a side lies on, shifted `distance` px along its outward normal. */
 function offsetSideLine(side, normal, distance) {
-  const length = Math.hypot(side.b.x - side.a.x, side.b.y - side.a.y) || 1;
+  return shiftedLine(lineThrough(side.a, side.b), normal, distance);
+}
+
+/** Perpendicular distance from a point to a line. */
+function distanceToLine(point, line) {
+  return Math.abs((point.x - line.px) * line.dy - (point.y - line.py) * line.dx);
+}
+
+/** Where `point` projects onto `line`, as a distance along it from (px, py). */
+function projectionAlong(point, line) {
+  return (point.x - line.px) * line.dx + (point.y - line.py) * line.dy;
+}
+
+/** The stretch of `line` that `points` cover: a segment between the
+ *  projections of the outermost of them. */
+function spanAlongLine(line, points) {
+  let first = Infinity, last = -Infinity;
+  for (const point of points) {
+    const along = projectionAlong(point, line);
+    first = Math.min(first, along);
+    last = Math.max(last, along);
+  }
   return {
-    px: side.a.x + normal.nx * distance,
-    py: side.a.y + normal.ny * distance,
-    dx: (side.b.x - side.a.x) / length,
-    dy: (side.b.y - side.a.y) / length,
+    a: { x: line.px + line.dx * first, y: line.py + line.dy * first },
+    b: { x: line.px + line.dx * last, y: line.py + line.dy * last },
   };
 }
 
@@ -204,28 +319,31 @@ function fitLinePts(points) {
   return { px: meanX, py: meanY, dx: Math.cos(theta), dy: Math.sin(theta) };
 }
 
-function validQuadOrNull(points, bounds) {
-  const { width, height } = bounds;
+/** The four corners four side lines (indexed by side type) meet at, in
+ *  corner order tl, tr, br, bl; null where neighbouring lines are parallel. */
+function cornersOfSideLines(lines) {
+  return [
+    lineIntersect(lines[SIDE_LEFT], lines[SIDE_TOP]),
+    lineIntersect(lines[SIDE_TOP], lines[SIDE_RIGHT]),
+    lineIntersect(lines[SIDE_RIGHT], lines[SIDE_BOTTOM]),
+    lineIntersect(lines[SIDE_BOTTOM], lines[SIDE_LEFT]),
+  ];
+}
+
+function validQuadOrNull(points, bounds, tolerance = OUT_OF_FRAME_TOLERANCE) {
   if (points.some((p) => !p || !isFinite(p.x) || !isFinite(p.y))) return null;
-  if (points.some((p) =>
-    p.x < -OUT_OF_FRAME_TOLERANCE * width || p.x > (1 + OUT_OF_FRAME_TOLERANCE) * width ||
-    p.y < -OUT_OF_FRAME_TOLERANCE * height || p.y > (1 + OUT_OF_FRAME_TOLERANCE) * height)) {
-    return null;
-  }
+  if (outOfBounds(points, bounds, tolerance)) return null;
   const quad = orderCorners(points);
   if (!quad) return null;
   return hasDegenerateAngle(quad) ? null : quad;
 }
 
 /** Intersects four side lines (indexed by side type) back into a quad.
- *  Every side-moving pass in the detector ends this way. */
-function quadFromSideLines(lines, bounds) {
-  return validQuadOrNull([
-    lineIntersect(lines[SIDE_LEFT], lines[SIDE_TOP]),
-    lineIntersect(lines[SIDE_TOP], lines[SIDE_RIGHT]),
-    lineIntersect(lines[SIDE_RIGHT], lines[SIDE_BOTTOM]),
-    lineIntersect(lines[SIDE_BOTTOM], lines[SIDE_LEFT]),
-  ], bounds);
+ *  Every side-moving pass in the detector ends this way.
+ *  @param tolerance how far outside `bounds` a corner may land; the default
+ *                   is OUT_OF_FRAME_TOLERANCE */
+function quadFromSideLines(lines, bounds, tolerance) {
+  return validQuadOrNull(cornersOfSideLines(lines), bounds, tolerance);
 }
 
 // ------------------------------------------------------------------
@@ -278,7 +396,7 @@ function fracOutsideQuad(polygon, quad) {
   const total = polygonArea(polygon);
   if (total <= 0) return 1;
   const inside = polygonArea(clipPolyToQuad(polygon, quad));
-  return Math.min(1, Math.max(0, 1 - inside / total));
+  return clamp(1 - inside / total, 0, 1);
 }
 
 /** Fraction of `polygon`'s area cut off by ONE side of `quad`. */
@@ -287,7 +405,7 @@ function fracCutBySide(polygon, quad, type) {
   if (total <= 0) return 0;
   const side = sideOf(quad, type);
   const kept = clipPolygonToHalfPlane(polygon, side, centroidOf(quad));
-  return Math.min(1, Math.max(0, 1 - polygonArea(kept) / total));
+  return clamp(1 - polygonArea(kept) / total, 0, 1);
 }
 
 /** True if `point` is inside convex `quad` (centroid-sign test). */

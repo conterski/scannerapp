@@ -101,45 +101,6 @@ const PAPER_HISTOGRAM_BINS = 1024;
 // tanh has flattened by three times the soft limit, so this covers it.
 const DETAIL_RANGE = 0.35;
 
-// tanh is the one transcendental in the pipeline and it runs per pixel:
-// Math.tanh costs 29ms per 2 MP against 6ms for an interpolated table, which
-// tracks it to 8.4e-7 — far below a level of output.
-const TANH_TABLE_LIMIT = 6;
-const TANH_TABLE_BINS = 4096;
-
-function clamp01(value) {
-  return value < 0 ? 0 : value > 1 ? 1 : value;
-}
-
-// ------------------------------------------------------------------
-// tanh table
-// ------------------------------------------------------------------
-
-let tanhTable = null;
-
-function softClipTable() {
-  if (!tanhTable) {
-    const values = new Float32Array(TANH_TABLE_BINS + 1);
-    for (let bin = 0; bin <= TANH_TABLE_BINS; bin++) {
-      values[bin] = Math.tanh(-TANH_TABLE_LIMIT +
-        (2 * TANH_TABLE_LIMIT * bin) / TANH_TABLE_BINS);
-    }
-    tanhTable = { values, scale: TANH_TABLE_BINS / (2 * TANH_TABLE_LIMIT) };
-  }
-  return tanhTable;
-}
-
-/** tanh(value), read from the table with linear interpolation. */
-function softClip(table, value) {
-  if (value <= -TANH_TABLE_LIMIT) return -1;
-  if (value >= TANH_TABLE_LIMIT) return 1;
-  const position = (value + TANH_TABLE_LIMIT) * table.scale;
-  const bin = position | 0;
-  const fraction = position - bin;
-  const low = table.values[bin];
-  return low + (table.values[bin + 1] - low) * fraction;
-}
-
 // ------------------------------------------------------------------
 // Stages
 // ------------------------------------------------------------------
@@ -282,15 +243,6 @@ function suppressTexture(reflectance, scratch, smoothed) {
   cv.addWeighted(reflectance, 1 - strength, smoothed, strength, 0, reflectance);
 }
 
-/**
- * Edge-aware detail boost restricted to ink. The ink weight is 1 on a stroke,
- * 0 on clean paper and smooth between; the detail is soft-clipped before it is
- * amplified, which is what prevents an overshoot rim along an edge.
- *
- * Fused into one pass: the mask is only ever read once, immediately, so
- * building it as a separate image would cost a full-size allocation and
- * another traversal for nothing.
- */
 /** The soft clip as a 256-entry table over the detail's own range.
  *
  *  tanh saturates well before the edges of this range, so anything beyond it
@@ -327,7 +279,7 @@ function sharpenInk(reflectance, scratch, base) {
   const { whitePoint, inkReference, detailSoftLimit: limit, detailGain } = DOC_PARAMS;
   const inkSpan = Math.max(whitePoint - inkReference, 1e-6);
 
-  // detail = softClip(reflectance - base), through the table.
+  // detail = tanh-clipped (reflectance - base), through the table.
   cv.subtract(reflectance, base, scratch.tmp);
   scratch.tmp.convertTo(scratch.quantised, cv.CV_8U,
     TONE_TABLE_MAX / (2 * DETAIL_RANGE), TONE_TABLE_MAX / 2);
@@ -344,11 +296,6 @@ function sharpenInk(reflectance, scratch, base) {
   cv.add(base, scratch.tmp, reflectance);
 }
 
-/**
- * Takes the edge off colour noise while keeping the paper's own cast and every
- * ink hue. Both channels are guided by the same reflectance, so its moments
- * are computed once and shared.
- */
 /**
  * Takes the edge off colour noise while keeping the paper's own cast and every
  * ink hue. Both channels are guided by the same reflectance, so its moments
@@ -403,21 +350,16 @@ function clampSymmetric(channel, limit, scratch) {
   scratch.convertTo(channel, -1, -1, 0);
 }
 
-/**
- * Gentle levels with a partial smoothstep, landing inside a safe output range
- * so neither end clips, then blended back toward the input. Writes the result
- * straight into the luma channel as Lab L.
- */
 /** The tone curve at one reflectance value, in 0..1. */
 function toneAt(value) {
   const { blackPoint, whitePoint, contrastShape, outputBlack, outputWhite,
     toneStrength } = DOC_PARAMS;
   const span = Math.max(whitePoint - blackPoint, 1e-6);
-  const linear = clamp01((value - blackPoint) / span);
+  const linear = clamp((value - blackPoint) / span, 0, 1);
   const shaped = linear * linear * (3 - 2 * linear);
   const curved = linear + (shaped - linear) * contrastShape;
   const graded = outputBlack + curved * (outputWhite - outputBlack);
-  return clamp01(value + (graded - value) * toneStrength);
+  return clamp(value + (graded - value) * toneStrength, 0, 1);
 }
 
 // Reflectance is paper-relative, so it runs from 0 to a little over 1; this
@@ -430,7 +372,7 @@ const TONE_TABLE_MAX = TONE_TABLE_ENTRIES - 1;
 let toneTable = null;
 
 /** The curve as a 256-entry table. It depends only on the parameters, so it
- *  is built once, like the soft-clip table above. */
+ *  is built once, like the detail table above. */
 function toneLookupTable() {
   if (!toneTable) {
     const entries = new Uint8Array(TONE_TABLE_ENTRIES);
@@ -445,7 +387,8 @@ function toneLookupTable() {
 
 /**
  * Gentle levels with a partial smoothstep, landing inside a safe output range
- * so neither end clips, then blended back toward the input.
+ * so neither end clips, then blended back toward the input. Writes the
+ * result straight into the luma channel as Lab L.
  *
  * Applied as a table rather than per pixel: it is pointwise, and quantising
  * the input to 256 steps costs 0.42 levels of a result that is written to an
@@ -480,10 +423,6 @@ function releaseScratch(scratch) {
   scratch[QUANTISED_SCRATCH].delete();
 }
 
-/**
- * Returns a new RGBA Mat holding the enhanced scan. The caller owns it and
- * must delete it; `rgba` is left untouched.
- */
 /**
  * Splits the photo into Lab planes, as float, ready to grade.
  *

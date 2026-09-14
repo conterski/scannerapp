@@ -141,12 +141,10 @@ function walkOutward(pick, options, context) {
 
 /** Hough segments aligned to a direction, gated by contrast and the
  *  continues-beyond veto. */
-function houghSideOptions(type, referenceDirection, context) {
+function houghSideOptions(type, referenceAngle, context) {
   const options = [];
-  const tolerance = (HOUGH_ANGLE_TOLERANCE_DEG * Math.PI) / 180;
   for (const segment of context.getSegments()) {
-    const segmentDirection = Math.atan2(segment.b.y - segment.a.y, segment.b.x - segment.a.x);
-    if (angleBetweenDirections(segmentDirection, referenceDirection) > tolerance) continue;
+    if (angleDifferenceDeg(segmentAngleDeg(segment), referenceAngle) > HOUGH_ANGLE_TOLERANCE_DEG) continue;
     const contrast = sideContrast(context, segment.a, segment.b);
     if (contrast < HOUGH_MIN_CONTRAST) continue;
     if (lineContinuesBeyond(context, segment.a, segment.b)) continue;
@@ -170,7 +168,7 @@ function contrastGateFor(options) {
  */
 function eligibleSideOptions(options, bestOption, context) {
   const tolerance = Math.max(MIN_INWARD_TOLERANCE,
-    INWARD_TOLERANCE_FRACTION * Math.min(context.width, context.height));
+    INWARD_TOLERANCE_FRACTION * shortSideOf(context));
   const gate = contrastGateFor(options);
   return options
     .filter((option) => option.contrast >= gate && !option.continues &&
@@ -254,19 +252,17 @@ function fallbackSideChoice(options, bestOption, context) {
 function extendWithHoughSegments(pick, type, context) {
   // Contrast first: this is what lets the Hough transform stay unevaluated for
   // the many sides that already sit on a strong edge.
-  if (pick.contrast >= HOUGH_APPLIES_BELOW_CONTRAST) return { pick, houghExt: false };
-  const segments = context.getSegments ? context.getSegments() : [];
-  if (!segments.length) return { pick, houghExt: false };
+  if (pick.contrast >= HOUGH_APPLIES_BELOW_CONTRAST) return pick;
+  const segments = context.getSegments();
+  if (!segments.length) return pick;
 
-  const reference = Math.atan2(pick.side.b.y - pick.side.a.y, pick.side.b.x - pick.side.a.x);
-  const maxReach = HOUGH_MAX_REACH_FRACTION * Math.min(context.width, context.height);
-  const extras = houghSideOptions(type, reference, context)
+  const maxReach = HOUGH_MAX_REACH_FRACTION * shortSideOf(context);
+  const extras = houghSideOptions(type, segmentAngleDeg(pick.side), context)
     .filter((option) => option.outward > pick.outward &&
       option.outward - pick.outward <= maxReach)
     .sort((a, b) => a.outward - b.outward);
 
-  const extended = walkOutward(pick, extras, context);
-  return { pick: extended, houghExt: extended !== pick };
+  return walkOutward(pick, extras, context);
 }
 
 /** Shadow boundaries and desk edges continue past the document corners; real
@@ -286,56 +282,19 @@ function startingSideChoice(options, bestOption, context) {
   return fallbackSideChoice(options, bestOption, context);
 }
 
-/** What the trace needs to explain why this side won. */
-function annotateChoice(pick, details) {
-  pick.rule = details.rule;
-  pick.bestOutward = details.bestOption.outward;
-  pick.vetoedBest = !!details.bestOption.continues;
-  pick.walkFrom = details.walkFrom;
-  pick.houghExt = details.houghExt;
-  return pick;
-}
-
 function chooseSideForType(type, context) {
   const options = buildSideOptions(type, context);
   markContinuingSides(options, context);
   const bestOption = options.find((option) => option.isBest);
-
   const start = startingSideChoice(options, bestOption, context);
-  const walkFrom = start.pick.outward;
-  const rule = start.rule;
-
   // "bestfb" is best's own boundary taken verbatim — no walk, no Hough.
-  if (rule === "bestfb") {
-    return annotateChoice(start.pick, { rule, bestOption, walkFrom, houghExt: false });
-  }
-  const extension = extendWithHoughSegments(
-    walkOutward(start.pick, start.eligible, context), type, context);
-  return annotateChoice(extension.pick,
-    { rule, bestOption, walkFrom, houghExt: extension.houghExt });
+  if (start.rule === "bestfb") return start.pick;
+  return extendWithHoughSegments(walkOutward(start.pick, start.eligible, context), type, context);
 }
 
 // ------------------------------------------------------------------
 // Assembly
 // ------------------------------------------------------------------
-
-function recordFusionTrace(trace, chosen) {
-  for (let type = 0; type < SIDE_COUNT; type++) {
-    const pick = chosen[type];
-    trace.push({
-      type, contrast: +pick.contrast.toFixed(2), outward: Math.round(pick.outward),
-      locked: !!pick.locked, rule: pick.locked ? "locked" : pick.rule,
-      // Trace keys stay short; the fields behind them do not.
-      bLike: pick.boundaryLike, iLike: pick.insideDocument,
-      vetoedBest: !!pick.vetoedBest,
-      bestOutward: pick.bestOutward !== undefined ? Math.round(pick.bestOutward) : undefined,
-      walkFrom: pick.walkFrom !== undefined ? Math.round(pick.walkFrom) : undefined,
-      houghExt: !!pick.houghExt,
-      a: { x: Math.round(pick.side.a.x), y: Math.round(pick.side.a.y) },
-      b: { x: Math.round(pick.side.b.x), y: Math.round(pick.side.b.y) },
-    });
-  }
-}
 
 function quadFromChosenSides(chosen, bounds) {
   const { width, height } = bounds;
@@ -350,14 +309,14 @@ function quadFromChosenSides(chosen, bounds) {
 
 /**
  * Fuses the four document edges from across candidates.
- * @param options { gray, width, height, getSegments, trace, locks, meta }
+ * @param options { gray, width, height, getSegments, locks, meta }
  *                `getSegments` is called only if a side needs a Hough
  *                extension; `locks` maps a side type to the line it is
  *                locked to (null = best's own side); `meta` receives
- *                `contributors` and `rules`
+ *                `contributors`
  */
 function fuseQuad(candidates, best, options) {
-  const { gray, width, height, getSegments, trace, locks, meta } = options;
+  const { gray, width, height, getSegments, locks, meta } = options;
   const contributors = collectContributors(candidates, best);
   if (!contributors.length) return null;
   if (meta) meta.contributors = contributors;
@@ -375,9 +334,6 @@ function fuseQuad(candidates, best, options) {
       ? lockedSideChoice(type, locks.get(type), context)
       : chooseSideForType(type, context));
   }
-
-  if (meta) meta.rules = chosen.map((pick) => (pick.locked ? "locked" : pick.rule));
-  if (trace) recordFusionTrace(trace, chosen);
 
   return quadFromChosenSides(chosen, context);
 }

@@ -65,19 +65,13 @@ function hullPoints(hull) {
   return points;
 }
 
-function directionOf(from, to) { return Math.atan2(to.y - from.y, to.x - from.x); }
-
-function angleBetweenDirections(first, second) {
-  const difference = Math.abs(first - second) % Math.PI;
-  return Math.min(difference, Math.PI - difference);
-}
-
 /** 1 when both pairs of opposite sides are parallel, falling to 0 at the
  *  tolerance. */
 function parallelismOf(quad) {
-  const skew = angleBetweenDirections(directionOf(quad.tl, quad.tr), directionOf(quad.bl, quad.br)) +
-               angleBetweenDirections(directionOf(quad.tl, quad.bl), directionOf(quad.tr, quad.br));
-  return Math.max(0, 1 - skew / (PENTAGON_PARALLELISM_TOLERANCE_DEG * Math.PI / 180));
+  const angle = (type) => segmentAngleDeg(sideOf(quad, type));
+  const skew = angleDifferenceDeg(angle(SIDE_TOP), angle(SIDE_BOTTOM)) +
+               angleDifferenceDeg(angle(SIDE_LEFT), angle(SIDE_RIGHT));
+  return Math.max(0, 1 - skew / PENTAGON_PARALLELISM_TOLERANCE_DEG);
 }
 
 /**
@@ -143,7 +137,7 @@ function quadFromHull(hull) {
 
 function countBorderCorners(quad, bounds) {
   const { width, height } = bounds;
-  const margin = BORDER_MARGIN_FRACTION * Math.min(width, height);
+  const margin = BORDER_MARGIN_FRACTION * shortSideOf(bounds);
   let onBorder = 0;
   for (const point of quadPoints(quad)) {
     if (point.x < margin || point.y < margin ||
@@ -156,14 +150,14 @@ function countBorderCorners(quad, bounds) {
  * Scores how document-like a candidate quad is. Bigger is NOT automatically
  * better — a solid, well-fitting quad away from the frame edges wins over a
  * huge sloppy background quad.
+ * @param areas { contour, hull } — the source contour's area and its hull's
+ * @returns { score, quadArea } — score 0 for a quad that cannot be a sheet
  */
-/** @param areas { contour, hull } — the source contour's area and its hull's */
 function quadMetrics(quad, areas, bounds) {
   const { contour: contourArea, hull: hullArea } = areas;
   const quadArea = shoelaceArea(quad);
   const areaFraction = quadArea / (bounds.width * bounds.height);
-  const borderCorners = countBorderCorners(quad, bounds);
-  const unscored = { score: 0, quadArea, borderCorners };
+  const unscored = { score: 0, quadArea };
 
   if (areaFraction < MIN_QUAD_AREA_FRACTION || areaFraction > MAX_QUAD_AREA_FRACTION) {
     return unscored;
@@ -175,11 +169,11 @@ function quadMetrics(quad, areas, bounds) {
   // Fit: how closely the quad matches the hull it came from.
   const fit = quadArea > 0 && hullArea > 0
     ? Math.min(quadArea, hullArea) / Math.max(quadArea, hullArea) : 0;
-  const borderFactor = 1 - BORDER_PENALTY_PER_CORNER * borderCorners;
+  const borderFactor = 1 - BORDER_PENALTY_PER_CORNER * countBorderCorners(quad, bounds);
 
   const score = Math.pow(solidity, SOLIDITY_EXPONENT) * fit *
     (AREA_SCORE_BASE + AREA_SCORE_WEIGHT * Math.sqrt(areaFraction)) * borderFactor;
-  return { score, quadArea, borderCorners };
+  return { score, quadArea };
 }
 
 // ------------------------------------------------------------------
@@ -238,7 +232,6 @@ function candidateFromPoints(points, context) {
       score: metrics.score * SPLIT_SCORE_PENALTY,
       baseScore: metrics.score,
       quadArea: metrics.quadArea,
-      borderCorners: metrics.borderCorners,
       rejected: metrics.score <= 0,
       hullPts,
       mask: maskName,
@@ -324,7 +317,7 @@ function isMutuallySeparated(outsideA, outsideB, chordContrast) {
 /** Which side of `quad` lies along the cut chord — the doc/occluder seam,
  *  which later passes must not walk across. */
 function sideNearestChord(quad, chord) {
-  const chordMid = { x: (chord.a.x + chord.b.x) / 2, y: (chord.a.y + chord.b.y) / 2 };
+  const chordMid = midpointOf(chord);
   let nearestType = 0, nearestDistance = Infinity;
   for (let type = 0; type < SIDE_COUNT; type++) {
     const side = sideOf(quad, type);
@@ -376,9 +369,6 @@ function splitProtrusions(parts, candidateA, candidateB) {
 function annotateSplitParts(parts, chord, parentBBox) {
   for (const part of parts) {
     part.candidate.safe = part.safe;
-    part.candidate.protrusionOut = part.outsideOther;
-    part.candidate.protrusionIn = part.otherOutside;
-    part.candidate.selfOut = part.selfOutside;
     part.candidate.parentBBox = parentBBox;
     part.candidate.cutSides = [sideNearestChord(part.candidate.corners, chord)];
     if (part.safe) part.candidate.score = part.candidate.baseScore;
@@ -392,21 +382,12 @@ function annotateSplitParts(parts, chord, parentBBox) {
  * candidate with its true edges.
  */
 function splitCandidates(contour, context) {
-  const { width, height, maskName, ownScore, solidity, diag, gray } = context;
+  const { width, height, maskName, ownScore, solidity, gray } = context;
   const hullIndices = new cv.Mat();
   const defects = new cv.Mat();
   try {
     const deep = deepDefectsOf(contour, { hullIndices, defects }, context);
-    if (!deep) return;
-
-    const attempt = shouldAttemptSplit(solidity, ownScore);
-    if (diag) {
-      diag.push({ mask: maskName, solidity: +solidity.toFixed(3),
-        ownScore: +ownScore.toFixed(3), nDeep: deep.length,
-        depths: deep.slice(0, 3).map((d) => +(d.depth / Math.min(width, height)).toFixed(3)),
-        attempt });
-    }
-    if (!attempt || !deep.length) return;
+    if (!deep || !deep.length || !shouldAttemptSplit(solidity, ownScore)) return;
 
     const cuts = cutIndicesFor(deep);
     if (!cuts) return;
@@ -429,19 +410,9 @@ function splitCandidates(contour, context) {
     const chordContrast = gray ? sideContrast({ gray, width, height }, chord.a, chord.b) : 0;
     const mutuallySeparated = isMutuallySeparated(outsideBGivenA, outsideAGivenB, chordContrast);
 
-    if (diag) {
-      diag.push({ split: maskName,
-        mutual: +Math.min(outsideBGivenA, outsideAGivenB).toFixed(2),
-        selfMax: +Math.max(selfOutsideA, selfOutsideB).toFixed(3),
-        chordContrast: +chordContrast.toFixed(2),
-        safe: mutuallySeparated && Math.max(selfOutsideA, selfOutsideB) <= MAX_SELF_OUTSIDE });
-    }
-
     annotateSplitParts([
-      { candidate: candidateA, outsideOther: outsideBGivenA, otherOutside: outsideAGivenB,
-        selfOutside: selfOutsideA, safe: mutuallySeparated && selfOutsideA <= MAX_SELF_OUTSIDE },
-      { candidate: candidateB, outsideOther: outsideAGivenB, otherOutside: outsideBGivenA,
-        selfOutside: selfOutsideB, safe: mutuallySeparated && selfOutsideB <= MAX_SELF_OUTSIDE },
+      { candidate: candidateA, safe: mutuallySeparated && selfOutsideA <= MAX_SELF_OUTSIDE },
+      { candidate: candidateB, safe: mutuallySeparated && selfOutsideB <= MAX_SELF_OUTSIDE },
     ], chord, boundingBoxOfPoints(points));
   } finally {
     hullIndices.delete(); defects.delete();
@@ -475,18 +446,11 @@ function candidateFromContour(contour, contourArea, context) {
     cv.convexHull(contour, hull, false, true);
     const hullArea = cv.contourArea(hull);
     const quad = quadFromHull(hull);
-    if (!quad) {
-      return {
-        candidate: { corners: null, score: 0, rejected: true, mask: maskName,
-          noQuad: true, areaFrac: contourArea / (context.width * context.height) },
-        hullArea,
-      };
-    }
+    if (!quad) return { candidate: { corners: null, score: 0, rejected: true, mask: maskName }, hullArea };
     const metrics = quadMetrics(quad, { contour: contourArea, hull: hullArea }, context);
     return {
       candidate: { corners: quad, score: metrics.score, quadArea: metrics.quadArea,
-        borderCorners: metrics.borderCorners, rejected: metrics.score <= 0,
-        hullPts: hullPoints(hull), mask: maskName },
+        rejected: metrics.score <= 0, hullPts: hullPoints(hull), mask: maskName },
       hullArea,
     };
   } finally {
@@ -495,7 +459,7 @@ function candidateFromContour(contour, contourArea, context) {
 }
 
 /** Collects scored quad candidates from every sizable outer contour of a mask.
- *  @param context { width, height, out, maskName, diag, gray } */
+ *  @param context { width, height, out, maskName, gray } */
 function candidatesFromMask(bin, context) {
   const { width, height, out, maskName } = context;
   const contours = new cv.MatVector();

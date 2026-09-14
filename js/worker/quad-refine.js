@@ -54,11 +54,6 @@ const SIDE_SAMPLE_FRACTIONS =
 // Corner refinement
 // ------------------------------------------------------------------
 
-function quadPerimeter(corners, sides) {
-  return sides.reduce((total, [from, to]) => total + Math.hypot(
-    corners[to].x - corners[from].x, corners[to].y - corners[from].y), 0);
-}
-
 /**
  * Refines a quad by assigning hull points to their nearest side, fitting a
  * straight line per side (least squares), and intersecting adjacent lines.
@@ -69,10 +64,10 @@ function refineQuadEdges(quad, hullPts, bounds) {
   // Same condition the anti-cut net applies to best.hullPts: with no hull
   // there is nothing to fit, so the quad stands as it is.
   if (!hullPts || hullPts.length < 3) return quad;
-  const { width, height } = bounds;
   const corners = quadPoints(quad);
-  const sides = [[0, 1], [1, 2], [2, 3], [3, 0]]; // top, right, bottom, left
-  const perimeter = quadPerimeter(corners, sides);
+  const sides = [];
+  for (let type = 0; type < SIDE_COUNT; type++) sides.push(sideOf(quad, type));
+  const perimeter = sides.reduce((total, side) => total + segmentLength(side), 0);
   const cornerRadius = CORNER_EXCLUSION_FRACTION * perimeter;
   const maxAssignmentDistance = SIDE_ASSIGNMENT_FRACTION * perimeter;
 
@@ -81,9 +76,9 @@ function refineQuadEdges(quad, hullPts, bounds) {
     if (corners.some((corner) =>
       Math.hypot(point.x - corner.x, point.y - corner.y) < cornerRadius)) continue;
     let nearestSide = -1, nearestDistance = Infinity;
-    for (let side = 0; side < SIDE_COUNT; side++) {
-      const distance = distToSegLine(point, corners[sides[side][0]], corners[sides[side][1]]);
-      if (distance < nearestDistance) { nearestDistance = distance; nearestSide = side; }
+    for (let type = 0; type < SIDE_COUNT; type++) {
+      const distance = distToSegLine(point, sides[type].a, sides[type].b);
+      if (distance < nearestDistance) { nearestDistance = distance; nearestSide = type; }
     }
     if (nearestSide >= 0 && nearestDistance < maxAssignmentDistance) {
       pointsPerSide[nearestSide].push(point);
@@ -91,20 +86,11 @@ function refineQuadEdges(quad, hullPts, bounds) {
   }
 
   // Anchor each fit with the quad corners so sparse sides stay sane.
-  const lines = sides.map(([from, to], side) =>
-    fitLinePts(pointsPerSide[side].concat([corners[from], corners[to]])));
-
-  const refined = [];
-  for (let i = 0; i < SIDE_COUNT; i++) {
-    const corner = lineIntersect(lines[(i + 3) % SIDE_COUNT], lines[i]);
-    if (!corner || !isFinite(corner.x) || !isFinite(corner.y)) return quad;
-    // A refined corner far outside the image means a bad fit — keep the original.
-    if (corner.x < -REFINED_OUT_OF_FRAME_TOLERANCE * width ||
-        corner.x > (1 + REFINED_OUT_OF_FRAME_TOLERANCE) * width ||
-        corner.y < -REFINED_OUT_OF_FRAME_TOLERANCE * height ||
-        corner.y > (1 + REFINED_OUT_OF_FRAME_TOLERANCE) * height) return quad;
-    refined.push(corner);
-  }
+  const lines = sides.map((side, type) => fitLinePts(pointsPerSide[type].concat([side.a, side.b])));
+  const refined = cornersOfSideLines(lines);
+  // A refined corner far outside the image means a bad fit — keep the original.
+  if (refined.some((corner) => !corner || !isFinite(corner.x) || !isFinite(corner.y)) ||
+      outOfBounds(refined, bounds, REFINED_OUT_OF_FRAME_TOLERANCE)) return quad;
   return orderCorners(refined) || quad;
 }
 
@@ -113,16 +99,14 @@ function refineQuadEdges(quad, hullPts, bounds) {
 // ------------------------------------------------------------------
 
 /** Median gray just inside the side — a robust "this is the paper" value that
- *  text or artwork under one sample can't poison. */
-/** @param sampling { side, normal, fractions } */
+ *  text or artwork under one sample can't poison.
+ *  @param sampling { side, normal, fractions } */
 function paperReferenceAlongSide(image, sampling) {
   const { side, normal, fractions } = sampling;
   const samples = [];
   for (const t of fractions) {
-    const point = pointAlong(side.a, side.b, t);
-    const x = Math.round(point.x - normal.nx * PAPER_REFERENCE_INSET);
-    const y = Math.round(point.y - normal.ny * PAPER_REFERENCE_INSET);
-    if (isInsideImage(image, x, y)) samples.push(grayAt(image, x, y));
+    const { x, y } = alongNormal(pointAlong(side.a, side.b, t), normal, -PAPER_REFERENCE_INSET);
+    if (insideBounds(image, x, y)) samples.push(grayAt(image, x, y));
   }
   if (samples.length < MIN_MARCH_SAMPLES) return null;
   samples.sort(ascending);
@@ -136,9 +120,8 @@ function distancePastThinLine(image, march, from) {
   for (let peek = from + MARCH_STEP;
        peek <= Math.min(from + THIN_LINE_PEEK, march.maxMarch);
        peek += MARCH_STEP) {
-    const x = Math.round(march.point.x + march.normal.nx * peek);
-    const y = Math.round(march.point.y + march.normal.ny * peek);
-    if (!isInsideImage(image, x, y)) return 0;
+    const { x, y } = alongNormal(march.point, march.normal, peek);
+    if (!insideBounds(image, x, y)) return 0;
     if (Math.abs(grayAt(image, x, y) - march.reference) <= HARD_EDGE_DIFF) return peek;
   }
   return 0;
@@ -151,9 +134,8 @@ function marchToEdge(image, march) {
   let distance = 0;
   let softStart = -1;
   for (let step = MARCH_STEP; step <= march.maxMarch; step += MARCH_STEP) {
-    const x = Math.round(march.point.x + march.normal.nx * step);
-    const y = Math.round(march.point.y + march.normal.ny * step);
-    if (!isInsideImage(image, x, y)) return null;
+    const { x, y } = alongNormal(march.point, march.normal, step);
+    if (!insideBounds(image, x, y)) return null;
     const difference = Math.abs(grayAt(image, x, y) - march.reference);
 
     if (difference > HARD_EDGE_DIFF) {
@@ -187,7 +169,7 @@ function snappedLineForSide(image, quad, type) {
     { side, normal, fractions: SIDE_SAMPLE_FRACTIONS });
   if (reference === null) return null;
 
-  const maxMarch = MAX_MARCH_FRACTION * Math.min(image.width, image.height);
+  const maxMarch = MAX_MARCH_FRACTION * shortSideOf(image);
   const stops = [];
   for (const t of SIDE_SAMPLE_FRACTIONS) {
     const point = pointAlong(side.a, side.b, t);
@@ -215,9 +197,9 @@ function snappedLineForSide(image, quad, type) {
  * consistently find the real edge further out, the side snaps to a line fitted
  * through those stop points. Works from the pixels, so it recovers document
  * strips that every candidate mask missed.
+ * @param locks anything with `has(sideType)` — the lock map from
+ *              scan-worker.js; a locked side is never marched
  */
-/** @param locks anything with `has(sideType)` — the lock map from
- *               scan-worker.js; a locked side is never marched */
 function snapSidesOutward(image, quad, locks) {
   const { width, height } = image;
   const originalArea = shoelaceArea(quad);
@@ -257,7 +239,7 @@ function tier1Clippers({ candidates, best }, center) {
       candidate.score >= CLIPPER_MIN_SCORE_RATIO * best.score &&
       candidate.parentBBox && bboxIoU(candidate.parentBBox, bestBox) >= CLIPPER_MIN_BBOX_IOU &&
       pointInQuad(center, candidate.corners))
-    .map((candidate) => ({ q: candidate.corners, tier: 1, mask: candidate.mask }));
+    .map((candidate) => candidate.corners);
 }
 
 /**
@@ -270,11 +252,12 @@ function tier2Clippers(contributors, best, center) {
     candidate !== best && !candidate.split && candidate.corners &&
     candidate.quadArea >= TIER2_MIN_AREA_RATIO * best.quadArea &&
     pointInQuad(center, candidate.corners));
+  const boxes = new Map(pool.map((candidate) => [candidate, bboxOf(candidate.corners)]));
   return pool
     .filter((candidate) => pool.some((other) =>
       other !== candidate && other.mask !== candidate.mask &&
-      bboxIoU(bboxOf(other.corners), bboxOf(candidate.corners)) >= TIER2_TWIN_MIN_IOU))
-    .map((candidate) => ({ q: candidate.corners, tier: 2, mask: candidate.mask }));
+      bboxIoU(boxes.get(other), boxes.get(candidate)) >= TIER2_TWIN_MIN_IOU))
+    .map((candidate) => candidate.corners);
 }
 
 /**
@@ -284,7 +267,7 @@ function tier2Clippers(contributors, best, center) {
  * so the net keeps its calibrated behaviour everywhere else.
  */
 function consensusHull(corners, options) {
-  const { best, candidates, contributors, width, height, info } = options;
+  const { best, candidates, contributors } = options;
   if (!best.hullPts || best.hullPts.length < 3) return best.hullPts;
   const center = centroidOf(corners);
   const clippers = tier1Clippers({ candidates, best }, center)
@@ -295,20 +278,13 @@ function consensusHull(corners, options) {
   // Carried alongside `points`: the two only ever change together, and the
   // hull can be long enough that re-measuring it per clipper adds up.
   let keptArea = originalArea;
-  const used = [];
   for (const clipper of clippers) {
-    const clipped = clipPolyToQuad(points, clipper.q);
+    const clipped = clipPolyToQuad(points, clipper);
     if (clipped.length < 3) continue;
     const clippedArea = polygonArea(clipped);
     if (clippedArea < MAX_SINGLE_CLIP * keptArea) continue;
     points = clipped;
     keptArea = clippedArea;
-    used.push(clipper.tier + ":" + clipper.mask);
   }
-  if (keptArea < MIN_KEPT_AFTER_CLIPPING * originalArea) return best.hullPts;
-  if (info) {
-    info.keptFrac = originalArea > 0 ? +(keptArea / originalArea).toFixed(3) : 1;
-    info.clippers = used;
-  }
-  return points;
+  return keptArea < MIN_KEPT_AFTER_CLIPPING * originalArea ? best.hullPts : points;
 }

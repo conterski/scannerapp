@@ -21,10 +21,10 @@
  *
  * Worker-global, like every worker module.
  */
+"use strict";
 
 const SCORE = Object.freeze({
   samplesPerSide: 32,
-  previewSamplesPerSide: 20,
   minValidSamples: 8,          // fewer, and the side is unobserved
   // An unobserved side (along the frame's border) is a guess, and a guess
   // must lose to any side with real support behind it, or the frame's edge
@@ -68,11 +68,10 @@ const SCORE = Object.freeze({
   // print is — a rule sits at the table, a seam sits clear of it.
   nested: { from: 0.025, to: 0.12, step: 2, blankMagnitudeShare: 0.25, maxStep: 35, minSeamFromPrint: 0.015 },
 
-  // Paper and ink in Lab (8-bit, a/b offset 128). The chroma tolerance and
-  // lightness allowance are the sheet-colour mask's calibrated values: a
-  // sheet shades across its own surface but keeps its hue.
-  paper: { chromaTolerance: 12, lightnessAllowance: 70, inkLightnessDrop: 60, inkChroma: 25,
-           samplesPerAxis: 7, inset: 0.1, brightestShare: 0.6 },
+  // Ink against the paper, in Lab (8-bit, a/b offset 128): darker by this
+  // much, or coloured. What paper is (SHEET_COLOUR) is shared with the
+  // legacy pipeline's sheet-colour mask.
+  ink: { lightnessDrop: 60, chroma: 25 },
 
   geometry: {
     hardMinAngleDeg: 40, hardMaxAngleDeg: 140,
@@ -80,7 +79,6 @@ const SCORE = Object.freeze({
     maxOppositeRatio: 2.5, oppositeWeight: 0.3,
     maxAspect: 3.2, aspectWeight: 0.2,          // long receipts are allowed; wider than this is not a sheet
     minAreaFraction: 0.08, maxAreaFraction: 0.98,
-    outOfFrameTolerance: 0.15,
   },
 
   weights: { edge: 1.0, background: 1.5, paperOutside: 1.2, content: 3.0, nested: 1.0, area: 0.10 },
@@ -97,20 +95,14 @@ const SAMPLE_KIND_SEAM = "seam"; // a line-like dip clear of the print: the shee
 // ------------------------------------------------------------------
 
 /**
- * The colour tests, bound to one quad's paper colour. Lab when the frame has
- * it; gray proxies for the preview, which skips Lab for speed.
+ * The colour tests, bound to one quad's paper colour — the sheet's own where
+ * enough of the quad is in frame to read it, the desk's otherwise.
  */
 function paletteFor(frame, quad) {
-  if (frame.lab) {
-    const paper = paperLabInside(frame, quad) || frame.backgroundLab;
-    return labPalette(frame, paper);
-  }
-  return grayPalette(frame, paperGrayInside(frame, quad));
-}
-
-function labPalette(frame, paper) {
-  const { chromaTolerance, lightnessAllowance, inkLightnessDrop, inkChroma } = SCORE.paper;
   const at = (x, y) => frameLabAt(frame, x, y);
+  const paper = paperColourInside(quad, frame, at) || frame.backgroundLab;
+  const { chromaTolerance, lightnessAllowance } = SHEET_COLOUR;
+  const { lightnessDrop, chroma } = SCORE.ink;
   return {
     paper,
     desk: frame.backgroundLab,
@@ -121,68 +113,14 @@ function labPalette(frame, paper) {
     },
     isInk(x, y) {
       const pixel = at(x, y);
-      return pixel.l <= paper.l - inkLightnessDrop || Math.hypot(pixel.a - paper.a, pixel.b - paper.b) >= inkChroma;
+      return pixel.l <= paper.l - lightnessDrop || Math.hypot(pixel.a - paper.a, pixel.b - paper.b) >= chroma;
     },
     colourAt: at,
     distance(first, second) {
       return Math.hypot(first.l - second.l, first.a - second.a, first.b - second.b);
     },
-    medianColour(colours) {
-      const channel = (key) => median(colours.map((c) => c[key]).sort(ascending));
-      return { l: channel("l"), a: channel("a"), b: channel("b") };
-    },
+    medianColour: medianLab,
   };
-}
-
-function grayPalette(frame, paperGray) {
-  const { lightnessAllowance, inkLightnessDrop } = SCORE.paper;
-  return {
-    paper: { l: paperGray },
-    desk: null, // the preview reads no colour; the side's own outside stands in
-    isPaper: (x, y) => frameGrayAt(frame, x, y) >= paperGray - lightnessAllowance,
-    isInk: (x, y) => frameGrayAt(frame, x, y) <= paperGray - inkLightnessDrop,
-    colourAt: (x, y) => ({ l: frameGrayAt(frame, x, y) }),
-    distance: (first, second) => Math.abs(first.l - second.l),
-    medianColour: (colours) => ({ l: median(colours.map((c) => c.l).sort(ascending)) }),
-  };
-}
-
-/** Bilinear point inside a quad at (u, v) in 0..1. */
-function pointWithinQuad({ tl, tr, br, bl }, u, v) {
-  const top = { x: tl.x + (tr.x - tl.x) * u, y: tl.y + (tr.y - tl.y) * u };
-  const bottom = { x: bl.x + (br.x - bl.x) * u, y: bl.y + (br.y - bl.y) * u };
-  return { x: top.x + (bottom.x - top.x) * v, y: top.y + (bottom.y - top.y) * v };
-}
-
-/** The interior on a grid, inset from the sides, as pixel coordinates. */
-function interiorSamplePoints(frame, quad) {
-  const { samplesPerAxis: n, inset } = SCORE.paper;
-  const points = [];
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      const point = pointWithinQuad(quad, inset + (1 - 2 * inset) * (i + 0.5) / n, inset + (1 - 2 * inset) * (j + 0.5) / n);
-      const x = Math.round(point.x), y = Math.round(point.y);
-      if (insideFrame(frame, x, y)) points.push({ x, y });
-    }
-  }
-  return points;
-}
-
-/** The paper's Lab: the median of the brightest share of interior samples, so
- *  ink and rulings do not vote. Null when too little of the quad is in frame. */
-function paperLabInside(frame, quad) {
-  const points = interiorSamplePoints(frame, quad);
-  if (points.length < SCORE.paper.samplesPerAxis) return null;
-  const samples = points.map(({ x, y }) => frameLabAt(frame, x, y)).sort((p, q) => q.l - p.l);
-  const brightest = samples.slice(0, Math.max(1, Math.round(samples.length * SCORE.paper.brightestShare)));
-  const channel = (key) => median(brightest.map((s) => s[key]).sort(ascending));
-  return { l: channel("l"), a: channel("a"), b: channel("b") };
-}
-
-function paperGrayInside(frame, quad) {
-  const values = interiorSamplePoints(frame, quad).map(({ x, y }) => frameGrayAt(frame, x, y)).sort((a, b) => b - a);
-  if (!values.length) return 200;
-  return median(values.slice(0, Math.max(1, Math.round(values.length * SCORE.paper.brightestShare))).sort(ascending));
 }
 
 // ------------------------------------------------------------------
@@ -266,7 +204,7 @@ function readSample(frame, centre, normal, depths, palette, scale, type) {
   const { kind, strength, values } = profile;
   const edge = strength * gradientAcrossNear(frame, point, normal, depths[PROBE_INDEX.outNear]);
   const p = PROBE_INDEX;
-  const pixelAt = (depth) => ({ x: Math.round(point.x + normal.nx * depth), y: Math.round(point.y + normal.ny * depth) });
+  const pixelAt = (depth) => alongNormal(point, normal, depth);
   const outBand = pixelAt(depths[p.outBand]);
   return {
     point, values, kind, edge,
@@ -284,8 +222,8 @@ function readSample(frame, centre, normal, depths, palette, scale, type) {
 function gradientAcrossNear(frame, point, normal, reach) {
   let best = 0;
   for (let depth = -reach; depth <= reach; depth++) {
-    const x = Math.round(point.x + normal.nx * depth), y = Math.round(point.y + normal.ny * depth);
-    if (insideFrame(frame, x, y)) best = Math.max(best, gradientAcross(frame, x, y, normal));
+    const { x, y } = alongNormal(point, normal, depth);
+    if (insideBounds(frame, x, y)) best = Math.max(best, gradientAcross(frame, x, y, normal));
   }
   return best;
 }
@@ -298,10 +236,10 @@ function gradientAcrossNear(frame, point, normal, reach) {
 function contentOutside(frame, sample, normal, palette) {
   const { startDepth, reachOfShortSide, step, paperGap, inkContrast } = SCORE.content;
   const reach = reachOfShortSide * frame.shortSide;
-  const at = (depth) => ({ x: Math.round(sample.point.x + normal.nx * depth), y: Math.round(sample.point.y + normal.ny * depth) });
+  const at = (depth) => alongNormal(sample.point, normal, depth);
   for (let depth = startDepth * sample.scale; depth <= reach; depth += step) {
     const pixel = at(depth), before = at(depth - paperGap), after = at(depth + paperGap);
-    if (!insideFrame(frame, after.x, after.y) || !insideFrame(frame, before.x, before.y)) return false;
+    if (!insideBounds(frame, after.x, after.y) || !insideBounds(frame, before.x, before.y)) return false;
     const neighbours = Math.min(frameGrayAt(frame, before.x, before.y), frameGrayAt(frame, after.x, after.y));
     const isStroke = frameGrayAt(frame, pixel.x, pixel.y) <= neighbours - inkContrast;
     if (isStroke) {
@@ -313,10 +251,6 @@ function contentOutside(frame, sample, normal, palette) {
   return false;
 }
 
-/** A sheet-like edge parallel to the side, inside it, with a blank paper
- *  band between: the band is a pad's border or a neighbour, not this sheet.
- *  A printed rule (kind line) never counts, and neither does a band that is
- *  not paper (a banner) or an inner edge whose far side is not paper. */
 /** How far a point lies outside the print on the side's outward axis. */
 function distanceOutsidePrint(point, type, extent) {
   switch (type) {
@@ -327,27 +261,26 @@ function distanceOutsidePrint(point, type, extent) {
   }
 }
 
+/** A sheet-like edge parallel to the side, inside it, with a blank paper
+ *  band between: the band is a pad's border or a neighbour, not this sheet.
+ *  A printed rule (kind line) never counts, and neither does a band that is
+ *  not paper (a banner) or an inner edge whose far side is not paper. */
 function nestedBoundary(frame, sample, normal, depths, palette, type) {
   const { from, to, step, blankMagnitudeShare } = SCORE.nested;
   const inward = { nx: -normal.nx, ny: -normal.ny };
-  const at = (depth) => ({ x: sample.point.x + inward.nx * depth, y: sample.point.y + inward.ny * depth });
   const start = from * frame.shortSide, end = to * frame.shortSide;
   for (let depth = start; depth <= end; depth += step) {
-    const inner = at(depth);
+    const inner = { x: sample.point.x + inward.nx * depth, y: sample.point.y + inward.ny * depth };
     const profile = classifyAt(frame, inner, normal, depths, type);
     if (!profile) return false;
     const { kind, step: innerStep, inner: innerGray } = profile;
     if (!isBoundaryKind(kind)) continue;
-    sample.nestedAt = { depth: Math.round(depth), kind, step: innerStep }; // for the overlay page
     const paperMeetsPaper = Math.abs(innerStep) <= SCORE.nested.maxStep &&
-      innerGray >= palette.paper.l - SCORE.paper.inkLightnessDrop;
+      innerGray >= palette.paper.l - SCORE.ink.lightnessDrop;
     if (!paperMeetsPaper) return false;
-    const beyond = { x: Math.round(inner.x + inward.nx * SCORE.depths.far * sample.scale),
-                     y: Math.round(inner.y + inward.ny * SCORE.depths.far * sample.scale) };
-    if (!insideFrame(frame, beyond.x, beyond.y) || !palette.isPaper(beyond.x, beyond.y)) return false;
-    const nested = bandIsBlankPaper(frame, sample, inward, SCORE.depths.near * sample.scale, depth - SCORE.depths.near * sample.scale, palette, blankMagnitudeShare);
-    sample.nestedAt.counted = nested;
-    return nested;
+    const beyond = alongNormal(inner, inward, SCORE.depths.far * sample.scale);
+    if (!insideBounds(frame, beyond.x, beyond.y) || !palette.isPaper(beyond.x, beyond.y)) return false;
+    return bandIsBlankPaper(frame, sample, inward, SCORE.depths.near * sample.scale, depth - SCORE.depths.near * sample.scale, palette, blankMagnitudeShare);
   }
   return false;
 }
@@ -356,8 +289,8 @@ function bandIsBlankPaper(frame, sample, inward, fromDepth, toDepth, palette, bl
   if (toDepth <= fromDepth) return false;
   let magnitudeSum = 0, count = 0;
   for (let depth = fromDepth; depth <= toDepth; depth += SCORE.nested.step) {
-    const x = Math.round(sample.point.x + inward.nx * depth), y = Math.round(sample.point.y + inward.ny * depth);
-    if (!insideFrame(frame, x, y) || !palette.isPaper(x, y) || palette.isInk(x, y)) return false;
+    const { x, y } = alongNormal(sample.point, inward, depth);
+    if (!insideBounds(frame, x, y) || !palette.isPaper(x, y) || palette.isInk(x, y)) return false;
     magnitudeSum += frameMagnitudeAt(frame, x, y);
     count++;
   }
@@ -387,25 +320,23 @@ function insideIsDesk(sample, palette, outside) {
 function scoreSide(frame, quad, type, palette, options) {
   const side = sideOf(quad, type);
   const normal = outwardNormal(quad, side);
-  const scale = frame.shortSide / SCORE.referenceShortSide;
+  const scale = frame.scale;
   const depths = probeDepths(scale);
-  const count = options && options.preview ? SCORE.previewSamplesPerSide : SCORE.samplesPerSide;
   const samples = [];
-  for (let i = 0; i < count; i++) {
-    const sample = readSample(frame, pointAlong(side.a, side.b, (i + 0.5) / count), normal, depths, palette, scale, type);
+  for (let i = 0; i < SCORE.samplesPerSide; i++) {
+    const sample = readSample(frame, pointAlong(side.a, side.b, (i + 0.5) / SCORE.samplesPerSide), normal, depths, palette, scale, type);
     if (sample) samples.push(sample);
   }
   const result = { edge: SCORE.unobservedEdge, background: 0, paperOutside: 0, content: 0, nested: 0,
                    valid: samples.length, unobserved: samples.length < SCORE.minValidSamples,
-                   samples: options && options.keepSamples ? samples : undefined };
+                   samples: options && options.keepSamples ? samples.map(({ kind, values }) => ({ kind, values })) : undefined };
   if (result.unobserved) return result;
 
   const outside = palette.medianColour(samples.map((s) => s.outsideColour));
   let background = 0, paperOutside = 0, content = 0, nested = 0;
   for (const sample of samples) {
     const noBoundary = !isBoundaryKind(sample.kind);
-    if (insideIsDesk(sample, palette, outside)) { background++; sample.desk = true; }
-    sample.inside = palette.colourAt(sample.inBand.x, sample.inBand.y); // for the overlay page
+    if (insideIsDesk(sample, palette, outside)) background++;
     if (noBoundary && palette.isPaper(sample.outFar.x, sample.outFar.y) && palette.isPaper(sample.outBand.x, sample.outBand.y) &&
         sample.acrossBands < SCORE.paperOutside.maxAcrossDifference) paperOutside++;
     if (contentOutside(frame, sample, normal, palette)) content++;
@@ -428,11 +359,7 @@ function scoreSide(frame, quad, type, palette, options) {
 /** Why a quad cannot be a sheet at all, or null. */
 function geometryRejection(quad, frame) {
   const g = SCORE.geometry;
-  const tolerance = g.outOfFrameTolerance;
-  for (const point of quadPoints(quad)) {
-    if (point.x < -tolerance * frame.width || point.x > (1 + tolerance) * frame.width ||
-        point.y < -tolerance * frame.height || point.y > (1 + tolerance) * frame.height) return "outOfFrame";
-  }
+  if (outOfBounds(quadPoints(quad), frame, OUT_OF_FRAME_TOLERANCE)) return "outOfFrame";
   if (!isConvex(quad)) return "concave";
   const angles = internalAngles(quad);
   if (angles.some((angle) => angle < g.hardMinAngleDeg || angle > g.hardMaxAngleDeg)) return "angle";
@@ -444,8 +371,8 @@ function geometryRejection(quad, frame) {
 function isConvex(quad) {
   const points = quadPoints(quad);
   let sign = 0;
-  for (let i = 0; i < 4; i++) {
-    const a = points[i], b = points[(i + 1) % 4], c = points[(i + 2) % 4];
+  for (let i = 0; i < SIDE_COUNT; i++) {
+    const a = points[i], b = points[(i + 1) % SIDE_COUNT], c = points[(i + 2) % SIDE_COUNT];
     const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
     if (Math.abs(cross) < 1e-9) continue;
     if (sign === 0) sign = Math.sign(cross);
@@ -462,18 +389,15 @@ function geometryPenalty(quad) {
     const outside = Math.max(0, g.softMinAngleDeg - angle, angle - g.softMaxAngleDeg);
     penalty += Math.min(g.anglePenaltyCap, outside * g.anglePenaltyPerDeg);
   }
-  const length = (type) => { const s = sideOf(quad, type); return Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y); };
-  const ratio = (first, second) => Math.max(first, second) / Math.max(1e-6, Math.min(first, second));
-  const top = length(SIDE_TOP), bottom = length(SIDE_BOTTOM), left = length(SIDE_LEFT), right = length(SIDE_RIGHT);
-  penalty += g.oppositeWeight * Math.max(0, Math.max(ratio(top, bottom), ratio(left, right)) - g.maxOppositeRatio);
-  const aspect = ratio((top + bottom) / 2, (left + right) / 2);
+  const { opposite, aspect } = sideRatios(quad);
+  penalty += g.oppositeWeight * Math.max(0, opposite - g.maxOppositeRatio);
   penalty += g.aspectWeight * Math.max(0, aspect - g.maxAspect);
   return penalty;
 }
 
 /**
  * The score of one quad, with its breakdown.
- * @param options { preview, keepSamples, withoutNested, palette, reuseSides }
+ * @param options { keepSamples, withoutNested, palette, reuseSides }
  *                — withoutNested skips the inward march, the costliest term,
  *                for a search's trial moves; the verdict on a quad always
  *                includes it. `palette` and `reuseSides` (side scores by

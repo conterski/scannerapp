@@ -17,6 +17,7 @@
  *
  * Worker-global, like every worker module.
  */
+"use strict";
 
 const REFIT = Object.freeze({
   samples: 32,
@@ -81,7 +82,7 @@ function refitSides(frame, quad) {
  *  `refused` naming the rule the line failed, or null and `quad` when it
  *  passed. */
 function refitSide(frame, quad, type, palette) {
-  const scale = frame.shortSide / SCORE.referenceShortSide;
+  const scale = frame.scale;
   const located = locateEdges(frame, quad, type, scale);
   const fit = consensusLine(located, REFIT.inlierTolerance * scale);
   const outcome = { consensus: fit ? fit.consensus : 0, inward: 0, refused: null, located, line: fit && fit.line };
@@ -112,13 +113,13 @@ function refitSide(frame, quad, type, palette) {
  *  and with print past the line. */
 function beyondTheStretch(frame, quad, type, inliers, palette, scale) {
   const normal = outwardNormal(quad, sideOf(quad, type));
-  const at = (point, depth) => ({ x: Math.round(point.x + normal.nx * depth), y: Math.round(point.y + normal.ny * depth) });
+  const at = (point, depth) => alongNormal(point, normal, depth);
   const seamClearance = SCORE.nested.minSeamFromPrint * frame.shortSide;
   let insidePrint = 0, paper = 0, content = 0;
   for (const point of inliers) {
     if (!frame.printExtent || distanceOutsidePrint(point, type, frame.printExtent) < seamClearance) insidePrint++;
     const far = at(point, SCORE.depths.far * scale), band = at(point, SCORE.depths.band * scale);
-    if (insideFrame(frame, far.x, far.y) && insideFrame(frame, band.x, band.y) &&
+    if (insideBounds(frame, far.x, far.y) && insideBounds(frame, band.x, band.y) &&
         palette.isPaper(far.x, far.y) && palette.isPaper(band.x, band.y)) paper++;
     if (contentOutside(frame, { point, scale }, normal, palette)) content++;
   }
@@ -142,8 +143,8 @@ function locateEdges(frame, quad, type, scale) {
   for (let i = 0; i < REFIT.samples; i++) {
     const centre = pointAlong(side.a, side.b, (i + 0.5) / REFIT.samples);
     for (let offset = -reach; offset <= reach; offset++) {
-      const x = Math.round(centre.x + normal.nx * offset), y = Math.round(centre.y + normal.ny * offset);
-      across[offset + reach] = insideFrame(frame, x, y) ? gradientAlong(frame, x, y, normal) : 0;
+      const { x, y } = alongNormal(centre, normal, offset);
+      across[offset + reach] = insideBounds(frame, x, y) ? gradientAlong(frame, x, y, normal) : 0;
     }
     let found = null;
     for (let k = across.length - 2; k >= 1 && !found; k--) {
@@ -155,12 +156,6 @@ function locateEdges(frame, quad, type, scale) {
     located.push(found);
   }
   return located;
-}
-
-/** The gradient's component along `normal`, in the frame's magnitude units. */
-function gradientAlong(frame, x, y, normal) {
-  const i = pixelIndex(frame, x, y);
-  return Math.abs(frame.dx[i] * normal.nx + frame.dy[i] * normal.ny) / FRAME.scharrStepUnits;
 }
 
 /**

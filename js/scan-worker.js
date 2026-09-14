@@ -4,16 +4,20 @@
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init        → loads OpenCV
- *   detect      {width, height, buffer}                      → {corners|null}
- *   previewQuad {width, height, buffer}                      → {corners|null}
- *   warp        {width, height, buffer, corners, dstW, dstH} → {buffer}
- *   denoise     {width, height, buffer}                      → {buffer}
+ *   detect      {width, height, buffer, engine?, debug?}         → {corners|null, refinement?}
+ *   previewQuad {width, height, buffer}                          → {corners|null}
+ *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
+ *   warp        {width, height, buffer, corners, dstW, dstH}     → {buffer}
+ *   denoise     {width, height, buffer}                          → {buffer}
  *
- * The detector itself lives in worker/: geometry (pure math), pixel-probes
- * (what the pixels say), candidates (mask → scored quads), edge-fusion
- * (assembling the best four sides), quad-refine (the anti-cut passes) and
- * grid-evidence (the printed grid as proof of where a sheet on a pad ends).
- * This file owns the pipeline that runs them in order.
+ * The detector lives in worker/, one shared global scope: geometry (pure
+ * math), pixel-probes (what the pixels say), candidates (mask → scored
+ * quads), edge-fusion (assembling the best four sides), quad-refine (the
+ * anti-cut passes), grid-evidence (the printed grid as proof of where a
+ * sheet on a pad ends) — the legacy pipeline — then frame, quad-score,
+ * line-candidates, side-refit and quad-search, which tighten its crop by a
+ * score (engine "refined", the default); guided-filter and enhance grade
+ * the scan. This file owns the pipeline that runs them in order.
  */
 "use strict";
 
@@ -32,10 +36,8 @@ importScripts(...[
   "worker/frame.js",
   "worker/quad-score.js",
   "worker/line-candidates.js",
-  "worker/mask-candidates.js",
   "worker/side-refit.js",
   "worker/quad-search.js",
-  "worker/detector.js",
   "worker/guided-filter.js",
   "worker/enhance.js",
 ].map((path) => path + ASSET_VERSION));
@@ -49,8 +51,6 @@ const DETECT_KERNELS = { open: 13, close: 7, dilate: 7 };
 // are scaled to match — the detection sizes would swallow a page at that
 // scale. This is a quick look for framing, not the crop.
 const PREVIEW_KERNELS = { open: 7, close: 3, dilate: 3 };
-
-const BLUR_KERNEL_SIZE = 5;
 
 // Local adaptive threshold: survives shadow gradients across the paper.
 const ADAPTIVE_BLOCK_DIVISOR = 6;
@@ -71,7 +71,6 @@ const REUNITE_MIN_AREA_RATIO = 1.25;
 const REUNITE_MIN_SCORE = 0.45;
 const REUNITE_MAX_OUTSIDE = 0.12;
 const REUNITE_LOCK_MARGIN_FRACTION = 0.04;
-const REUNITE_MAX_OUT_OF_FRAME = 0.15;
 
 // Preferring a safe split part over the merged blob it came from.
 const SAFE_OVERRIDE_MIN_BBOX_IOU = 0.6;
@@ -83,18 +82,14 @@ const SAFE_OVERRIDE_MIN_SCORE_RATIO = 0.5;
 // false positive only loosens the crop, which is the accepted bias.
 const HULL_CUT_THRESHOLD = 0.09;
 
-// The sheet's own colour, sampled inside its printed grid. It is what
-// separates a pink carbon copy from brown wood, or a white sheet from a blue
-// pad, where gray and saturation cannot: chroma (Lab a/b) is what
-// discriminates, and lightness is left almost free, since a sheet shades
-// across its own surface. The mask is not a candidate — a sheet split by its
-// own print would hand fusion a half-sheet quad — it is read along the grid
-// evidence's march lines, one side at a time, like the shadow line is.
-const SHEET_COLOUR_SAMPLES_PER_AXIS = 7;
-const SHEET_COLOUR_INSET = 0.1;           // of the frame, clear of its rules
-const SHEET_COLOUR_PAPER_SHARE = 0.6;     // the brightest share of samples is paper, not ink
-const SHEET_CHROMA_TOLERANCE = 12;        // Lab a and b, either side of the paper's
-const SHEET_LIGHTNESS_ALLOWANCE = 70;     // Lab L below the paper's that still counts
+// The sheet's own colour (SHEET_COLOUR, pixel-probes.js), sampled inside
+// its printed grid, is what separates a pink carbon copy from brown wood, or
+// a white sheet from a blue pad, where gray and saturation cannot: chroma
+// (Lab a/b) discriminates, and lightness is left almost free, since a sheet
+// shades across its own surface. The mask is not a candidate — a sheet
+// split by its own print would hand fusion a half-sheet quad — it is read
+// along the grid evidence's march lines, one side at a time, like the
+// shadow line is.
 
 // Final margin, so hairline errors land on background rather than content.
 const SAFETY_MARGIN_FRACTION = 0.004;
@@ -174,7 +169,7 @@ function cleanMask(pipeline) {
 function harvestMask(pipeline, maskName) {
   candidatesFromMask(pipeline.bin, {
     width: pipeline.width, height: pipeline.height, out: pipeline.candidates,
-    maskName, diag: pipeline.splitDiag, gray: pipeline.gray,
+    maskName, gray: pipeline.gray,
   });
 }
 
@@ -185,54 +180,19 @@ function addThresholdCandidates(pipeline, thresholdType, maskName) {
 }
 
 function addAdaptiveCandidates(pipeline) {
-  const rawBlock = Math.round(Math.min(pipeline.width, pipeline.height) / ADAPTIVE_BLOCK_DIVISOR) | 1;
-  const block = Math.max(3, rawBlock);
+  const block = Math.max(3, Math.round(shortSideOf(pipeline) / ADAPTIVE_BLOCK_DIVISOR) | 1); // odd, as the API wants
   cv.adaptiveThreshold(pipeline.gray, pipeline.bin, 255, cv.ADAPTIVE_THRESH_MEAN_C,
-    cv.THRESH_BINARY, block % 2 ? block : block + 1, ADAPTIVE_CONSTANT);
+    cv.THRESH_BINARY, block, ADAPTIVE_CONSTANT);
   cleanMask(pipeline);
   harvestMask(pipeline, "adaptive");
 }
 
-/** The four corners of the printed frame, so its interior can be sampled. */
-function frameCorners(frame) {
-  const [top, right, bottom, left] = frame.map((border) => border && lineThrough(border.a, border.b));
-  if (!top || !right || !bottom || !left) return null;
-  const corners = [lineIntersect(left, top), lineIntersect(top, right),
-                   lineIntersect(right, bottom), lineIntersect(bottom, left)];
-  return corners.every(Boolean) ? corners : null;
-}
-
-/** Bilinear point inside a quad given as [tl, tr, br, bl], at (u, v) in 0..1. */
-function pointInsideQuad([tl, tr, br, bl], u, v) {
-  const top = { x: tl.x + (tr.x - tl.x) * u, y: tl.y + (tr.y - tl.y) * u };
-  const bottom = { x: bl.x + (br.x - bl.x) * u, y: bl.y + (br.y - bl.y) * u };
-  return { x: top.x + (bottom.x - top.x) * v, y: top.y + (bottom.y - top.y) * v };
-}
-
-/** The paper's Lab colour inside the grid: the median of the brightest share
- *  of a grid of samples, so ink and rulings do not vote. Null without a
- *  complete frame or enough samples inside the image. */
-function paperColourInside(lab, frame) {
-  const corners = frameCorners(frame);
-  if (!corners) return null;
-  const samples = [];
-  const n = SHEET_COLOUR_SAMPLES_PER_AXIS;
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      const u = SHEET_COLOUR_INSET + (1 - 2 * SHEET_COLOUR_INSET) * (i + 0.5) / n;
-      const v = SHEET_COLOUR_INSET + (1 - 2 * SHEET_COLOUR_INSET) * (j + 0.5) / n;
-      const point = pointInsideQuad(corners, u, v);
-      const x = Math.round(point.x), y = Math.round(point.y);
-      if (x < 0 || y < 0 || x >= lab.cols || y >= lab.rows) continue;
-      const pixel = lab.ucharPtr(y, x);
-      samples.push({ l: pixel[0], a: pixel[1], b: pixel[2] });
-    }
-  }
-  if (samples.length < n) return null;
-  samples.sort((p, q) => q.l - p.l);
-  const paper = samples.slice(0, Math.max(1, Math.round(samples.length * SHEET_COLOUR_PAPER_SHARE)));
-  const medianOf = (key) => median(paper.map((s) => s[key]).sort(ascending));
-  return { l: medianOf("l"), a: medianOf("a"), b: medianOf("b") };
+/** The printed frame as a quad, so its interior can be sampled; null
+ *  without all four borders. */
+function frameQuad(frame) {
+  if (!frame.every(Boolean)) return null;
+  const [tl, tr, br, bl] = cornersOfSideLines(frame.map((border) => lineThrough(border.a, border.b)));
+  return tl && tr && br && bl ? { tl, tr, br, bl } : null;
 }
 
 /** Everything that shares the sheet's chroma, at any lightness down to deep
@@ -242,24 +202,28 @@ function paperColourInside(lab, frame) {
  *  and a morphology that bridged it would also bridge the sheet to a
  *  neighbour of the same colour. */
 function sheetColourMask(pipeline, grid) {
-  let rgb = null, lab = null, low = null, high = null;
+  let rgb = null, lab = null, low = null, high = null, mask = null;
   try {
     rgb = new cv.Mat();
     lab = new cv.Mat();
     cv.cvtColor(pipeline.img, rgb, cv.COLOR_RGBA2RGB);
     cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
-    const paper = paperColourInside(lab, grid.frame);
+    const quad = frameQuad(grid.frame);
+    const labAt = (x, y) => { const pixel = lab.ucharPtr(y, x); return { l: pixel[0], a: pixel[1], b: pixel[2] }; };
+    const paper = quad && paperColourInside(quad, pipeline, labAt);
     if (!paper) return null;
+    const { chromaTolerance, lightnessAllowance } = SHEET_COLOUR;
     low = new cv.Mat(lab.rows, lab.cols, lab.type(), new cv.Scalar(
-      Math.max(0, paper.l - SHEET_LIGHTNESS_ALLOWANCE), paper.a - SHEET_CHROMA_TOLERANCE, paper.b - SHEET_CHROMA_TOLERANCE));
+      Math.max(0, paper.l - lightnessAllowance), paper.a - chromaTolerance, paper.b - chromaTolerance));
     high = new cv.Mat(lab.rows, lab.cols, lab.type(), new cv.Scalar(
-      255, paper.a + SHEET_CHROMA_TOLERANCE, paper.b + SHEET_CHROMA_TOLERANCE));
-    const mask = new cv.Mat();
+      255, paper.a + chromaTolerance, paper.b + chromaTolerance));
+    mask = new cv.Mat();
     cv.inRange(lab, low, high, mask);
-    pipeline.sheetColour = paper; // for the trace
-    return mask;
+    const done = mask;
+    mask = null; // the caller's now
+    return done;
   } finally {
-    releaseMats(rgb, lab, low, high);
+    releaseMats(rgb, lab, low, high, mask);
   }
 }
 
@@ -299,7 +263,7 @@ function harvestHoughSegments(pipeline, edges) {
   const linesMat = new cv.Mat();
   try {
     cv.HoughLinesP(edges, linesMat, 1, Math.PI / 180, HOUGH_THRESHOLD,
-      HOUGH_MIN_LENGTH_FRACTION * Math.min(pipeline.width, pipeline.height), HOUGH_MAX_GAP);
+      HOUGH_MIN_LENGTH_FRACTION * shortSideOf(pipeline), HOUGH_MAX_GAP);
     for (let i = 0; i < Math.min(linesMat.rows, MAX_HOUGH_SEGMENTS); i++) {
       segments.push({
         a: { x: linesMat.data32S[i * 4], y: linesMat.data32S[i * 4 + 1] },
@@ -376,14 +340,6 @@ function extendedSides(fuller, body, margin) {
   return extended;
 }
 
-function isWellFormedQuad(quad, bounds) {
-  return quadPoints(quad).every((point) =>
-    point.x >= -REUNITE_MAX_OUT_OF_FRAME * bounds.width &&
-    point.x <= (1 + REUNITE_MAX_OUT_OF_FRAME) * bounds.width &&
-    point.y >= -REUNITE_MAX_OUT_OF_FRAME * bounds.height &&
-    point.y <= (1 + REUNITE_MAX_OUT_OF_FRAME) * bounds.height);
-}
-
 function fullerCandidateContaining(best, candidates) {
   let fuller = null;
   for (const candidate of candidates) {
@@ -410,14 +366,14 @@ function fullerCandidateContaining(best, candidates) {
  *
  * @returns {best, lock} — unchanged with lock null when no reunion applies
  */
-function reuniteSeveredSection(best, pipeline, trace) {
-  const { candidates, width, height } = pipeline;
+function reuniteSeveredSection(best, pipeline) {
+  const { candidates } = pipeline;
   // Split winners are exempt: their tightness is intentional (the stack fixes).
   if (!best || best.split || !best.hullPts) return { best, lock: null };
   const fuller = fullerCandidateContaining(best, candidates);
   if (!fuller) return { best, lock: null };
 
-  const margin = REUNITE_LOCK_MARGIN_FRACTION * Math.min(width, height);
+  const margin = REUNITE_LOCK_MARGIN_FRACTION * shortSideOf(pipeline);
   const lock = extendedSides(fuller.corners, best.corners, margin);
 
   // A genuine severed section is a single edge or one adjacent corner.
@@ -427,10 +383,9 @@ function reuniteSeveredSection(best, pipeline, trace) {
                    (lock.has(SIDE_RIGHT) && lock.has(SIDE_LEFT));
   // A corner far off-image means a distorted blob (a paper fold), not the
   // true document.
-  if (!lock.size || opposite || !isWellFormedQuad(fuller.corners, pipeline)) {
+  if (!lock.size || opposite || outOfBounds(quadPoints(fuller.corners), pipeline, OUT_OF_FRAME_TOLERANCE)) {
     return { best, lock: null };
   }
-  if (trace) trace.push({ reunite: true, from: best.mask, to: fuller.mask, lock: [...lock] });
   return { best: fuller, lock };
 }
 
@@ -440,7 +395,7 @@ function reuniteSeveredSection(best, pipeline, trace) {
  * safe part — its lobe protrudes outside the kept quad, so cropping to it cuts
  * nothing. Unsafe splits never reach here.
  */
-function applySafeSplitOverride(best, candidates, trace) {
+function applySafeSplitOverride(best, candidates) {
   if (!best || best.split) return best;
   const bestBox = bboxOf(best.corners);
   const linked = candidates.filter((candidate) => candidate.safe && !candidate.rejected &&
@@ -449,10 +404,6 @@ function applySafeSplitOverride(best, candidates, trace) {
 
   const strongest = linked.reduce((a, b) => (b.score > a.score ? b : a));
   if (strongest.score < SAFE_OVERRIDE_MIN_SCORE_RATIO * best.score) return best;
-  if (trace) {
-    trace.push({ safeOverride: true, mask: strongest.mask,
-      fromScore: +best.score.toFixed(4), toScore: +strongest.score.toFixed(4) });
-  }
   return strongest;
 }
 
@@ -483,26 +434,13 @@ function lockedSidesFor(best, reuniteLock) {
  * content cuts, and is the identity when no evidence isolates the document.
  */
 function applyHullCutNet(corners, options) {
-  const { best, candidates, contributors, locked, width, height, trace, rules } = options;
-  const info = trace ? {} : null;
-  const protectedRegion = consensusHull(corners,
-    { best, candidates, contributors, width, height, info });
-  if (trace) {
-    trace.push({ consensus: true, keptFrac: info && info.keptFrac,
-      clippers: info && info.clippers });
-  }
+  const { best, candidates, contributors, locked, width, height } = options;
+  const protectedRegion = consensusHull(corners, { best, candidates, contributors, width, height });
 
   let result = corners;
   for (let type = 0; type < SIDE_COUNT; type++) {
     if (locked && locked.has(type)) continue;
-    const hullCut = fracCutBySide(best.hullPts, result, type);
-    if (trace) {
-      trace.push({ hullCut: type, frac: +hullCut.toFixed(3),
-        fracCons: +fracCutBySide(protectedRegion, result, type).toFixed(3),
-        rule: rules ? rules[type] : undefined,
-        covered: hullCut > HULL_CUT_THRESHOLD });
-    }
-    if (hullCut > HULL_CUT_THRESHOLD) {
+    if (fracCutBySide(best.hullPts, result, type) > HULL_CUT_THRESHOLD) {
       result = coverSide(result, type, { points: protectedRegion, bounds: { width, height } });
     }
   }
@@ -519,43 +457,15 @@ function applyHullCutNet(corners, options) {
  * owns is left to it — a split's cut chord outranks a margin estimate.
  * @returns the widened lock map, or null when the grid added nothing
  */
-function gridLocksFor(pipeline, baseLocks, trace) {
+function gridLocksFor(pipeline, baseLocks) {
   const grid = pipeline.grid;
-  if (trace) {
-    trace.push({ grid: grid
-      ? { inliers: grid.inliers, borders: grid.frame.map(Boolean), foreign: grid.foreign.length,
-          foreignSegments: grid.foreign } // for the overlay page
-      : null });
-  }
   if (!grid) return null;
-
   const locks = new Map(baseLocks || []);
   let added = 0;
-  if (trace && pipeline.sheetColour) trace.push({ sheetColour: pipeline.sheetColour });
-  for (const { type, side, confidence, evidence, source, other } of gridSideEvidence(pipeline, grid, pipeline.sheetMask)) {
-    const locked = confidence >= GRID.lockConfidence && !locks.has(type);
-    if (trace) {
-      trace.push({ gridSide: type, locked, side, ...sideEvidenceTrace(source, confidence, evidence),
-                   other: other && sideEvidenceTrace(other.source, other.confidence, other.evidence) });
-    }
-    if (locked) { locks.set(type, side); added++; }
+  for (const { type, side, confidence } of gridSideEvidence(pipeline, grid, pipeline.sheetMask)) {
+    if (confidence >= GRID.lockConfidence && !locks.has(type)) { locks.set(type, side); added++; }
   }
   return added ? locks : null;
-}
-
-/** One kind of side evidence, rounded for the trace, with what the overlay
- *  page draws: where the search ran and what it read. */
-function sideEvidenceTrace(source, confidence, evidence) {
-  const rounded = (value, digits) => (value === null ? null : +value.toFixed(digits));
-  return { source, confidence: rounded(confidence, 2),
-    coverage: rounded(evidence.coverage, 2), stops: evidence.stops.length,
-    shadow: rounded(evidence.signals.shadow, 2), prior: rounded(evidence.signals.prior, 2),
-    residual: rounded(evidence.residual, 4), curled: evidence.curled,
-    reference: evidence.reference, excluded: evidence.excluded, exclusions: evidence.exclusions,
-    agreement: rounded(evidence.agreement, 2), uniformity: rounded(evidence.uniformity, 2),
-    distance: rounded(evidence.distance, 3),
-    border: evidence.border, normal: evidence.normal, profiles: evidence.profiles,
-    stopPoints: evidence.stops.map((stop) => ({ x: stop.x, y: stop.y })) };
 }
 
 /** Why a grid-locked quad is not a sheet, or null when it passes. */
@@ -565,23 +475,18 @@ function gridGateFailure(corners, bounds) {
   if (internalAngles(corners).some((angle) => angle < minAngleDeg || angle > maxAngleDeg)) return "angle";
   const areaFraction = shoelaceArea(corners) / (bounds.width * bounds.height);
   if (areaFraction < minAreaFraction || areaFraction > maxAreaFraction) return "area";
-  const length = (type) => segmentLength(sideOf(corners, type));
-  const ratio = (first, second) => Math.max(first, second) / Math.min(first, second);
-  const top = length(SIDE_TOP), bottom = length(SIDE_BOTTOM);
-  const left = length(SIDE_LEFT), right = length(SIDE_RIGHT);
-  if (ratio(top, bottom) > maxOppositeRatio || ratio(left, right) > maxOppositeRatio) return "opposite";
-  const aspect = ratio((top + bottom) / 2, (left + right) / 2);
+  const { opposite, aspect } = sideRatios(corners);
+  if (opposite > maxOppositeRatio) return "opposite";
   if (aspect < minAspect || aspect > maxAspect) return "aspect";
   return null;
 }
 
 /** Fusion, refinement, snap and the anti-cut net, in that order, all
  *  honouring `locks`. */
-function assembleCorners(best, pipeline, locks, trace) {
+function assembleCorners(best, pipeline, locks) {
   const { gray, width, height, candidates, getSegments } = pipeline;
   const fuseMeta = {};
-  const fused = fuseQuad(candidates, best,
-    { gray, width, height, getSegments, trace, locks, meta: fuseMeta });
+  const fused = fuseQuad(candidates, best, { gray, width, height, getSegments, locks, meta: fuseMeta });
 
   // refineQuadEdges returns its input unchanged without hull evidence, so this
   // needs no guard of its own — the same condition the net applies below.
@@ -590,12 +495,10 @@ function assembleCorners(best, pipeline, locks, trace) {
 
   if (fused && best.hullPts && best.hullPts.length >= 3) {
     corners = applyHullCutNet(corners, {
-      best, candidates, contributors: fuseMeta.contributors, locked: locks,
-      width, height, trace, rules: fuseMeta.rules,
+      best, candidates, contributors: fuseMeta.contributors, locked: locks, width, height,
     });
   }
-  const margin = SAFETY_MARGIN_FRACTION * Math.min(width, height);
-  return { corners: expandQuad(corners, margin, pipeline), fusedOk: !!fused };
+  return expandQuad(corners, SAFETY_MARGIN_FRACTION * shortSideOf(pipeline), pipeline);
 }
 
 /**
@@ -608,60 +511,29 @@ function assembleCorners(best, pipeline, locks, trace) {
  * the fallback fails a gate too, they have nothing to protect, and the sides
  * with evidence behind them stand.
  */
-function buildCorners(best, pipeline, trace) {
+function buildCorners(best, pipeline) {
   const baseLocks = lockedSidesFor(best, pipeline.reuniteLock);
-  const gridLocks = gridLocksFor(pipeline, baseLocks, trace);
-  if (!gridLocks) return assembleCorners(best, pipeline, baseLocks, trace);
-  const built = assembleCorners(best, pipeline, gridLocks, trace);
-  const failure = gridGateFailure(built.corners, pipeline);
-  if (!failure) {
-    if (trace) trace.push({ gridGate: "passed" });
-    return built;
-  }
-  const fallback = assembleCorners(best, pipeline, baseLocks, trace);
-  const fallbackFailure = gridGateFailure(fallback.corners, pipeline);
-  if (trace) trace.push({ gridGate: failure, fallbackGate: fallbackFailure || "passed" });
-  return fallbackFailure ? built : fallback;
+  const gridLocks = gridLocksFor(pipeline, baseLocks);
+  if (!gridLocks) return assembleCorners(best, pipeline, baseLocks);
+  const built = assembleCorners(best, pipeline, gridLocks);
+  if (!gridGateFailure(built, pipeline)) return built;
+  const fallback = assembleCorners(best, pipeline, baseLocks);
+  return gridGateFailure(fallback, pipeline) ? built : fallback;
 }
 
-function debugPayload(candidates) {
-  return candidates.map((candidate) => ({
-    mask: candidate.mask, score: +candidate.score.toFixed(4),
-    rejected: !!candidate.rejected, noQuad: !!candidate.noQuad,
-    areaFrac: candidate.areaFrac, split: !!candidate.split, safe: !!candidate.safe,
-    protrusionOut: candidate.protrusionOut !== undefined ? +candidate.protrusionOut.toFixed(3) : undefined,
-    protrusionIn: candidate.protrusionIn !== undefined ? +candidate.protrusionIn.toFixed(3) : undefined,
-    selfOut: candidate.selfOut !== undefined ? +candidate.selfOut.toFixed(3) : undefined,
-    cutSides: candidate.cutSides,
-    corners: candidate.corners && {
-      tl: candidate.corners.tl, tr: candidate.corners.tr,
-      br: candidate.corners.br, bl: candidate.corners.bl,
-    },
-  }));
-}
-
-/**
- * Finds the document outline. Candidate masks (OTSU both polarities, local
- * adaptive threshold, saturation, dilated Canny at two sensitivities) each
- * yield scored quads from their outer contours; edge fusion assembles the best
- * four sides, an outward snap recovers any clipped strips, and a small margin
- * guarantees hairline errors never cut content.
- */
 /** The pipeline's Mat slots start empty so a throw mid-allocation still leaves
  *  something releasePipeline can clean up. */
-function createPipeline(width, height, debug) {
+function createPipeline(width, height) {
   return {
     width, height,
     img: null, gray: null, bin: null,
     kOpen: null, kClose: null, kDilate: null,
     candidates: [],
-    splitDiag: debug ? [] : null,
     reuniteLock: null,
     cannyEdges: null,
     getSegments: null,
     grid: null,
     sheetMask: null,
-    sheetColour: null,
   };
 }
 
@@ -684,48 +556,34 @@ function releasePipeline(pipeline) {
     pipeline.kOpen, pipeline.kClose, pipeline.kDilate, pipeline.cannyEdges, pipeline.sheetMask);
 }
 
-/** The generate-and-score engine, behind the same message as the legacy
- *  pipeline while the two are compared; `engine: "score"` selects it. */
-function detectByScore({ width, height, buffer, debug, preview }) {
-  let img = null;
-  try {
-    img = cv.matFromImageData(toImageData(width, height, buffer));
-    return detectDocument(img, { debug, preview });
-  } finally {
-    releaseMats(img);
-  }
-}
-
 /**
  * The legacy crop, refined by the score within a bounded drift: the score
  * judges small side moves well — inward too, which the legacy passes never
  * could — and whole relocations badly, so it is asked only the first. The
  * legacy pipeline's Hough segments feed the line pools and the print extent.
+ * The re-rank of the legacy's candidates runs before the print extent is
+ * known — the extent needs the winner's segments — so it reads seams as
+ * rules where the refinement, later, reads them as seams.
+ * @returns { corners } — with debug: { corners, refinement: { ...refineGivenQuad's
+ *          outcome, legacy: the legacy crop, printExtent } }
  */
 function detectRefined(payload) {
-  let img = null, frame = null;
+  let img = null;
   try {
     img = cv.matFromImageData(toImageData(payload.width, payload.height, payload.buffer));
-    frame = buildFrame(img, { edges: false });
-    let rerank = null;
+    const frame = buildFrame(img);
     const legacy = detectByLegacy({ ...payload, wantSegments: true,
-      chooseBest: (candidates, best) => {
-        const t0 = performance.now();
-        rerank = rerankByScore(frame, candidates, best);
-        rerank.ms = +(performance.now() - t0).toFixed(1);
-        return rerank.chosen;
-      } });
-    if (!legacy.corners) return legacy;
-    const lines = linePools(frame, null, legacy.segments);
+      chooseBest: (candidates, best) => rerankByScore(frame, candidates, best) });
+    if (!legacy.corners) return { corners: null };
+    const lines = linePools(frame, legacy.segments);
     frame.printExtent = printedExtent(lines.all, frame);
     const outcome = refineGivenQuad(frame, legacy.corners, lines.pools);
     const corners = outcome.refined
-      ? expandQuad(outcome.quad, DETECTOR_SAFETY_MARGIN_OF_SHORT_SIDE * frame.shortSide, frame)
+      ? expandQuad(outcome.quad, SAFETY_MARGIN_FRACTION * frame.shortSide, frame)
       : legacy.corners;
     if (!payload.debug) return { corners };
-    return { ...legacy, corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent, rerank } };
+    return { corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent } };
   } finally {
-    if (frame) frame.release();
     releaseMats(img);
   }
 }
@@ -747,78 +605,61 @@ const RERANK = Object.freeze({
   maxLegacyOutside: 0.1,   // "contains": this share of the legacy pick at most lies outside
 });
 
-/** @returns { chosen, legacyScore, chosenScore, considered } — chosen is
- *           `best` itself when the score does not overrule it */
+/** The candidate that carries on: `best` itself unless the score overrules it. */
 function rerankByScore(frame, candidates, best) {
-  const outcome = { chosen: best, legacyScore: null, chosenScore: null, considered: 0 };
-  if (!best) return outcome;
+  if (!best) return best;
   const field = candidates.filter((candidate) => candidate.corners && !candidate.rejected)
     .sort((p, q) => q.score - p.score).slice(0, RERANK.candidates);
   const scored = field.map((candidate) => ({ candidate, total: scoreQuad(frame, candidate.corners).total }));
-  outcome.considered = scored.length;
   const legacy = scored.find((entry) => entry.candidate === best);
-  if (!legacy || !isFinite(legacy.total)) return outcome; // a pick the score cannot even read stays the legacy's
-  outcome.legacyScore = +legacy.total.toFixed(3);
+  if (!legacy || !isFinite(legacy.total)) return best; // a pick the score cannot even read stays the legacy's
   let top = legacy;
   for (const entry of scored) {
     if (entry.total <= top.total) continue;
     if (fracOutsideQuad(quadPoints(best.corners), entry.candidate.corners) <= RERANK.maxLegacyOutside) top = entry;
   }
-  outcome.chosenScore = +top.total.toFixed(3);
-  if (top !== legacy && top.total - legacy.total >= RERANK.margin) outcome.chosen = top.candidate;
-  return outcome;
+  return top !== legacy && top.total - legacy.total >= RERANK.margin ? top.candidate : best;
 }
 
 function detect(payload) {
-  if (payload.engine === "score") return detectByScore(payload);
-  if (payload.engine === "refined") return detectRefined(payload);
-  return detectByLegacy(payload);
+  return payload.engine === "refined" ? detectRefined(payload) : detectByLegacy(payload);
 }
 
 /**
- * The legacy pipeline: masks, candidate choice, side passes.
- * @param chooseBest optional (candidates, best) => candidate — another
- *                   judge of the winning candidate, given the pipeline's own
- *                   pick; whatever it returns carries on into the side passes
+ * The legacy pipeline: candidate masks (OTSU both polarities, local adaptive
+ * threshold, saturation, dilated Canny at two sensitivities) each yield
+ * scored quads from their outer contours; the best is corrected (reunion,
+ * safe-split override); edge fusion assembles the best four sides around
+ * the locks in force, an outward snap recovers any clipped strips, the net
+ * catches a cut, and a small margin guarantees hairline errors never cut
+ * content.
+ * @param chooseBest   optional (candidates, best) => candidate — another
+ *                     judge of the winning candidate, given the pipeline's
+ *                     own pick; whatever it returns carries on
+ * @param wantSegments also return the Hough segments (found on demand)
+ * @returns { corners | null, segments? }
  */
-function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegments, chooseBest }) {
-  const pipeline = createPipeline(width, height, debug);
-  pipeline.withoutGrid = !!withoutGrid;
+function detectByLegacy({ width, height, buffer, wantSegments, chooseBest }) {
+  const pipeline = createPipeline(width, height);
   try {
     allocatePipelineMats(pipeline, buffer, DETECT_KERNELS);
     collectCandidates(pipeline);
     pipeline.getSegments = createSegmentSource(pipeline);
     // The printed grid, found once: it vouches for sides in buildCorners, and
     // its interior tells the sheet-colour mask what colour to look for.
-    // `withoutGrid` is the overlay page's before/after switch, nothing more.
-    pipeline.grid = pipeline.withoutGrid ? null : findPrintedGrid(pipeline, pipeline.getSegments(), pipeline);
+    pipeline.grid = findPrintedGrid(pipeline, pipeline.getSegments(), pipeline);
     pipeline.sheetMask = pipeline.grid ? sheetColourMask(pipeline, pipeline.grid) : null;
     const candidates = pipeline.candidates;
-    const trace = debug ? [] : null;
 
     let best = selectBestCandidate(candidates);
     if (chooseBest) best = chooseBest(candidates, best);
-    const reunion = reuniteSeveredSection(best, pipeline, trace);
+    const reunion = reuniteSeveredSection(best, pipeline);
     best = reunion.best;
     pipeline.reuniteLock = reunion.lock;
-    best = applySafeSplitOverride(best, candidates, trace);
+    best = applySafeSplitOverride(best, candidates);
 
-    let corners = null;
-    let fusedOk = false;
-    if (best) {
-      const built = buildCorners(best, pipeline, trace);
-      corners = built.corners;
-      fusedOk = built.fusedOk;
-    }
-
-    if (!debug) return wantSegments ? { corners, segments: pipeline.getSegments() } : { corners };
-    // Debug callers expect the segment list regardless of whether fusion
-    // needed it, so force it here rather than reporting a lazy null.
-    return {
-      corners, fusedOk, trace, segments: pipeline.getSegments(),
-      splitDiag: pipeline.splitDiag,
-      debug: debugPayload(candidates),
-    };
+    const corners = best ? buildCorners(best, pipeline) : null;
+    return wantSegments ? { corners, segments: pipeline.getSegments() } : { corners };
   } finally {
     releasePipeline(pipeline);
   }
@@ -837,13 +678,8 @@ function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegment
  * is that it misses scenes the full detector catches. It only ever draws an
  * outline. The crop still comes from `detect` on the captured photo.
  */
-function previewQuad(payload) {
-  if (payload.engine === "score") return detectByScore({ ...payload, preview: true });
-  return previewByLegacy(payload);
-}
-
-function previewByLegacy({ width, height, buffer }) {
-  const pipeline = createPipeline(width, height, false);
+function previewQuad({ width, height, buffer }) {
+  const pipeline = createPipeline(width, height);
   try {
     allocatePipelineMats(pipeline, buffer, PREVIEW_KERNELS);
     prepareGray(pipeline);
@@ -936,24 +772,23 @@ function denoise({ width, height, buffer }) {
 // Message dispatch
 // ------------------------------------------------------------------
 
-/** One entry per message type, each returning the fields to merge into the
- *  reply plus any buffers to hand over rather than copy. A Map rather than an
- *  object literal so an unknown type can never resolve to Object.prototype. */
 /** The score breakdown of a hand-given quad, for the overlay page's tuning
  *  loop. Nothing in the app sends this. */
 function scoreGivenQuad({ width, height, buffer, corners }) {
-  let img = null, frame = null;
+  let img = null;
   try {
     img = cv.matFromImageData(toImageData(width, height, buffer));
-    frame = buildFrame(img, { edges: false });
+    const frame = buildFrame(img);
     return { score: scoreQuad(frame, corners, { keepSamples: true }),
              frame: { magnitudeScale: frame.magnitudeScale, backgroundLab: frame.backgroundLab } };
   } finally {
-    if (frame) frame.release();
     releaseMats(img);
   }
 }
 
+/** One entry per message type, each returning the fields to merge into the
+ *  reply plus any buffers to hand over rather than copy. A Map rather than an
+ *  object literal so an unknown type can never resolve to Object.prototype. */
 const HANDLERS = new Map([
   ["init", () => ({ result: {} })],
   ["detect", (payload) => ({ result: detect(payload) })],
