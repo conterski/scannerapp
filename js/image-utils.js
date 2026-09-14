@@ -1,10 +1,40 @@
 /* image-utils.js — the canvas work shared by capture, decoding, detection and
  * export: scaling a source into a bounded canvas, decoding a photo with its
- * EXIF orientation applied, and encoding a canvas as JPEG.
+ * EXIF orientation applied, encoding a canvas as JPEG — and the corner-quad
+ * arithmetic every module that maps a crop between resolutions needs.
  * Exposes window.ImageUtils.
  */
 (function () {
   "use strict";
+
+  // A crop is always { tl, tr, br, bl }, each an { x, y }.
+  const CORNER_KEYS = ["tl", "tr", "br", "bl"];
+
+  function clamp(value, low, high) { return Math.min(Math.max(value, low), high); }
+
+  /** A new quad with `fn(point, key)` applied to each corner. */
+  function mapCorners(corners, fn) {
+    const mapped = {};
+    for (const key of CORNER_KEYS) mapped[key] = fn(corners[key], key);
+    return mapped;
+  }
+
+  /** Every corner scaled by `factor`. */
+  function scaleCorners(corners, factor) {
+    return mapCorners(corners, (point) => ({ x: point.x * factor, y: point.y * factor }));
+  }
+
+  /** Shoelace area over tl→tr→br→bl. */
+  function quadArea(corners) {
+    const points = CORNER_KEYS.map((key) => corners[key]);
+    let doubleArea = 0;
+    for (let index = 0; index < points.length; index++) {
+      const current = points[index];
+      const next = points[(index + 1) % points.length];
+      doubleArea += current.x * next.y - next.x * current.y;
+    }
+    return Math.abs(doubleArea) / 2;
+  }
 
   /** Intrinsic size of anything drawable: <img>, <video>, canvas, ImageBitmap. */
   function sourceDimensions(source) {
@@ -63,6 +93,38 @@
     return canvas;
   }
 
+  function imageDataOf(canvas) {
+    return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  /** One canvas reused for every read-back of a stream of frames — a fresh
+   *  canvas per frame would be nothing but allocation churn. `context(width,
+   *  height)` resizes it on demand and returns a willReadFrequently context,
+   *  which keeps the pixels where getImageData can reach them without a copy
+   *  off the GPU each time. */
+  function createScratchCanvas() {
+    let canvas = null;
+    return {
+      context(width, height) {
+        if (!canvas) canvas = document.createElement("canvas");
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        return canvas.getContext("2d", { willReadFrequently: true });
+      },
+      get canvas() { return canvas; },
+    };
+  }
+
+  /** An <img> for a decorative thumbnail — one that carries no alt text. */
+  function thumbnailImage(url) {
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = "";
+    return image;
+  }
+
   /** Drops a canvas's pixel buffer now instead of at the next collection.
    *  A queued capture frame is tens of megabytes, and iOS Safari is quick to
    *  discard a tab that holds several of them waiting to be encoded. */
@@ -80,7 +142,8 @@
   }
 
   window.ImageUtils = {
+    CORNER_KEYS, clamp, mapCorners, scaleCorners, quadArea,
     sourceDimensions, createScaledCanvas, decodeImageToCanvas, encodeCanvasToJpeg,
-    releaseCanvas,
+    imageDataOf, createScratchCanvas, thumbnailImage, releaseCanvas,
   };
 })();

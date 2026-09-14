@@ -19,5 +19,10 @@
     return value;
   }
 
-  window.PromiseUtils = { markRejectionHandled };
+  /** Resolves after `ms` milliseconds. */
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  window.PromiseUtils = { markRejectionHandled, delay };
 })();

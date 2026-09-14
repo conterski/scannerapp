@@ -6,8 +6,7 @@
 (function () {
   "use strict";
 
-  const CORNER_KEYS = ["tl", "tr", "br", "bl"];
-  const QUARTER_TURNS_PER_REVOLUTION = 4;
+  const { CORNER_KEYS, clamp, mapCorners, scaleCorners } = ImageUtils;
 
   // Stage layout: how much room the photo may take once the controls below it
   // have been accounted for.
@@ -118,7 +117,7 @@
   }
 
   function cloneCorners(corners) {
-    return JSON.parse(JSON.stringify(corners));
+    return mapCorners(corners, ({ x, y }) => ({ x, y }));
   }
 
   // ---------------------------------------------------------------
@@ -160,8 +159,7 @@
   }
 
   function rotateBy(quarterTurnDelta) {
-    const turns = session.quarterTurns + quarterTurnDelta + QUARTER_TURNS_PER_REVOLUTION;
-    session.quarterTurns = turns % QUARTER_TURNS_PER_REVOLUTION;
+    session.quarterTurns = ScanRenderer.normalizeQuarterTurns(session.quarterTurns + quarterTurnDelta);
     schedulePreview();
   }
 
@@ -171,12 +169,12 @@
     schedulePreview();
   }
 
-  /** Detection is slow enough that the editor can be closed or moved to
-   *  another page before it lands, so the result is applied only to the
-   *  session that asked for it — the same guard renderPreview uses. */
   /** Auto: the automatic crop. For a camera shot that is the crop the
    *  viewfinder proposed, which the user has already judged against the
-   *  detector's; for anything else, the detector on the stored photo. */
+   *  detector's; for anything else, the detector on the stored photo —
+   *  slow enough that the editor can be closed or moved to another page
+   *  before it lands, so the result is applied only to the session that
+   *  asked for it, the same guard renderPreview uses. */
   async function redetectCorners() {
     if (session.viewfinderCorners) {
       session.corners = cloneCorners(session.viewfinderCorners); // the handles move these; the original stays
@@ -284,10 +282,6 @@
       x: clamp((event.clientX - bounds.left) / scale, 0, session.source.width),
       y: clamp((event.clientY - bounds.top) / scale, 0, session.source.height),
     };
-  }
-
-  function clamp(value, low, high) {
-    return Math.min(Math.max(value, low), high);
   }
 
   function beginHandleDrag(handle) {
@@ -418,6 +412,7 @@
     try {
       const scan = await renderPreviewScan();
       if (session && session.openId === openId) paintPreview(scan);
+      else ImageUtils.releaseCanvas(scan);
     } catch (error) {
       console.warn("Preview failed:", error);
     } finally {
@@ -431,21 +426,19 @@
 
   function renderPreviewScan() {
     const { canvas, scale } = ImageUtils.createScaledCanvas(session.source, PREVIEW_MAX_EDGE);
-    const scaled = {};
-    for (const key of CORNER_KEYS) {
-      const corner = session.corners[key];
-      scaled[key] = { x: corner.x * scale, y: corner.y * scale };
-    }
     // Released on settle rather than straight away: the warp reads the canvas
     // after awaiting the worker, and a preview runs on every drag and rotation.
-    return ScanRenderer.renderScan(canvas, scaled, { quarterTurns: session.quarterTurns })
+    return ScanRenderer.renderScan(canvas, scaleCorners(session.corners, scale), { quarterTurns: session.quarterTurns })
       .finally(() => ImageUtils.releaseCanvas(canvas));
   }
 
+  /** Copies the scan onto the preview canvas and releases it: one arrives
+   *  per drag step and per rotation. */
   function paintPreview(scan) {
     elements.preview.width = scan.width;
     elements.preview.height = scan.height;
     elements.preview.getContext("2d").drawImage(scan, 0, 0);
+    ImageUtils.releaseCanvas(scan);
   }
 
   window.Editor = { init, open };

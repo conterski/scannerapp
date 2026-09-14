@@ -16,18 +16,8 @@
   // 384px separates them and costs a few milliseconds per frame.
   const MEASURE_MAX_EDGE = 384;
 
-  // One scratch canvas for every measurement, like the preview's: a new
-  // canvas per frame would be allocation for nothing.
-  let scratch = null;
-
-  function scratchContext(width, height) {
-    if (!scratch) scratch = document.createElement("canvas");
-    if (scratch.width !== width || scratch.height !== height) {
-      scratch.width = width;
-      scratch.height = height;
-    }
-    return scratch.getContext("2d", { willReadFrequently: true });
-  }
+  // One scratch canvas for every measurement, like the preview's.
+  const scratch = ImageUtils.createScratchCanvas();
 
   /** Variance of the 4-neighbour Laplacian over the gray of `imageData`. */
   function laplacianVariance(imageData) {
@@ -60,9 +50,9 @@
     const scale = Math.min(1, MEASURE_MAX_EDGE / Math.max(region.width, region.height));
     const width = Math.max(3, Math.round(region.width * scale));
     const height = Math.max(3, Math.round(region.height * scale));
-    const context = scratchContext(width, height);
+    const context = scratch.context(width, height);
     context.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, width, height);
-    return laplacianVariance(context.getImageData(0, 0, width, height));
+    return laplacianVariance(ImageUtils.imageDataOf(scratch.canvas));
   }
 
   window.FrameSharpness = { measure };

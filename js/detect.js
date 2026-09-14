@@ -1,11 +1,7 @@
 /* detect.js — document corner detection, the perspective warp and capture
  * denoising, all delegated to Web Workers (js/scan-worker.js) so the ~11 MB
  * OpenCV.js compile and every pixel operation stay off the main thread.
- *
- * There are two workers, not one, because adding a batch of photos was bound
- * by a single worker doing detection, the warp and the filter in turn. They
- * are split by cost: detection on one, the warp and the filter on the other,
- * so the two halves of a batch overlap. See createWorkerChannel.
+ * There are two workers, split by cost — see createWorkerChannel.
  *
  * Exposes window.Detect.
  */
@@ -24,9 +20,9 @@
   const MIN_DOCUMENT_AREA_FRACTION = 0.08;
 
   const MIN_WARP_DIMENSION = 8;
-  const CORNER_KEYS = ["tl", "tr", "br", "bl"];
+  const { clamp, mapCorners, scaleCorners, quadArea, imageDataOf } = ImageUtils;
 
-  // The worker and its seven modules are fetched by URL rather than by a
+  // The worker and its modules are fetched by URL rather than by a
   // <script> tag, so the deploy-time cache-busting stamp never reaches them on
   // its own. Carry this file's own stamp across by hand: without it a fresh
   // page can pair a fresh app with a stale detector, and because those modules
@@ -91,7 +87,8 @@
         ready = started;
         // Retire this attempt only: shutDown() may already have replaced it,
         // and clearing a newer promise would send a second, pointless init.
-        started.catch(() => { if (ready === started) ready = null; });
+        // The rejection itself is reported where the promise is awaited.
+        PromiseUtils.markRejectionHandled(started.then(null, () => { if (ready === started) ready = null; }));
       }
       return ready;
     }
@@ -157,8 +154,7 @@
    * Detects document corners in `sourceCanvas` (full-res normalized image),
    * falling back to the whole image when no plausible document quad is found
    * and when detection itself fails.
-   * @param options { withoutGrid } — the overlay page's and the timing
-   *                harness's switch; the app never passes it
+   * @param options { engine } — see engineFor; the app never passes it
    * @returns { corners, failed } — corners {tl,tr,br,bl} in full-res
    *          coordinates; `failed` separates the engine giving up from the
    *          photo simply having no document in it, so a caller can say so.
@@ -179,42 +175,33 @@
     }
   }
 
-  /** The new engine's score breakdown for `corners` (full-res), for the
-   *  overlay page: how the cost function reads a quad before any search
-   *  exists to find one. */
+  /** The score's breakdown for `corners` (full-res), for the overlay page:
+   *  how the cost function reads a quad. */
   async function scoreQuad(sourceCanvas, corners) {
     await detector.ensureReady();
-    const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
-    const imageData = imageDataOf(canvas);
-    ImageUtils.releaseCanvas(canvas);
-    const scaled = {};
-    for (const key of Object.keys(corners)) scaled[key] = { x: corners[key].x * scale, y: corners[key].y * scale };
+    const { imageData, scale } = detectionPixels(sourceCanvas);
     const response = await callDetector("scoreQuad", {
-      width: imageData.width, height: imageData.height, buffer: imageData.data.buffer, corners: scaled,
+      width: imageData.width, height: imageData.height, buffer: imageData.data.buffer,
+      corners: scaleCorners(corners, scale),
     }, [imageData.data.buffer]);
-    return { score: response.score, frame: response.frame, scale };
+    return { score: response.score, frame: response.frame };
   }
 
-  /** Debug variant: returns the per-candidate scoring info at detection scale.
-   *  @param options { withoutGrid } — the overlay page's before/after switch */
+  /** Debug variant, for the overlay page: the crop at detection scale, the
+   *  scale it was found at, and the refined engine's account of itself.
+   *  @param options { engine } */
   async function detectDebug(sourceCanvas, options) {
     await detector.ensureReady();
     const { response, scale } = await runDetection(sourceCanvas, true, options);
-    return {
-      corners: response.corners, debug: response.debug, scale,
-      fusedOk: response.fusedOk, trace: response.trace,
-      segments: response.segments, splitDiag: response.splitDiag,
-      refinement: response.refinement,
-    };
+    return { corners: response.corners, scale, refinement: response.refinement };
   }
 
   // ---------------------------------------------------------------
   // Live preview
   // ---------------------------------------------------------------
 
-  // One scratch canvas for every preview frame. A fresh canvas per tick, ten
-  // times a second, would be nothing but allocation churn.
-  let previewCanvas = null;
+  // One scratch canvas for every preview frame, ten times a second.
+  const previewScratch = ImageUtils.createScratchCanvas();
 
   /** Draws the current frame into the scratch canvas at preview size.
    *  @returns { imageData, scale } */
@@ -223,17 +210,9 @@
     const scale = Math.min(1, PREVIEW_MAX_EDGE / Math.max(width, height));
     const targetWidth = Math.max(1, Math.round(width * scale));
     const targetHeight = Math.max(1, Math.round(height * scale));
-    if (!previewCanvas) previewCanvas = document.createElement("canvas");
-    if (previewCanvas.width !== targetWidth || previewCanvas.height !== targetHeight) {
-      previewCanvas.width = targetWidth;
-      previewCanvas.height = targetHeight;
-    }
-    // Read back every tick, which is the case willReadFrequently exists for:
-    // it keeps the pixels where getImageData can reach them without a copy
-    // off the GPU each time.
-    const context = previewCanvas.getContext("2d", { willReadFrequently: true });
+    const context = previewScratch.context(targetWidth, targetHeight);
     context.drawImage(frameSource, 0, 0, targetWidth, targetHeight);
-    return { imageData: imageDataOf(previewCanvas), scale: targetWidth / width };
+    return { imageData: imageDataOf(previewScratch.canvas), scale: targetWidth / width };
   }
 
   /**
@@ -263,36 +242,36 @@
 
   // Which detector answers. "refined" is the legacy pipeline's crop
   // tightened by the score within a bounded, inward-only drift; "legacy" is
-  // that crop alone; "score" is the generate-and-score engine on its own,
-  // which the overlay page compares and the app never uses.
+  // that crop alone, which the overlay page compares and the app never uses.
   const DEFAULT_ENGINE = "refined";
   function engineFor(options) { return (options && options.engine) || DEFAULT_ENGINE; }
 
-  async function runDetection(sourceCanvas, wantsDebug, options) {
+  /** The photo at detection size, as pixels the worker can take over.
+   *  @returns { imageData, scale } */
+  function detectionPixels(sourceCanvas) {
     const { canvas, scale } = ImageUtils.createScaledCanvas(sourceCanvas, DETECTION_MAX_EDGE);
     const imageData = imageDataOf(canvas);
     ImageUtils.releaseCanvas(canvas); // the pixels live in imageData now
+    return { imageData, scale };
+  }
+
+  async function runDetection(sourceCanvas, wantsDebug, options) {
+    const { imageData, scale } = detectionPixels(sourceCanvas);
     const response = await callDetector("detect", {
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
       debug: wantsDebug,
-      withoutGrid: !!(options && options.withoutGrid),
       engine: engineFor(options),
     }, [imageData.data.buffer]);
     return { response, scale };
   }
 
   function toFullResolutionCorners(detectedCorners, scale, bounds) {
-    const corners = {};
-    for (const key of CORNER_KEYS) {
-      const point = detectedCorners[key];
-      corners[key] = {
-        x: clamp(point.x / scale, 0, bounds.width),
-        y: clamp(point.y / scale, 0, bounds.height),
-      };
-    }
-    return corners;
+    return mapCorners(detectedCorners, (point) => ({
+      x: clamp(point.x / scale, 0, bounds.width),
+      y: clamp(point.y / scale, 0, bounds.height),
+    }));
   }
 
   function isPlausibleDocumentQuad(corners, bounds) {
@@ -380,30 +359,12 @@
     };
   }
 
+  /** The four corners and nothing else — a page record's crop may carry more. */
   function pickCorners(corners) {
-    const { tl, tr, br, bl } = corners;
-    return { tl, tr, br, bl };
-  }
-
-  /** Shoelace formula over tl→tr→br→bl. */
-  function quadArea(corners) {
-    const points = CORNER_KEYS.map((key) => corners[key]);
-    let doubleArea = 0;
-    for (let index = 0; index < points.length; index++) {
-      const current = points[index];
-      const next = points[(index + 1) % points.length];
-      doubleArea += current.x * next.y - next.x * current.y;
-    }
-    return Math.abs(doubleArea) / 2;
+    return mapCorners(corners, ({ x, y }) => ({ x, y }));
   }
 
   function distance(from, to) { return Math.hypot(from.x - to.x, from.y - to.y); }
-
-  function clamp(value, low, high) { return Math.min(Math.max(value, low), high); }
-
-  function imageDataOf(canvas) {
-    return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
-  }
 
   /** Wraps pixels the worker handed back into a canvas of the given size. */
   function canvasFromBuffer(buffer, width, height) {

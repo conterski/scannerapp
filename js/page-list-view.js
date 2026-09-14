@@ -31,8 +31,8 @@
   // Public surface
   // ---------------------------------------------------------------
 
-  /** @param listHandlers { onEditPage, onDeletePage, onMovePage,
-   *                        onInsertAfterPage, onDeleteSelected, onClearAll } */
+  /** @param listHandlers { onEditPage, onDeletePage, onMovePage, onInsertAfterPage,
+   *                        onDeleteSelected, onClearAll, onSelectModeChanged } */
   function init(listHandlers) {
     handlers = listHandlers;
     $("selectBtn").addEventListener("click", enterSelectMode);
@@ -108,7 +108,7 @@
     $("listToolbar").hidden = !hasPages || isSelectModeActive;
     $("actionBar").hidden = isSelectModeActive;
     $("exportHint").hidden = isSelectModeActive;
-    $("compactToggle").hidden = isSelectModeActive;
+    for (const toggle of document.querySelectorAll(".compact-toggle")) toggle.hidden = isSelectModeActive;
     $("selectBar").hidden = !isSelectModeActive;
     if (isSelectModeActive) updateSelectBar();
   }
@@ -295,6 +295,6 @@
 
   window.PageListView = {
     init, render, refreshThumbnail,
-    enterSelectMode, exitSelectMode, getSelectedPageIds, setListChromeVisible,
+    exitSelectMode, getSelectedPageIds, setListChromeVisible,
   };
 })();

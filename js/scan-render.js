@@ -18,6 +18,7 @@
     { tl: "tr", tr: "br", br: "bl", bl: "tl" }, // 90° CCW
   ];
 
+  /** `quarterTurns` brought into 0..3, whatever its sign. */
   function normalizeQuarterTurns(quarterTurns) {
     const turns = quarterTurns % QUARTER_TURNS_PER_REVOLUTION;
     return (turns + QUARTER_TURNS_PER_REVOLUTION) % QUARTER_TURNS_PER_REVOLUTION;
@@ -46,5 +47,5 @@
       { maxDim: settings.maxDim, enhance: settings.enhance });
   }
 
-  window.ScanRenderer = { renderScan };
+  window.ScanRenderer = { renderScan, normalizeQuarterTurns };
 })();

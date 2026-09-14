@@ -15,7 +15,6 @@
 
   function create() {
     let tail = Promise.resolve();
-    let running = 0;
 
     /**
      * Queues `job` to start once everything queued before it has finished.
@@ -23,16 +22,14 @@
      *          job does, so callers keep their existing error handling.
      */
     function run(job) {
-      running++;
       const started = tail.then(() => job());
-      const settle = () => { running--; };
       // The queue follows a settled promise, never a rejected one: a job that
       // throws must not stall everything behind it.
-      tail = started.then(settle, settle);
+      tail = started.then(() => {}, () => {});
       return started;
     }
 
-    return { run, isBusy: () => running > 0 };
+    return { run };
   }
 
   window.JobQueue = { create };

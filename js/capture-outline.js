@@ -22,9 +22,7 @@
   "use strict";
 
   // How often a frame is offered to the detector. The detector's own time per
-  // frame sets the real rate whenever it is slower than this. Was 150ms; the
-  // preview's single-mask pass made a frame a quarter cheaper, and that
-  // saving is spent here on a steadier outline at the same cost.
+  // frame sets the real rate whenever it is slower than this.
   const PREVIEW_INTERVAL_MS = 120;
 
   // Share of each new position taken per frame. Raw per-frame quads jitter;
@@ -35,7 +33,7 @@
   // frame does not blink it off.
   const MISSES_BEFORE_HIDE = 3;
 
-  const CORNER_KEYS = ["tl", "tr", "br", "bl"];
+  const { CORNER_KEYS, mapCorners } = ImageUtils;
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   /** Unlike an HTML element, an <svg> has no `hidden` property — assigning one
@@ -61,14 +59,10 @@
 
   function blendCorners(previous, next) {
     if (!previous) return next;
-    const blended = {};
-    for (const key of CORNER_KEYS) {
-      blended[key] = {
-        x: previous[key].x + (next[key].x - previous[key].x) * SMOOTHING,
-        y: previous[key].y + (next[key].y - previous[key].y) * SMOOTHING,
-      };
-    }
-    return blended;
+    return mapCorners(previous, (point, key) => ({
+      x: point.x + (next[key].x - point.x) * SMOOTHING,
+      y: point.y + (next[key].y - point.y) * SMOOTHING,
+    }));
   }
 
   /**
@@ -185,13 +179,11 @@
     function corners() {
       const { width, height } = ImageUtils.sourceDimensions(video);
       if (!shown || !width || !height) return null;
-      const fractions = {};
-      for (const key of CORNER_KEYS) fractions[key] = { x: shown[key].x / width, y: shown[key].y / height };
-      return fractions;
+      return mapCorners(shown, (point) => ({ x: point.x / width, y: point.y / height }));
     }
 
-    return { start, stop, region, corners, isRunning: () => isRunning };
+    return { start, stop, region, corners };
   }
 
-  window.CaptureOutline = { create, coverTransform };
+  window.CaptureOutline = { create };
 })();

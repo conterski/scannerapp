@@ -201,13 +201,19 @@
   /** Turns a grabbed frame into the JPEG that gets stored: grain removed while
    *  the frame is still full size, then the profile's cap, then the encode.
    *  Without denoising the cap was already applied at grab time, so the frame
-   *  goes straight to the encoder. */
-  function captureJpeg(frame) {
+   *  goes straight to the encoder. `frame` stays the caller's to release;
+   *  the canvases made on the way are released here, each a full-resolution
+   *  one. */
+  async function captureJpeg(frame) {
     const { maxEdge, jpegQuality, denoise } = CaptureQuality.currentProfile();
-    const ready = denoise
-      ? reduceNoise(frame).then((clean) => capLongestSide(clean, maxEdge))
-      : Promise.resolve(frame);
-    return ready.then((canvas) => ImageUtils.encodeCanvasToJpeg(canvas, jpegQuality));
+    if (!denoise) return ImageUtils.encodeCanvasToJpeg(frame, jpegQuality);
+    const clean = await reduceNoise(frame);
+    const capped = capLongestSide(clean, maxEdge);
+    try {
+      return await ImageUtils.encodeCanvasToJpeg(capped, jpegQuality);
+    } finally {
+      for (const made of new Set([clean, capped])) if (made !== frame) ImageUtils.releaseCanvas(made);
+    }
   }
 
   function create() {
@@ -283,7 +289,7 @@
       if (!focusMode.includes("single-shot") || currentSettings(track).focusMode === "continuous") return asked;
       return asked
         .then(() => request(track, { focusMode: "single-shot" }, "focus on request"))
-        .then(() => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)));
+        .then(() => PromiseUtils.delay(FOCUS_SETTLE_MS));
     }
 
     /** Switches the camera light. Rejects if the device refuses, so the caller
@@ -344,6 +350,6 @@
   }
 
   window.CameraStream = {
-    isSupported, describeError, grabFrame, grabSharpest, captureJpeg, create,
+    isSupported, describeError, grabSharpest, captureJpeg, create,
   };
 })();

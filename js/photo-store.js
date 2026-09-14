@@ -1,7 +1,7 @@
 /* photo-store.js — storage for one capture session: the shots in capture
  * order, each with the viewfinder outline it was taken under, plus the
- * object URLs used to preview them. This module is the only place those URLs
- * are created or revoked.
+ * object URLs used to preview them — created here and revoked here, so a
+ * session's previews never outlive it.
  *
  * Exposes window.PhotoStore. `create()` is a factory — a store belongs to the
  * session that created it and is passed explicitly to whoever needs it.

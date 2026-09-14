@@ -17,9 +17,10 @@
   // A type that IS present and isn't an image must still lose.
   const IMAGE_FILE_EXTENSIONS = /\.(jpe?g|png|gif|bmp|webp|heic|heif|avif|tiff?)$/i;
 
-  /** @type {Array<{id:number, blob:Blob, corners:Object, quarterTurns:number,
-   *  outputBlob:Blob, outputURL:string, renderedSig:string}>}
-   *  Stored as `quarter` on disk — Store's page record maps the name. */
+  /** @type {Array<{id:number, blob:Blob, corners:Object, viewfinderCorners:Object|null,
+   *  quarterTurns:number, outputBlob:Blob, outputURL:string, renderedSig:string,
+   *  renderFailed:boolean}>} — see createPage. Stored as `quarter` on disk —
+   *  Store's page record maps the name. */
   const pages = [];
   let nextPageId = 1;
 
@@ -260,7 +261,7 @@
     if (!pages.length) return Promise.resolve(0);
     return new Promise((resolve) => {
       ChoicePrompt.open({
-        title: `Add ${photoCount} photo${photoCount === 1 ? "" : "s"}`,
+        title: `Add ${AppChrome.plural(photoCount, "photo")}`,
         choices: positionChoices(resolve),
         onCancel: () => resolve(null),
       });
@@ -298,7 +299,7 @@
    *  decode and the previous page's warp+encode run on the main thread while
    *  the worker detects — their cost hides almost entirely. */
   async function addPhotoBatch(items, insertAt, busy) {
-    const renders = [];
+    const pageRenders = [];
     // Counted rather than reported per photo: a dead worker fails every
     // remaining photo, and one message is enough to explain the whole run.
     const tally = { detectionFailures: 0 };
@@ -313,9 +314,9 @@
       const page = await registerPage(items[index], decoded, cursor, tally);
       if (!page) continue;
       cursor++;
-      renders.push(renderAndPersistNewPage(page, decoded, items[index].file));
+      pageRenders.push(renderAndPersistNewPage(page, decoded, items[index].file));
     }
-    await Promise.all(renders);
+    await Promise.all(pageRenders);
     return tally;
   }
 
@@ -352,15 +353,12 @@
   /** Corners given as fractions of the frame, in the pixels of `size`. The
    *  saved photo is the frame scaled uniformly, so the fractions carry over. */
   function cornersAtSize(fractions, { width, height }) {
-    const corners = {};
-    for (const key of Object.keys(fractions)) {
-      corners[key] = { x: fractions[key].x * width, y: fractions[key].y * height };
-    }
-    return corners;
+    return ImageUtils.mapCorners(fractions, (point) => ({ x: point.x * width, y: point.y * height }));
   }
 
   /** Deliberately not awaited by the batch loop: the render overlaps the next
-   *  photo's detection, which is what makes the pipeline fast. */
+   *  photo's detection, which is what makes the pipeline fast. `decoded` is
+   *  the batch's own decode of the photo, released once rendered. */
   function renderAndPersistNewPage(page, decoded, file) {
     return regenerateOutput(page, decoded).then(() => {
       // addPage writes the original blob as well, so persisting a page that
@@ -370,7 +368,7 @@
     }, (error) => {
       discardPage(page);
       reportPhotoFailure(file, error);
-    });
+    }).finally(() => ImageUtils.releaseCanvas(decoded));
   }
 
   /** Compact stores a re-encoded (smaller) original; standard keeps the raw
@@ -539,7 +537,7 @@
     const selectedIds = PageListView.getSelectedPageIds();
     const selectedCount = selectedIds.size;
     if (!selectedCount) return;
-    if (!confirm(`Delete ${selectedCount} page${selectedCount === 1 ? "" : "s"}?`)) return;
+    if (!confirm(`Delete ${AppChrome.plural(selectedCount, "page")}?`)) return;
     for (let index = pages.length - 1; index >= 0; index--) {
       if (!selectedIds.has(pages[index].id)) continue;
       forgetPage(pages[index]);
@@ -596,7 +594,7 @@
   function confirmLossyCompression() {
     if (!pages.length) return true;
     return confirm(
-      `Compress ${pages.length} saved scan${pages.length === 1 ? "" : "s"} to save space?` +
+      `Compress ${AppChrome.plural(pages.length, "saved scan")} to save space?` +
       `\n\nThis lowers their resolution and can't be undone.`);
   }
 
@@ -632,8 +630,11 @@
       // Advanced before the skip below, so a removed page never breaks the
       // decode overlap that makes the pass fast.
       if (index + 1 < queued.length) nextDecode = prefetchOriginal(queued[index + 1]);
-      if (!isPagePresent(queued[index])) continue; // deleted since we started
-      await processPage(queued[index], source);
+      try {
+        if (isPagePresent(queued[index])) await processPage(queued[index], source); // else deleted since we started
+      } finally {
+        ImageUtils.releaseCanvas(source); // this pass's own decode, not the editor's cache
+      }
     }
   }
 
@@ -697,8 +698,13 @@
       quarterTurns: page.quarterTurns, maxDim: profile.maxDim,
       enhance: ScanEnhance.isEnabled(),
     });
-    if (!isCurrent()) return; // superseded by a newer edit
-    const blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
+    let blob;
+    try {
+      if (!isCurrent()) return; // superseded by a newer edit
+      blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
+    } finally {
+      ImageUtils.releaseCanvas(scan); // the warp's output; the JPEG is what is kept
+    }
     if (!isCurrent()) return;
     releasePageURL(page);
     page.outputBlob = blob;
@@ -724,10 +730,8 @@
   function unexportablePages() { return pages.filter((page) => !page.outputBlob); }
 
   function describeUnexportable(count) {
-    const pageWord = count === 1 ? "page" : "pages";
-    const themWord = count === 1 ? "it" : "them";
-    return `${count} ${pageWord} couldn't be processed, so the export was ` +
-      `cancelled.\n\nRemove ${themWord} from the list and try again.`;
+    return `${AppChrome.plural(count, "page")} couldn't be processed, so the export was ` +
+      `cancelled.\n\nRemove ${count === 1 ? "it" : "them"} from the list and try again.`;
   }
 
   /** @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */

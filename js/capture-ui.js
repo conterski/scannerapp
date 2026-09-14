@@ -39,7 +39,6 @@
     };
   }
 
-  function photoLabel(n) { return `${n} photo${n === 1 ? "" : "s"}`; }
 
   function open(store, opts) {
     const onFallback = (opts && opts.onFallback) || null;
@@ -62,20 +61,15 @@
         const n = store.count();
         // The count lives in the pill only: a label that grows with it would
         // widen the Done button and push the shutter off centre.
-        els.shotCount.textContent = photoLabel(n);
-        els.galleryCount.textContent = photoLabel(n);
+        els.shotCount.textContent = AppChrome.plural(n, "photo");
+        els.galleryCount.textContent = AppChrome.plural(n, "photo");
       }
 
       function renderStrip() {
         const recent = store.list().slice(-STRIP_MAX); // newest last, painted on top
         els.shotStrip.innerHTML = "";
         els.shotStrip.hidden = recent.length === 0;
-        for (const shot of recent) {
-          const img = document.createElement("img");
-          img.src = shot.url;
-          img.alt = "";
-          els.shotStrip.appendChild(img);
-        }
+        for (const shot of recent) els.shotStrip.appendChild(ImageUtils.thumbnailImage(shot.url));
       }
 
       function renderGallery() {
@@ -83,9 +77,7 @@
         for (const shot of store.list()) {
           const cell = document.createElement("div");
           cell.className = "gallery-cell";
-          const img = document.createElement("img");
-          img.src = shot.url;
-          img.alt = "";
+          const img = ImageUtils.thumbnailImage(shot.url);
           const del = document.createElement("button");
           del.type = "button";
           del.className = "gallery-del";
@@ -184,23 +176,29 @@
         });
       }
 
+      /** The viewfinder's chrome at rest: no error, no flash, the controls
+       *  showing, the torch button hidden until the device admits it can. */
+      function resetChrome() {
+        els.captureError.hidden = true;
+        els.captureFlash.hidden = true;
+        els.captureControls.hidden = false;
+        els.captureDoneBtn.disabled = false;
+        els.torchBtn.hidden = true;
+        renderTorch();
+      }
+
       function teardown() {
         binder.offAll();
         outline.stop();
         clearTimeout(flashTimer);
         isTorchOn = false;
-        els.torchBtn.hidden = true;
-        renderTorch();
         camera.stop(els.captureVideo); // also puts the light out
         store.dispose();
         els.captureView.hidden = true;
         PageScroll.thaw(); // every exit — Done, Cancel and the fallback — lands here
         els.galleryView.hidden = true;
-        els.captureError.hidden = true;
-        els.captureFlash.hidden = true;
-        els.captureControls.hidden = false;
+        resetChrome();
         els.shutterBtn.disabled = false;
-        els.captureDoneBtn.disabled = false;
         els.galleryGrid.innerHTML = "";
         els.shotStrip.innerHTML = "";
       }
@@ -263,15 +261,11 @@
       // The camera covers the screen but the page behind it still scrolls,
       // which on iOS shows as the list sliding under the viewfinder.
       PageScroll.freeze();
-      els.captureError.hidden = true;
-      els.captureFlash.hidden = true;
-      els.captureControls.hidden = false;
+      resetChrome();
       els.shutterBtn.disabled = true; // enabled once frames are flowing
       renderCount();
       renderStrip();
       wire();
-      els.torchBtn.hidden = true; // shown only once the device admits it can
-      renderTorch();
       // Both handlers check `accepting`: the user can leave before the camera
       // finishes opening, and writing to the torn-down screen would leave the
       // error panel showing when the next session opens.

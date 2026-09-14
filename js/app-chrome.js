@@ -1,5 +1,6 @@
 /* app-chrome.js — the two pieces of feedback the app shows over whatever the
- * user is doing: the blocking busy overlay and the transient status line.
+ * user is doing: the blocking busy overlay and the transient status line —
+ * and the one wording helper every message needs.
  *
  * Busy work is a scope rather than a pair of calls. Two long jobs can overlap
  * — compressing every scan while a batch of photos is still being added, say —
@@ -15,6 +16,9 @@
   const STATUS_MESSAGE_MS = 6000;
 
   const $ = (id) => document.getElementById(id);
+
+  /** `count` with `noun`, pluralised the regular way: "1 page", "3 pages". */
+  function plural(count, noun) { return `${count} ${noun}${count === 1 ? "" : "s"}`; }
 
   const activeScopes = []; // oldest first; the newest one owns the message
   let statusTimer = 0;
@@ -63,5 +67,5 @@
     statusTimer = setTimeout(() => setStatus(""), STATUS_MESSAGE_MS);
   }
 
-  window.AppChrome = { beginBusy, setStatus, showTemporaryStatus };
+  window.AppChrome = { beginBusy, setStatus, showTemporaryStatus, plural };
 })();

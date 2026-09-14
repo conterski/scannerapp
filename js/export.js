@@ -75,12 +75,8 @@
   async function downloadInOrder(files) {
     for (const file of files) {
       triggerDownload(file, file.name);
-      await delay(DOWNLOAD_STAGGER_MS);
+      await PromiseUtils.delay(DOWNLOAD_STAGGER_MS);
     }
-  }
-
-  function delay(milliseconds) {
-    return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
   function toNumberedImageFiles(scanBlobs) {
