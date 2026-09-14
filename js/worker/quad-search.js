@@ -31,7 +31,7 @@ const SEARCH = Object.freeze({
     maxIterations: 12,
     previewMaxIterations: 6,
     minGain: 0.002,
-    maxDriftOfShortSide: 0.06, // a side may leave its candidate's line by this much
+    maxDriftOfShortSide: 0.10, // a side may leave its candidate's line by this much: the seam under a receipt on a page lies this deep
   },
 });
 
