@@ -702,12 +702,19 @@ function detectByScore({ width, height, buffer, debug, preview }) {
  * legacy pipeline's Hough segments feed the line pools and the print extent.
  */
 function detectRefined(payload) {
-  const legacy = detectByLegacy({ ...payload, wantSegments: true });
-  if (!legacy.corners) return legacy;
   let img = null, frame = null;
   try {
     img = cv.matFromImageData(toImageData(payload.width, payload.height, payload.buffer));
     frame = buildFrame(img, { edges: false });
+    let rerank = null;
+    const legacy = detectByLegacy({ ...payload, wantSegments: true,
+      chooseBest: (candidates, best) => {
+        const t0 = performance.now();
+        rerank = rerankByScore(frame, candidates, best);
+        rerank.ms = +(performance.now() - t0).toFixed(1);
+        return rerank.chosen;
+      } });
+    if (!legacy.corners) return legacy;
     const lines = linePools(frame, null, legacy.segments);
     frame.printExtent = printedExtent(lines.all, frame);
     const outcome = refineGivenQuad(frame, legacy.corners, lines.pools);
@@ -715,11 +722,50 @@ function detectRefined(payload) {
       ? expandQuad(outcome.quad, DETECTOR_SAFETY_MARGIN_OF_SHORT_SIDE * frame.shortSide, frame)
       : legacy.corners;
     if (!payload.debug) return { corners };
-    return { ...legacy, corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent } };
+    return { ...legacy, corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent, rerank } };
   } finally {
     if (frame) frame.release();
     releaseMats(img);
   }
+}
+
+// Which of the legacy pipeline's candidates carries on into its side
+// passes. The masks' own scores read absolute contrast and area, and a
+// stop of exposure can hand the win to a sheet's header band or to half of
+// it; the score reads a quad against the photo — its edges, the content
+// just outside them — and tells a whole sheet from a part of one. The
+// score's pick must beat the legacy's clearly and must contain it: the
+// score may trade a part for the whole, never the whole for a part — a
+// wrong whole is loose, a wrong part is a cut. (A field widened with the
+// score engine's own mask quads, and a guarded path to a smaller quad,
+// were tried: they tightened one scene and made the choice less stable
+// under exposure and scale on four others, at the cost of the masks.)
+const RERANK = Object.freeze({
+  candidates: 5,           // the legacy's best few by its own score are the field
+  margin: 0.05,            // over the legacy pick's score
+  maxLegacyOutside: 0.1,   // "contains": this share of the legacy pick at most lies outside
+});
+
+/** @returns { chosen, legacyScore, chosenScore, considered } — chosen is
+ *           `best` itself when the score does not overrule it */
+function rerankByScore(frame, candidates, best) {
+  const outcome = { chosen: best, legacyScore: null, chosenScore: null, considered: 0 };
+  if (!best) return outcome;
+  const field = candidates.filter((candidate) => candidate.corners && !candidate.rejected)
+    .sort((p, q) => q.score - p.score).slice(0, RERANK.candidates);
+  const scored = field.map((candidate) => ({ candidate, total: scoreQuad(frame, candidate.corners).total }));
+  outcome.considered = scored.length;
+  const legacy = scored.find((entry) => entry.candidate === best);
+  if (!legacy || !isFinite(legacy.total)) return outcome; // a pick the score cannot even read stays the legacy's
+  outcome.legacyScore = +legacy.total.toFixed(3);
+  let top = legacy;
+  for (const entry of scored) {
+    if (entry.total <= top.total) continue;
+    if (fracOutsideQuad(quadPoints(best.corners), entry.candidate.corners) <= RERANK.maxLegacyOutside) top = entry;
+  }
+  outcome.chosenScore = +top.total.toFixed(3);
+  if (top !== legacy && top.total - legacy.total >= RERANK.margin) outcome.chosen = top.candidate;
+  return outcome;
 }
 
 function detect(payload) {
@@ -728,7 +774,13 @@ function detect(payload) {
   return detectByLegacy(payload);
 }
 
-function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegments }) {
+/**
+ * The legacy pipeline: masks, candidate choice, side passes.
+ * @param chooseBest optional (candidates, best) => candidate — another
+ *                   judge of the winning candidate, given the pipeline's own
+ *                   pick; whatever it returns carries on into the side passes
+ */
+function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegments, chooseBest }) {
   const pipeline = createPipeline(width, height, debug);
   pipeline.withoutGrid = !!withoutGrid;
   try {
@@ -744,6 +796,7 @@ function detectByLegacy({ width, height, buffer, debug, withoutGrid, wantSegment
     const trace = debug ? [] : null;
 
     let best = selectBestCandidate(candidates);
+    if (chooseBest) best = chooseBest(candidates, best);
     const reunion = reuniteSeveredSection(best, pipeline, trace);
     best = reunion.best;
     pipeline.reuniteLock = reunion.lock;

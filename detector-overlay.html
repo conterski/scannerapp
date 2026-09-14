@@ -17,7 +17,10 @@
        scoreScene(name, quad?)     the score breakdown of any quad (default: the legacy crop)
        gate1(percent?)             the right quad must outscore its own perturbations
        storeBaseline() / compareToBaseline() / showMovers()  the stored-crop regression check
-       previewCompare()            the live outline's quad on every scene against the stored reference -->
+       previewCompare()            the live outline's quad on every scene against the stored reference
+       robustness(engine?)         every scene under six global changes vs its own crop (IoU) — the fragility check
+       previewRobustness()         the same for the live outline's quad
+       showVariants(pairs, engine?) contact sheet of scene/variant pairs -->
 <style>
   body { margin: 0; background: #14161c; color: #eceef2; font: 13px -apple-system, "Segoe UI", sans-serif; }
   header { padding: 8px 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -308,6 +311,7 @@
       const inside = (p) => cross(p) * sign >= 0;
       const meet = (p, q) => {
         const d = (p.x - q.x) * (a.y - b.y) - (p.y - q.y) * (a.x - b.x);
+        if (d === 0) return q; // p–q runs along the clip edge (two equal quads): it is all inside
         const t = ((p.x - a.x) * (a.y - b.y) - (p.y - a.y) * (a.x - b.x)) / d;
         return { x: p.x + t * (q.x - p.x), y: p.y + t * (q.y - p.y) };
       };
@@ -323,7 +327,8 @@
   function iou(a, b) {
     const clipped = clipPolygon(a, b);
     const shared = clipped.length ? polygonArea(clipped) : 0;
-    return shared / (polygonArea(a) + polygonArea(b) - shared);
+    const union = polygonArea(a) + polygonArea(b) - shared;
+    return union > 0 ? shared / union : 0;
   }
 
   const summarise = (score) => ({
@@ -490,6 +495,10 @@
     return names;
   };
 
+  // The outline is judged at 1600px, the size a standard-profile frame arrives at.
+  const PREVIEW_MAX_EDGE = 1600;
+  const previewSized = (canvas) => ImageUtils.createScaledCanvas(canvas, PREVIEW_MAX_EDGE).canvas;
+
   /** The live outline's quad on every scene, against the stored reference (localStorage previewRef). */
   window.previewCompare = async function (engine = "score") {
     await Detect.ensureOpenCV();
@@ -498,7 +507,7 @@
     let hits = 0, same = 0;
     for (const name of SCENES) {
       const canvas = await canvasFor(name);
-      const source = ImageUtils.createScaledCanvas(canvas, 1600).canvas;
+      const source = previewSized(canvas);
       const t0 = performance.now();
       const corners = await Detect.previewCorners(source, { engine });
       times.push(performance.now() - t0);
@@ -514,6 +523,112 @@
     }
     times.sort((a, b) => a - b);
     return { hits: `${hits}/${SCENES.length}`, same, differ: rows, medianMs: +times[Math.floor(times.length / 2)].toFixed(1) };
+  };
+
+  // ---------------------------------------------------------------
+  // Robustness: the same scene under a global change should crop the same.
+  // Each variant is a canvas plus the map from original to variant pixels,
+  // so the untouched result can be compared with the variant's in the
+  // variant's own frame.
+  // ---------------------------------------------------------------
+
+  function filteredCopy(source, filter, scale = 1) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(source.width * scale);
+    canvas.height = Math.round(source.height * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.filter = filter;
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  const VARIANTS = {
+    rot90: (source) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = source.height; canvas.height = source.width;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width, 0); ctx.rotate(Math.PI / 2); ctx.drawImage(source, 0, 0);
+      return { canvas, map: (p) => ({ x: source.height - p.y, y: p.x }) };
+    },
+    mirror: (source) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = source.width; canvas.height = source.height;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width, 0); ctx.scale(-1, 1); ctx.drawImage(source, 0, 0);
+      return { canvas, map: (p) => ({ x: source.width - p.x, y: p.y }) };
+    },
+    scale06: (source) => ({ canvas: filteredCopy(source, "none", 0.6), map: (p) => ({ x: p.x * 0.6, y: p.y * 0.6 }) }),
+    dark: (source) => ({ canvas: filteredCopy(source, "brightness(0.65)"), map: (p) => p }),
+    bright: (source) => ({ canvas: filteredCopy(source, "brightness(1.25) contrast(0.85)"), map: (p) => p }),
+    blur: (source) => ({ canvas: filteredCopy(source, "blur(2px)"), map: (p) => p }),
+  };
+
+  /**
+   * Every scene under every variant, compared with the scene's own
+   * untouched crop: per-variant mean and minimum IoU, and the scene/variant
+   * pairs below 0.9.
+   * @param detectQuad async (canvas) => quad or null
+   * @param prepare    (canvas) => the canvas the engine actually sees
+   */
+  async function variantSuite(detectQuad, prepare = (canvas) => canvas) {
+    const perVariant = {};
+    const weak = [];
+    for (const name of SCENES) {
+      const source = prepare(await canvasFor(name));
+      const base = await detectQuad(source);
+      for (const [label, make] of Object.entries(VARIANTS)) {
+        const { canvas, map } = make(source);
+        const got = await detectQuad(canvas);
+        const value = base && got ? iou(KEYS.map((k) => got[k]), KEYS.map((k) => map(base[k]))) : (base || got ? 0 : 1);
+        (perVariant[label] = perVariant[label] || []).push(value);
+        if (value < 0.9) weak.push(`${name} ${label} ${value.toFixed(3)}`);
+        ImageUtils.releaseCanvas(canvas);
+      }
+    }
+    const summary = {};
+    for (const [label, values] of Object.entries(perVariant)) {
+      summary[label] = { mean: +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(3),
+                         min: +Math.min(...values).toFixed(3), below09: values.filter((v) => v < 0.9).length };
+    }
+    return { summary, weak };
+  }
+
+  window.robustness = async function (engine = "refined") {
+    await Detect.ensureOpenCV();
+    return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine })).corners);
+  };
+
+  /** The live outline's quad under the same variants, at the preview's own size. */
+  window.previewRobustness = async function (engine = "legacy") {
+    await Detect.ensureOpenCV();
+    return variantSuite((canvas) => Detect.previewCorners(canvas, { engine }), previewSized);
+  };
+
+  /** A contact sheet of scene/variant pairs: the variant's crop (blue) over the untouched crop mapped in (red dashed). */
+  window.showVariants = async function (pairs, engine = "refined", tileHeight = 400) {
+    const host = document.getElementById("scene");
+    host.innerHTML = "";
+    host.style.flexWrap = "wrap";
+    for (const [name, label] of pairs) {
+      const source = await canvasFor(name);
+      const base = (await Detect.detectCorners(source, { engine })).corners;
+      const { canvas, map } = VARIANTS[label](source);
+      const got = (await Detect.detectCorners(canvas, { engine })).corners;
+      const view = document.createElement("canvas");
+      const scale = tileHeight / canvas.height;
+      view.className = "photo";
+      view.width = Math.round(canvas.width * scale); view.height = tileHeight;
+      view.style.height = tileHeight + "px";
+      const ctx = view.getContext("2d");
+      ctx.drawImage(canvas, 0, 0, view.width, view.height);
+      const mapped = {};
+      for (const k of KEYS) { const p = map(base[k]); mapped[k] = { x: p.x * scale, y: p.y * scale }; }
+      strokeQuad(ctx, mapped, "#ef4444", 3, [8, 6]);
+      strokeQuad(ctx, scaleQuad(got, scale), "#3b82f6", 3, []);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.fillText(`${name} ${label}`, 8, 22);
+      host.appendChild(view);
+      ImageUtils.releaseCanvas(canvas);
+    }
   };
 
   show(SCENES[0]);
