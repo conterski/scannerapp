@@ -3,40 +3,42 @@
 <head>
 <meta charset="UTF-8">
 <title>Detector overlay</title>
-<!-- A development page, not part of the app: runs the generate-and-score
-     detector on the local testdata/ scenes and shows why the winning quad
-     won — the candidates with their score breakdowns, the winner before and
-     after refinement, and the sampled profiles across each side. testdata/
-     is not deployed, so on the live site this page shows nothing. Lives at
-     the root so the worker's relative URL in detect.js resolves as it does
-     for the app.
+<!-- A development page, not part of the app: runs the detector on the local
+     testdata/ scenes and shows what it did — the crop, the refinement's
+     moves and refit attempts, and the sampled profiles across each side.
+     testdata/ is not deployed, so on the live site this page shows nothing.
+     Lives at the root so the worker's relative URL in detect.js resolves as
+     it does for the app.
 
-     Console API (all async):
-       compareEngines(engine?)     every scene: the engine's crop vs the legacy baseline, receipts' IoU, timing
-       showEngines(names?, h?, engine?)  contact sheet, the engine's crop (blue) over legacy (red dashed)
-       scoreScene(name, quad?)     the score breakdown of any quad (default: the legacy crop)
-       gate1(percent?)             the right quad must outscore its own perturbations
-       storeBaseline() / compareToBaseline() / showMovers()  the stored-crop regression check
-       previewCompare()            the live outline's quad on every scene against the stored reference
-       robustness(engine?)         every scene under six global changes vs its own crop (IoU) — the fragility check
-       previewRobustness()         the same for the live outline's quad
-       showVariants(pairs, engine?) contact sheet of scene/variant pairs
-       showSides(pairs, engine?)   close-ups along one side: [["fail1.jpeg","T"], ...]
-       packSheet(columns?)         the tiles on show as one JPEG data URL -->
+     Engines: "refined" (what the app runs) and "legacy" (its first stage).
+     Baselines live in localStorage per engine: <engine>Baseline holds every
+     scene's crop, <engine>PreviewRef the live outline's quad; storeBaseline
+     writes both, the compare functions read them. The legacy baseline is
+     also the red dashed reference on every contact sheet.
+
+     Console API — async unless noted, `engine` defaults to "refined":
+       compareEngines(engine)              every scene: the engine's crop vs the legacy baseline, receipts' IoU, timing
+       storeBaseline(engine)               the engine's crops and outline quads, as the baseline to compare against
+       compareToBaseline(engine)           which scenes' crops moved > 0.5% of the diagonal since storeBaseline
+       previewCompare(engine)              the live outline's quad on every scene against the stored reference
+       robustness(engine)                  every scene under six global changes vs its own crop (IoU) — the fragility check
+       previewRobustness(engine)           the same for the live outline's quad
+       scoreScene(name, quad?)             the score breakdown of a quad in the scene's own pixels (default: the legacy crop)
+       showEngines(names?, height?, engine) contact sheet: the engine's crop (blue) over the legacy crop (red dashed)
+       showMovers(names?, height?, engine) contact sheet over the stored baseline instead
+       showVariants(pairs, engine, height) contact sheet of [scene, variant] pairs, the variant's crop over the untouched one
+       showSides(pairs, engine, band?, tile?) close-ups along one side, [["fail1.jpeg","T"], ...], with the refit's located points
+       packSheet(columns?, quality?)       (sync) the tiles on show as one JPEG data URL -->
 <style>
   body { margin: 0; background: #14161c; color: #eceef2; font: 13px -apple-system, "Segoe UI", sans-serif; }
   header { padding: 8px 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   select, button { font: inherit; padding: 4px 8px; }
   .legend { color: #9aa1ad; font-size: 12px; }
   .scene { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 0 14px; align-items: start; }
+  .scene.sheet { display: flex; flex-wrap: wrap; }
   .scene canvas.photo { height: 640px; display: block; border-radius: 6px; }
   .side { display: grid; gap: 6px; }
   .side canvas { width: 100%; max-width: 460px; background: #0d0f13; border-radius: 4px; display: block; }
-  table { border-collapse: collapse; font-size: 11px; max-width: 460px; }
-  td, th { padding: 1px 6px; text-align: left; white-space: nowrap; }
-  tr.pick { background: #263447; }
-  tr.row { cursor: pointer; }
-  tr.row:hover { background: #1f2733; }
   .mono { font-family: Consolas, monospace; }
   .muted { color: #9aa1ad; }
 </style>
@@ -46,10 +48,8 @@
   <strong>Detector overlay</strong>
   <select id="pick"></select>
   <button id="prev">◀</button><button id="next">▶</button>
-  <select id="engine"><option value="refined">refined</option><option value="score">score</option></select>
-  <label><input type="checkbox" id="showCandidates"> candidates</label>
-  <label><input type="checkbox" id="showLines"> pool lines</label>
-  <span class="legend">red dashed: legacy crop · blue: winner · light blue dashed: winner before refinement · green: ground truth · yellow: inspected candidate · click a candidate row to inspect it</span>
+  <select id="engine"><option value="refined">refined</option><option value="legacy">legacy</option></select>
+  <span class="legend">red dashed: legacy crop · blue: the engine's crop · green dotted: ground truth · yellow/orange dots: the refit's located edge points, accepted/refused</span>
 </header>
 <div id="scene" class="scene"></div>
 
@@ -64,23 +64,30 @@
     "receipt1.jpg","receipt2.jpg","receipt3.jpg","receipt4.jpg","receipt5.jpg","receipt6.jpg","stack1.jpg","stack2.jpg","stack3.jpg","stack4.jpg","stack5.jpg",
     "samp1.jpeg","samp2.jpeg","samp3.jpeg","samp4.jpeg","samp5.jpeg","samp6.jpeg"];
   const SIDE_NAMES = ["top", "right", "bottom", "left"];
-  const KEYS = ["tl", "tr", "br", "bl"];
+  const SIDE_LETTERS = "TRBL";
+  const { CORNER_KEYS: KEYS, mapCorners, scaleCorners, quadArea } = ImageUtils;
   const KIND_COLOUR = { step: "#3b82f6", shadowStep: "#a78bfa", seam: "#22c55e", line: "#f59e0b", none: "rgba(255,255,255,.35)" };
+  const COLOUR = { legacy: "#ef4444", crop: "#3b82f6", truth: "#22c55e", accepted: "rgba(253,224,71,.9)", refused: "rgba(249,115,22,.9)" };
+  const DASH = { legacy: [8, 6], truth: [2, 4] };
+  // The outline is judged at 1600px, the size a standard-profile frame arrives at.
+  const PREVIEW_MAX_EDGE = 1600;
 
   const pick = document.getElementById("pick");
+  const engineSelect = document.getElementById("engine");
   for (const name of SCENES) pick.appendChild(new Option(name, name));
   pick.addEventListener("change", () => show(pick.value));
   document.getElementById("prev").addEventListener("click", () => step(-1));
   document.getElementById("next").addEventListener("click", () => step(1));
-  document.getElementById("showCandidates").addEventListener("change", () => current && render(current));
-  document.getElementById("showLines").addEventListener("change", () => current && render(current));
-  document.getElementById("engine").addEventListener("change", () => show(pick.value));
-  const chosenEngine = () => document.getElementById("engine").value;
+  engineSelect.addEventListener("change", () => show(pick.value));
 
   function step(delta) {
     pick.selectedIndex = (pick.selectedIndex + delta + SCENES.length) % SCENES.length;
     show(pick.value);
   }
+
+  // ---------------------------------------------------------------
+  // Scenes, references and geometry
+  // ---------------------------------------------------------------
 
   const decoded = new Map();
   async function canvasFor(name) {
@@ -97,222 +104,25 @@
     return truthCache;
   }
 
+  /** The hand-marked crop of a receipt scene in the canvas's pixels, or null. */
   function groundTruthQuad(truth, name, canvas) {
     const marks = name.startsWith("receipt") && truth.receipts[name.replace(/\D/g, "")];
     if (!marks) return null;
-    const quad = {};
-    for (const k of KEYS) quad[k] = { x: marks[k][0] / 100 * canvas.width, y: marks[k][1] / 100 * canvas.height };
-    return quad;
+    return mapCorners(marks, ([x, y]) => ({ x: x / 100 * canvas.width, y: y / 100 * canvas.height }));
   }
 
-  /** The legacy engine's crop for a scene, in the decoded canvas's pixels. */
-  function legacyQuad(name) {
-    const base = JSON.parse(localStorage.getItem("legacyBaseline") || "{}")[name];
-    if (!base) return null;
-    const quad = {};
-    for (const k of KEYS) quad[k] = { x: base.corners[k].x / base.scale, y: base.corners[k].y / base.scale };
-    return quad;
+  const stored = (key) => JSON.parse(localStorage.getItem(key) || "{}");
+  const baselineKey = (engine) => `${engine}Baseline`;
+  const previewRefKey = (engine) => `${engine}PreviewRef`;
+
+  /** A stored baseline crop, in the scene's own pixels, or null. */
+  function baselineQuad(engine, name) {
+    const base = stored(baselineKey(engine))[name];
+    return base ? scaleCorners(base.corners, 1 / base.scale) : null;
   }
+  const legacyQuad = (name) => baselineQuad("legacy", name);
 
-  function scaleQuad(quad, factor) {
-    const out = {};
-    for (const k of KEYS) out[k] = { x: quad[k].x * factor, y: quad[k].y * factor };
-    return out;
-  }
-
-  // ---------------------------------------------------------------
-  // One scene
-  // ---------------------------------------------------------------
-
-  let current = null; // { name, canvas, result, truth, selected }
-
-  async function show(name) {
-    await Detect.ensureOpenCV();
-    const canvas = await canvasFor(name);
-    const engine = chosenEngine();
-    const result = await Detect.detectDebug(canvas, { engine });
-    const truth = groundTruthQuad(await groundTruth(), name, canvas);
-    current = { name, canvas, result, truth, selected: null, engine };
-    pick.value = name;
-    render(current);
-  }
-
-  function render(scene) {
-    const host = document.getElementById("scene");
-    host.innerHTML = "";
-    host.style.flexWrap = "";
-    host.appendChild(drawPhoto(scene));
-    const column = document.createElement("div");
-    column.className = "side";
-    if (scene.engine === "refined") {
-      column.appendChild(describeRefinement(scene));
-      const strips = document.createElement("div");
-      strips.className = "side";
-      column.appendChild(strips);
-      drawProfiles(scene, { corners: scene.result.corners, label: "refined crop" }, strips);
-      host.appendChild(column);
-      return;
-    }
-    column.appendChild(describe(scene));
-    column.appendChild(candidateTable(scene));
-    const inspected = scene.selected || (scene.result.debug.winner && { corners: scene.result.debug.winner.after, label: "winner" });
-    if (inspected) {
-      const strips = document.createElement("div");
-      strips.className = "side";
-      column.appendChild(strips);
-      drawProfiles(scene, inspected, strips);
-    }
-    host.appendChild(column);
-  }
-
-  function drawPhoto(scene) {
-    const { canvas, result, truth } = scene;
-    const view = document.createElement("canvas");
-    view.className = "photo";
-    view.width = Math.round(canvas.width * result.scale);
-    view.height = Math.round(canvas.height * result.scale);
-    const ctx = view.getContext("2d");
-    ctx.drawImage(canvas, 0, 0, view.width, view.height);
-    if (scene.engine === "refined") {
-      const r = result.refinement;
-      if (truth) strokeQuad(ctx, scaleQuad(truth, result.scale), "#22c55e", 2, [2, 4]);
-      if (r) strokeQuad(ctx, r.legacy, "#ef4444", 2, [8, 6]);
-      strokeQuad(ctx, result.corners, "#3b82f6", 2.5, []);
-      // The refit's located edge points: yellow where a side was refitted, orange where refused.
-      for (const attempt of (r && r.refits) || []) {
-        ctx.fillStyle = attempt.refused ? "rgba(249,115,22,.9)" : "rgba(253,224,71,.9)";
-        for (const point of attempt.located) if (point) ctx.fillRect(point.x - 1.5, point.y - 1.5, 3, 3);
-      }
-      return view;
-    }
-    const debug = result.debug;
-    if (document.getElementById("showLines").checked) {
-      for (const line of debug.lines) strokeSegment(ctx, line, line.pool.length ? "rgba(249,115,22,.6)" : "rgba(255,255,255,.2)", 1);
-    }
-    if (document.getElementById("showCandidates").checked) {
-      debug.candidates.forEach((candidate, index) => strokeQuad(ctx, candidate.corners, `hsla(${200 + index * 12}, 80%, 60%, .45)`, 1, []));
-    }
-    const legacy = legacyQuad(scene.name);
-    if (legacy) strokeQuad(ctx, scaleQuad(legacy, result.scale), "#ef4444", 2, [8, 6]);
-    if (truth) strokeQuad(ctx, scaleQuad(truth, result.scale), "#22c55e", 2, [2, 4]);
-    if (debug.winner) {
-      strokeQuad(ctx, debug.winner.before, "rgba(147,197,253,.8)", 1.5, [6, 4]);
-      strokeQuad(ctx, debug.winner.after, "#3b82f6", 2.5, []);
-    }
-    if (scene.selected) strokeQuad(ctx, scene.selected.corners, "#fde047", 2, []);
-    return view;
-  }
-
-  function strokeQuad(ctx, corners, colour, width, dash) {
-    if (!corners) return;
-    ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.beginPath();
-    KEYS.forEach((k, i) => (i ? ctx.lineTo(corners[k].x, corners[k].y) : ctx.moveTo(corners[k].x, corners[k].y)));
-    ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
-  }
-  function strokeSegment(ctx, segment, colour, width) {
-    ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.beginPath();
-    ctx.moveTo(segment.a.x, segment.a.y); ctx.lineTo(segment.b.x, segment.b.y); ctx.stroke();
-  }
-
-  const round = (value, digits = 2) => (value === null || value === undefined ? "-" : (+value).toFixed(digits));
-
-  function describe(scene) {
-    const p = document.createElement("div");
-    const d = scene.result.debug;
-    const w = d.winner;
-    p.innerHTML = `<b>${scene.name}</b> · ${d.frame.width}×${d.frame.height} · M ${d.frame.magnitudeScale} · ` +
-      `desk L${d.frame.background ? d.frame.background.l : "-"} · lines ${d.lines.length} · ` +
-      `<span class="muted">${Object.entries(d.timing).map(([k, v]) => `${k} ${v}`).join(", ")} ms</span><br>` +
-      (w ? `winner: ${w.from.source} #${w.from.rank}, ${w.scoreBefore} → ${w.scoreAfter} after ${w.moves.length} moves ` +
-           `<span class="muted mono">${w.moves.map((m) => `${SIDE_NAMES[m.side][0]}${m.kind === "offset" ? (m.amount > 0 ? "+" : "") + m.amount : "∠" + m.amount}`).join(" ")}</span>`
-         : "no quad");
-    return p;
-  }
-
-  function describeRefinement(scene) {
-    const p = document.createElement("div");
-    const r = scene.result.refinement;
-    if (!r) { p.textContent = `${scene.name}: no legacy crop to refine`; return p; }
-    p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
-      `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
-      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${describeMove(m)}`).join(" ")}</span><br>` +
-      `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span>`;
-    return p;
-  }
-
-  function describeMove(move) {
-    switch (move.kind) {
-      case "offset": return (move.amount > 0 ? "+" : "") + move.amount;
-      case "line": return "→line" + move.amount;
-      case "refit": return `refit-${move.amount}(${Math.round(move.consensus * 100)}%)`;
-      default: return "∠" + move.amount;
-    }
-  }
-
-  function sideCells(side) {
-    return `<td class="mono">E${round(side.edge)} B${round(side.background)} P${round(side.paperOutside)} C${round(side.content)} N${round(side.nested)}${side.unobserved ? " ?" : ""}</td>`;
-  }
-
-  function candidateTable(scene) {
-    const table = document.createElement("table");
-    table.innerHTML = `<tr><th>#</th><th>source</th><th>total</th><th>geom</th><th>area</th>${SIDE_NAMES.map((n) => `<th>${n}</th>`).join("")}</tr>`;
-    for (const candidate of scene.result.debug.candidates) {
-      const row = document.createElement("tr");
-      row.className = "row" + (scene.selected && scene.selected.corners === candidate.corners ? " pick" : "");
-      const s = candidate.score;
-      row.innerHTML = `<td>${candidate.rank}</td><td>${candidate.source}</td><td class="mono">${round(s.total, 3)}</td>` +
-        `<td class="mono">${round(s.geometry)}</td><td class="mono">${round(s.area)}</td>${s.sides.map(sideCells).join("")}`;
-      row.addEventListener("click", () => { scene.selected = { corners: candidate.corners, label: `#${candidate.rank} ${candidate.source}` }; render(scene); });
-      table.appendChild(row);
-    }
-    return table;
-  }
-
-  /** The four sides' sampled profiles for a quad (detection-scale corners),
-   *  each sample coloured by its kind. */
-  async function drawProfiles(scene, inspected, host) {
-    const full = scaleQuad(inspected.corners, 1 / scene.result.scale);
-    const { score } = await Detect.scoreQuad(scene.canvas, full);
-    if (current !== scene) return;
-    const title = document.createElement("div");
-    title.className = "muted";
-    title.textContent = `${inspected.label}: total ${round(score.total, 3)}, geometry ${round(score.geometry)}, area ${round(score.area)}` +
-      (score.paper ? `, paper L${score.paper.l} a${score.paper.a} b${score.paper.b}` : "");
-    host.appendChild(title);
-    score.sides.forEach((side, type) => host.appendChild(drawSide(side, type)));
-  }
-
-  function drawSide(side, type) {
-    const plot = document.createElement("canvas");
-    plot.width = 460; plot.height = 120;
-    const ctx = plot.getContext("2d");
-    ctx.fillStyle = "#9aa1ad"; ctx.font = "11px sans-serif";
-    ctx.fillText(`${SIDE_NAMES[type]}: E${round(side.edge)} B${round(side.background)} P${round(side.paperOutside)} C${round(side.content)} N${round(side.nested)} · ${side.valid} samples${side.unobserved ? " (unobserved)" : ""}`, 4, 12);
-    const samples = side.samples || [];
-    if (!samples.length) return plot;
-    const depths = samples[0].values.length;
-    const x = (i) => 4 + (i / (depths - 1)) * 452;
-    const y = (g) => 116 - (g / 255) * 96;
-    // Inside is left of the centre line, outside right.
-    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.setLineDash([3, 3]); ctx.beginPath();
-    ctx.moveTo(x((depths - 1) / 2), 18); ctx.lineTo(x((depths - 1) / 2), 118); ctx.stroke(); ctx.setLineDash([]);
-    for (const sample of samples) {
-      ctx.strokeStyle = KIND_COLOUR[sample.kind] || "#fff"; ctx.lineWidth = 1; ctx.beginPath();
-      sample.values.forEach((g, i) => (i ? ctx.lineTo(x(i), y(g)) : ctx.moveTo(x(i), y(g))));
-      ctx.stroke();
-    }
-    ctx.fillStyle = "#9aa1ad";
-    ctx.fillText("in", 6, 116); ctx.fillText("out", 436, 116);
-    return plot;
-  }
-
-  // ---------------------------------------------------------------
-  // Console API
-  // ---------------------------------------------------------------
-
-  function polygonArea(poly) {
-    return Math.abs(poly.reduce((sum, p, i) => sum + p.x * poly[(i + 1) % poly.length].y - poly[(i + 1) % poly.length].x * p.y, 0)) / 2;
-  }
+  const quadPolygon = (quad) => KEYS.map((k) => quad[k]);
 
   /** Sutherland–Hodgman clip of convex `subject` by convex `clipper`, in
    *  either winding: "inside" is the side the clipper's own centroid is on. */
@@ -341,258 +151,314 @@
     return output;
   }
 
+  function polygonArea(poly) {
+    return Math.abs(poly.reduce((sum, p, i) => sum + p.x * poly[(i + 1) % poly.length].y - poly[(i + 1) % poly.length].x * p.y, 0)) / 2;
+  }
+
+  /** Intersection over union of two quads. */
   function iou(a, b) {
-    const clipped = clipPolygon(a, b);
+    const clipped = clipPolygon(quadPolygon(a), quadPolygon(b));
     const shared = clipped.length ? polygonArea(clipped) : 0;
-    const union = polygonArea(a) + polygonArea(b) - shared;
+    const union = quadArea(a) + quadArea(b) - shared;
     return union > 0 ? shared / union : 0;
   }
 
-  const summarise = (score) => ({
-    total: +score.total.toFixed(3), rejected: score.rejected, geometry: +score.geometry.toFixed(3), area: +score.area.toFixed(3),
-    paper: score.paper,
-    sides: score.sides.map((s) => `E${round(s.edge, 3)} B${round(s.background, 3)} P${round(s.paperOutside, 3)} C${round(s.content, 3)} N${round(s.nested, 3)}${s.unobserved ? " ?" : ""}`),
-  });
+  /** The largest corner displacement between two quads, as a percentage of `diagonal`. */
+  function maxShiftPercent(a, b, diagonal) {
+    return Math.max(...KEYS.map((k) => Math.hypot(a[k].x - b[k].x, a[k].y - b[k].y))) / diagonal * 100;
+  }
+
+  const round = (value, digits = 2) => (value === null || value === undefined ? "-" : (+value).toFixed(digits));
+  const median = (values) => { const sorted = values.slice().sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
+  const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
+
+  // ---------------------------------------------------------------
+  // Running the detector over the scenes
+  // ---------------------------------------------------------------
+
+  // The last full run, so contact sheets asked for the same engine reuse
+  // its results rather than detecting every scene again.
+  let lastRun = { engine: null, results: {} };
+
+  /** Detects every scene (or `names`) with `engine`, calling `fn(name,
+   *  canvas, result, ms)` per scene; returns the results by name. */
+  async function forEachScene(engine, fn, names = SCENES) {
+    await Detect.ensureOpenCV();
+    const results = {};
+    for (const name of names) {
+      const canvas = await canvasFor(name);
+      const t0 = performance.now();
+      const result = await Detect.detectDebug(canvas, { engine });
+      const ms = performance.now() - t0;
+      results[name] = result;
+      if (fn) await fn(name, canvas, result, ms);
+    }
+    if (names === SCENES) lastRun = { engine, results };
+    return results;
+  }
+
+  async function resultFor(name, engine) {
+    if (lastRun.engine === engine && lastRun.results[name]) return lastRun.results[name];
+    await Detect.ensureOpenCV();
+    return Detect.detectDebug(await canvasFor(name), { engine });
+  }
+
+  const previewSized = (canvas) => ImageUtils.createScaledCanvas(canvas, PREVIEW_MAX_EDGE).canvas;
+
+  /** The live outline's quad for a scene, at the size the outline runs at,
+   *  with that size. */
+  async function previewQuadFor(name, engine) {
+    const source = previewSized(await canvasFor(name));
+    try {
+      return { corners: await Detect.previewCorners(source, { engine }), width: source.width, height: source.height };
+    } finally {
+      ImageUtils.releaseCanvas(source);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Drawing
+  // ---------------------------------------------------------------
+
+  const host = document.getElementById("scene");
+  function resetHost(asSheet) {
+    host.innerHTML = "";
+    host.classList.toggle("sheet", asSheet);
+  }
+
+  function strokeQuad(ctx, corners, colour, width, dash) {
+    if (!corners) return;
+    ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.beginPath();
+    KEYS.forEach((k, i) => (i ? ctx.lineTo(corners[k].x, corners[k].y) : ctx.moveTo(corners[k].x, corners[k].y)));
+    ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  /**
+   * One tile: a region of a scene with quads and points drawn over it.
+   * @param tile { canvas, box?, height?, width?, label, reference?, truth?,
+   *               crop, points?, line?, lineWidth? } — box is the region of
+   *               the canvas to show (the whole canvas without); quads and
+   *               points in the canvas's own pixels; height or width sets
+   *               the tile's size
+   */
+  function sceneTile(tile) {
+    const box = tile.box || { x: 0, y: 0, width: tile.canvas.width, height: tile.canvas.height };
+    const scale = tile.height ? tile.height / box.height : Math.min(tile.width / box.width, tile.width / box.height);
+    const view = document.createElement("canvas");
+    view.className = "photo";
+    view.width = Math.round(box.width * scale); view.height = Math.round(box.height * scale);
+    view.style.height = view.height + "px";
+    const ctx = view.getContext("2d");
+    ctx.drawImage(tile.canvas, box.x, box.y, box.width, box.height, 0, 0, view.width, view.height);
+    const into = (quad) => mapCorners(quad, (p) => ({ x: (p.x - box.x) * scale, y: (p.y - box.y) * scale }));
+    const width = tile.lineWidth || 2;
+    if (tile.truth) strokeQuad(ctx, into(tile.truth), COLOUR.truth, width, DASH.truth);
+    if (tile.reference) strokeQuad(ctx, into(tile.reference), COLOUR.legacy, width, DASH.legacy);
+    strokeQuad(ctx, into(tile.crop), COLOUR.crop, width + 0.5, []);
+    for (const { colour, points, line } of tile.points || []) {
+      ctx.fillStyle = colour;
+      for (const point of points) ctx.fillRect((point.x - box.x) * scale - 2, (point.y - box.y) * scale - 2, 4, 4);
+      if (line) {
+        const reach = 4000;
+        ctx.strokeStyle = colour; ctx.lineWidth = 1; ctx.beginPath();
+        ctx.moveTo((line.px - line.dx * reach - box.x) * scale, (line.py - line.dy * reach - box.y) * scale);
+        ctx.lineTo((line.px + line.dx * reach - box.x) * scale, (line.py + line.dy * reach - box.y) * scale);
+        ctx.stroke();
+      }
+    }
+    ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.fillText(tile.label, 8, 22);
+    return view;
+  }
+
+  /** The refit's located edge points and fitted line for one side, in the
+   *  scene's own pixels: the last pass's attempt, yellow when it moved the
+   *  side and orange when it was refused. */
+  function refitMarks(result, type) {
+    const attempts = ((result.refinement && result.refinement.refits) || []).filter((a) => a.side === type);
+    const attempt = attempts[attempts.length - 1];
+    if (!attempt) return null;
+    const full = (p) => ({ x: p.x / result.scale, y: p.y / result.scale });
+    const line = attempt.line && { px: attempt.line.px / result.scale, py: attempt.line.py / result.scale, dx: attempt.line.dx, dy: attempt.line.dy };
+    return { colour: attempt.refused ? COLOUR.refused : COLOUR.accepted, points: attempt.located.filter(Boolean).map(full), line };
+  }
+
+  /** The crop a debug result found, in the scene's own pixels. */
+  const cropOf = (result) => scaleCorners(result.corners, 1 / result.scale);
+
+  // ---------------------------------------------------------------
+  // One scene
+  // ---------------------------------------------------------------
+
+  let current = null; // { name, canvas, result, truth, engine }
+  let showGeneration = 0;
+
+  async function show(name) {
+    const generation = ++showGeneration;
+    const engine = engineSelect.value;
+    await Detect.ensureOpenCV();
+    const canvas = await canvasFor(name);
+    const result = await Detect.detectDebug(canvas, { engine });
+    const truth = groundTruthQuad(await groundTruth(), name, canvas);
+    if (generation !== showGeneration) return; // a later show() has taken over
+    current = { name, canvas, result, truth, engine };
+    pick.value = name;
+    render(current);
+  }
+
+  function render(scene) {
+    const { name, canvas, result, truth } = scene;
+    resetHost(false);
+    const points = [];
+    for (let type = 0; type < SIDE_NAMES.length; type++) {
+      const marks = refitMarks(result, type);
+      if (marks) points.push(marks);
+    }
+    host.appendChild(sceneTile({ canvas, height: 640, label: name, reference: legacyQuad(name), truth, crop: cropOf(result), points }));
+    const column = document.createElement("div");
+    column.className = "side";
+    column.appendChild(describe(scene));
+    const strips = document.createElement("div");
+    strips.className = "side";
+    column.appendChild(strips);
+    drawProfiles(scene, strips);
+    host.appendChild(column);
+  }
+
+  function describe(scene) {
+    const p = document.createElement("div");
+    const r = scene.result.refinement;
+    if (!r) { p.innerHTML = `<b>${scene.name}</b> · ${scene.engine} crop`; return p; }
+    p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
+      `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
+      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${describeMove(m)}`).join(" ")}</span><br>` +
+      `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span>`;
+    return p;
+  }
+
+  function describeMove(move) {
+    switch (move.kind) {
+      case "offset": return (move.amount > 0 ? "+" : "") + move.amount;
+      case "line": return "→line" + move.amount;
+      case "refit": return `refit-${move.amount}(${Math.round(move.consensus * 100)}%)`;
+      default: return "∠" + move.amount;
+    }
+  }
+
+  const sideTerms = (side) =>
+    `E${round(side.edge)} B${round(side.background)} P${round(side.paperOutside)} C${round(side.content)} N${round(side.nested)}${side.unobserved ? " ?" : ""}`;
+
+  /** The four sides' sampled profiles for the scene's crop, each sample
+   *  coloured by its kind. */
+  async function drawProfiles(scene, strips) {
+    const { score } = await Detect.scoreQuad(scene.canvas, cropOf(scene.result));
+    if (current !== scene) return;
+    const title = document.createElement("div");
+    title.className = "muted";
+    title.textContent = `crop: total ${round(score.total, 3)}, geometry ${round(score.geometry)}, area ${round(score.area)}` +
+      (score.paper ? `, paper L${score.paper.l} a${score.paper.a} b${score.paper.b}` : "");
+    strips.appendChild(title);
+    score.sides.forEach((side, type) => strips.appendChild(drawSide(side, type)));
+  }
+
+  function drawSide(side, type) {
+    const plot = document.createElement("canvas");
+    plot.width = 460; plot.height = 120;
+    const ctx = plot.getContext("2d");
+    ctx.fillStyle = "#9aa1ad"; ctx.font = "11px sans-serif";
+    ctx.fillText(`${SIDE_NAMES[type]}: ${sideTerms(side)} · ${side.valid} samples${side.unobserved ? " (unobserved)" : ""}`, 4, 12);
+    const samples = side.samples || [];
+    if (!samples.length) return plot;
+    const depths = samples[0].values.length;
+    const x = (i) => 4 + (i / (depths - 1)) * 452;
+    const y = (g) => 116 - (g / 255) * 96;
+    // Inside is left of the centre line, outside right.
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.setLineDash([3, 3]); ctx.beginPath();
+    ctx.moveTo(x((depths - 1) / 2), 18); ctx.lineTo(x((depths - 1) / 2), 118); ctx.stroke(); ctx.setLineDash([]);
+    for (const sample of samples) {
+      ctx.strokeStyle = KIND_COLOUR[sample.kind] || "#fff"; ctx.lineWidth = 1; ctx.beginPath();
+      sample.values.forEach((g, i) => (i ? ctx.lineTo(x(i), y(g)) : ctx.moveTo(x(i), y(g))));
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#9aa1ad";
+    ctx.fillText("in", 6, 116); ctx.fillText("out", 436, 116);
+    return plot;
+  }
+
+  // ---------------------------------------------------------------
+  // Console API — grading
+  // ---------------------------------------------------------------
 
   window.scoreScene = async function (name, quad) {
     await Detect.ensureOpenCV();
-    const canvas = await canvasFor(name);
-    const { score, frame } = await Detect.scoreQuad(canvas, quad || legacyQuad(name));
-    return { ...summarise(score), frame };
-  };
-
-  /** Each side moved along its outward normal by offsets[type] px, positive outward. */
-  function offsetQuad(quad, offsets) {
-    const sides = [["tl", "tr"], ["tr", "br"], ["br", "bl"], ["bl", "tl"]];
-    const cx = KEYS.reduce((sum, k) => sum + quad[k].x, 0) / 4, cy = KEYS.reduce((sum, k) => sum + quad[k].y, 0) / 4;
-    const lines = sides.map(([a, b], type) => {
-      const A = quad[a], B = quad[b];
-      const length = Math.hypot(B.x - A.x, B.y - A.y) || 1;
-      let nx = -(B.y - A.y) / length, ny = (B.x - A.x) / length;
-      if (nx * (cx - (A.x + B.x) / 2) + ny * (cy - (A.y + B.y) / 2) > 0) { nx = -nx; ny = -ny; }
-      return { px: A.x + nx * offsets[type], py: A.y + ny * offsets[type], dx: (B.x - A.x) / length, dy: (B.y - A.y) / length };
-    });
-    const meet = (first, second) => {
-      const d = first.dx * second.dy - first.dy * second.dx;
-      const t = ((second.px - first.px) * second.dy - (second.py - first.py) * second.dx) / d;
-      return { x: first.px + t * first.dx, y: first.py + t * first.dy };
+    const target = quad || legacyQuad(name);
+    if (!target) throw new Error(`No quad given and no legacy baseline stored — run storeBaseline("legacy") first`);
+    const { score, frame } = await Detect.scoreQuad(await canvasFor(name), target);
+    return {
+      total: +score.total.toFixed(3), rejected: score.rejected, geometry: +score.geometry.toFixed(3), area: +score.area.toFixed(3),
+      paper: score.paper, sides: score.sides.map(sideTerms), frame,
     };
-    return { tl: meet(lines[3], lines[0]), tr: meet(lines[0], lines[1]), br: meet(lines[1], lines[2]), bl: meet(lines[2], lines[3]) };
-  }
-
-  window.gate1 = async function (percent = 3) {
-    await Detect.ensureOpenCV();
-    const truth = await groundTruth();
-    const rows = [];
-    for (const name of SCENES) {
-      const canvas = await canvasFor(name);
-      const d = percent / 100 * Math.min(canvas.width, canvas.height);
-      const scoreOf = async (quad) => (await Detect.scoreQuad(canvas, quad)).score.total;
-      const checks = [];
-      const reference = groundTruthQuad(truth, name, canvas);
-      if (reference) {
-        const own = await scoreOf(reference);
-        const variants = { out: [d, d, d, d], in: [-d, -d, -d, -d] };
-        SIDE_NAMES.forEach((side, type) => {
-          const out = [0, 0, 0, 0], inward = [0, 0, 0, 0];
-          out[type] = d; inward[type] = -d;
-          variants[side + "+"] = out; variants[side + "-"] = inward;
-        });
-        for (const [label, offsets] of Object.entries(variants)) {
-          const other = await scoreOf(offsetQuad(reference, offsets));
-          checks.push(`${label}${other < own ? "✓" : "✗"}${round(own - other, 3)}`);
-        }
-      }
-      const legacy = legacyQuad(name);
-      if (legacy) {
-        const own = await scoreOf(legacy);
-        const loose = await scoreOf(offsetQuad(legacy, [d, d, d, d]));
-        checks.push(`legacy-vs-loose${loose < own ? "✓" : "✗"}${round(own - loose, 3)} (${round(own, 3)})`);
-      }
-      rows.push(`${name.padEnd(13)} ${checks.join("  ")}`);
-    }
-    return rows;
   };
 
   window.compareEngines = async function (engine = "refined") {
-    await Detect.ensureOpenCV();
     const truth = await groundTruth();
     const rows = [], times = [], receipts = [];
-    window.__scoreResults = {};
-    for (const name of SCENES) {
-      const canvas = await canvasFor(name);
-      const t0 = performance.now();
-      const result = await Detect.detectDebug(canvas, { engine });
-      times.push(performance.now() - t0);
-      window.__scoreResults[name] = result;
+    await forEachScene(engine, (name, canvas, result, ms) => {
+      times.push(ms);
       const legacy = legacyQuad(name);
-      const scaled = scaleQuad(result.corners, 1 / result.scale);
-      const diagonal = Math.hypot(canvas.width, canvas.height);
-      const shift = legacy ? Math.max(...KEYS.map((k) => Math.hypot(scaled[k].x - legacy[k].x, scaled[k].y - legacy[k].y) / diagonal * 100)) : null;
+      const crop = cropOf(result);
+      const shift = legacy ? maxShiftPercent(crop, legacy, Math.hypot(canvas.width, canvas.height)) : null;
       const gt = groundTruthQuad(truth, name, canvas);
       let iouText = "";
       if (gt) {
-        const after = iou(KEYS.map((k) => scaled[k]), KEYS.map((k) => gt[k]));
-        const before = iou(KEYS.map((k) => legacy[k]), KEYS.map((k) => gt[k]));
-        receipts.push({ name, before: +before.toFixed(3), after: +after.toFixed(3) });
-        iouText = ` IoU ${before.toFixed(3)}->${after.toFixed(3)}`;
+        const after = iou(crop, gt), before = legacy ? iou(legacy, gt) : null;
+        receipts.push({ before, after });
+        iouText = ` IoU ${round(before, 3)}->${after.toFixed(3)}`;
       }
-      const detail = engine === "refined"
-        ? (result.refinement ? `${result.refinement.refined ? "REFINED" : "kept"} ${round(result.refinement.scoreBefore, 3)}->${round(result.refinement.scoreAfter, 3)} ${result.refinement.moves.length} moves` : "no legacy crop")
-        : (() => { const w = result.debug.winner, t = result.debug.timing; return `${w ? `${w.from.source}#${w.from.rank} ${w.scoreBefore}->${w.scoreAfter}` : "none"}  ${t.frame}+${t.lines}+${t.masks}+${t.search}`; })();
+      const r = result.refinement;
+      const detail = r ? `${r.refined ? "REFINED" : "kept"} ${round(r.scoreBefore, 3)}->${round(r.scoreAfter, 3)} ${r.moves.length} moves` : "";
       rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${iouText}  ${detail}`);
-    }
-    times.sort((a, b) => a - b);
-    const mean = (key) => +(receipts.reduce((a, r) => a + r[key], 0) / receipts.length).toFixed(3);
-    return { rows, medianMs: +times[Math.floor(times.length / 2)].toFixed(0), receiptsIoU: { before: mean("before"), after: mean("after") } };
-  };
-
-  /** A contact sheet: each scene's crop by `engine` (blue) over a reference
-   *  quad (red dashed) — the legacy crop by default. */
-  async function contactSheet(names, tileHeight, engine, referenceFor) {
-    const host = document.getElementById("scene");
-    host.innerHTML = "";
-    host.style.flexWrap = "wrap";
-    for (const name of names) {
-      const canvas = await canvasFor(name);
-      const result = (window.__scoreResults || {})[name] || await Detect.detectDebug(canvas, { engine });
-      const view = document.createElement("canvas");
-      view.className = "photo";
-      view.width = Math.round(canvas.width * result.scale);
-      view.height = Math.round(canvas.height * result.scale);
-      view.style.height = tileHeight + "px";
-      const ctx = view.getContext("2d");
-      ctx.drawImage(canvas, 0, 0, view.width, view.height);
-      const reference = referenceFor(name, result.scale);
-      if (reference) strokeQuad(ctx, reference, "#ef4444", 3, [8, 6]);
-      strokeQuad(ctx, result.corners, "#3b82f6", 3, []);
-      ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(name, 8, 24);
-      host.appendChild(view);
-    }
-  }
-
-  window.showEngines = function (names, tileHeight = 300, engine = "refined") {
-    return contactSheet(names || SCENES, tileHeight, engine, (name, scale) => {
-      const legacy = legacyQuad(name);
-      return legacy && scaleQuad(legacy, scale);
     });
+    const withLegacy = receipts.filter((r) => r.before !== null);
+    return {
+      rows, medianMs: +median(times).toFixed(0),
+      receiptsIoU: {
+        before: withLegacy.length ? +mean(withLegacy.map((r) => r.before)).toFixed(3) : null,
+        after: +mean(receipts.map((r) => r.after)).toFixed(3),
+      },
+    };
   };
 
-  /** Close-ups: for each [scene, side letter T/R/B/L], the strip of the
-   *  photo along that side of the `engine` crop (blue) with the legacy crop
-   *  (red dashed) — `band` source px to either side of it. */
-  window.showSides = async function (pairs, engine = "refined", band = 160, tileWidth = 640) {
-    const host = document.getElementById("scene");
-    host.innerHTML = "";
-    host.style.flexWrap = "wrap";
-    for (const [name, letter] of pairs) {
-      const canvas = await canvasFor(name);
-      const result = (window.__scoreResults || {})[name] || await Detect.detectDebug(canvas, { engine });
-      const crop = scaleQuad(result.corners, 1 / result.scale);
-      const type = "TRBL".indexOf(letter);
-      const [a, b] = [[crop.tl, crop.tr], [crop.tr, crop.br], [crop.br, crop.bl], [crop.bl, crop.tl]][type];
-      const box = { x: Math.max(0, Math.min(a.x, b.x) - band), y: Math.max(0, Math.min(a.y, b.y) - band) };
-      box.w = Math.min(canvas.width, Math.max(a.x, b.x) + band) - box.x;
-      box.h = Math.min(canvas.height, Math.max(a.y, b.y) + band) - box.y;
-      const scale = Math.min(tileWidth / box.w, tileWidth / box.h); // fits a tileWidth square
-      const view = document.createElement("canvas");
-      view.className = "photo";
-      view.width = Math.round(box.w * scale); view.height = Math.round(box.h * scale);
-      view.style.height = view.height + "px";
-      const ctx = view.getContext("2d");
-      ctx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, view.width, view.height);
-      const into = (quad) => { const out = {}; for (const k of KEYS) out[k] = { x: (quad[k].x - box.x) * scale, y: (quad[k].y - box.y) * scale }; return out; };
-      const legacy = legacyQuad(name);
-      if (legacy) strokeQuad(ctx, into(legacy), "#ef4444", 2, [8, 6]);
-      strokeQuad(ctx, into(crop), "#3b82f6", 2, []);
-      const attempts = ((result.refinement && result.refinement.refits) || []).filter((a) => a.side === type);
-      const attempt = attempts[attempts.length - 1]; // the last pass's
-      if (attempt) {
-        const colour = attempt.refused ? "rgba(249,115,22,.9)" : "rgba(253,224,71,.9)";
-        const toView = (p) => ({ x: (p.x / result.scale - box.x) * scale, y: (p.y / result.scale - box.y) * scale });
-        ctx.fillStyle = colour;
-        for (const point of attempt.located) {
-          if (point) { const v = toView(point); ctx.fillRect(v.x - 2, v.y - 2, 4, 4); }
-        }
-        if (attempt.line) {
-          const { px, py, dx, dy } = attempt.line, reach = 4000;
-          strokeSegment(ctx, { a: toView({ x: px - dx * reach, y: py - dy * reach }), b: toView({ x: px + dx * reach, y: py + dy * reach }) }, colour, 1);
-        }
-      }
-      ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.fillText(`${name} ${letter}`, 8, 22);
-      host.appendChild(view);
-    }
-  };
-
-  /** The tiles on show, packed into one JPEG data URL `columns` wide — for
-   *  pulling a contact sheet out of the page in one string. */
-  window.packSheet = function (columns = 3, quality = 0.5) {
-    const tiles = [...document.querySelectorAll("#scene canvas")].map((canvas) => ({ canvas, width: canvas.offsetWidth, height: canvas.offsetHeight }));
-    const width = Math.max(...tiles.map((t) => t.width));
-    const rowHeights = [];
-    for (let i = 0; i < tiles.length; i += columns) rowHeights.push(Math.max(...tiles.slice(i, i + columns).map((t) => t.height)));
-    const sheet = document.createElement("canvas");
-    sheet.width = width * columns;
-    sheet.height = rowHeights.reduce((sum, h) => sum + h, 0);
-    const ctx = sheet.getContext("2d");
-    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, sheet.width, sheet.height);
-    let y = 0;
-    tiles.forEach((tile, i) => {
-      if (i && i % columns === 0) y += rowHeights[i / columns - 1];
-      ctx.drawImage(tile.canvas, (i % columns) * width, y, tile.width, tile.height);
+  window.storeBaseline = async function (engine = "refined") {
+    const baseline = {}, previewRef = {};
+    await forEachScene(engine, async (name, canvas, result) => {
+      baseline[name] = { corners: result.corners, scale: result.scale };
+      previewRef[name] = (await previewQuadFor(name, engine)).corners;
     });
-    return sheet.toDataURL("image/jpeg", quality);
+    localStorage.setItem(baselineKey(engine), JSON.stringify(baseline));
+    localStorage.setItem(previewRefKey(engine), JSON.stringify(previewRef));
+    return `${SCENES.length} scenes stored as ${baselineKey(engine)} and ${previewRefKey(engine)}`;
   };
 
-  window.storeBaseline = async function (engine = "score") {
-    await Detect.ensureOpenCV();
-    const baseline = {};
-    for (const name of SCENES) {
-      const canvas = await canvasFor(name);
-      const result = await Detect.detectDebug(canvas, { engine });
-      baseline[name] = { corners: result.corners, scale: result.scale, width: canvas.width, height: canvas.height };
-    }
-    localStorage.setItem("overlayBaseline", JSON.stringify(baseline));
-    return Object.keys(baseline).length + " scenes stored";
-  };
-
-  window.compareToBaseline = async function (engine = "score") {
-    await Detect.ensureOpenCV();
-    const base = JSON.parse(localStorage.getItem("overlayBaseline") || "{}");
+  window.compareToBaseline = async function (engine = "refined") {
+    const base = stored(baselineKey(engine));
+    const names = Object.keys(base);
+    if (!names.length) throw new Error(`No ${baselineKey(engine)} stored — run storeBaseline("${engine}") first`);
     const moved = [];
-    for (const name of Object.keys(base)) {
-      const canvas = await canvasFor(name);
-      const result = await Detect.detectDebug(canvas, { engine });
-      const diagonal = Math.hypot(canvas.width, canvas.height) * result.scale;
-      const shift = Math.max(...KEYS.map((k) => Math.hypot(result.corners[k].x - base[name].corners[k].x,
-        result.corners[k].y - base[name].corners[k].y) / diagonal * 100));
+    await forEachScene(engine, (name, canvas, result) => {
+      const shift = maxShiftPercent(result.corners, base[name].corners, Math.hypot(canvas.width, canvas.height) * result.scale);
       if (shift > 0.5) moved.push(`${name.padEnd(13)} max ${shift.toFixed(1)}%`);
-    }
-    return { moved, unchanged: Object.keys(base).length - moved.length };
+    }, names);
+    return { moved, unchanged: names.length - moved.length };
   };
 
-  window.showMovers = async function (names, tileHeight = 300) {
-    const base = JSON.parse(localStorage.getItem("overlayBaseline") || "{}");
-    if (!names) names = (await window.compareToBaseline()).moved.map((line) => line.split(" ")[0]);
-    await contactSheet(names, tileHeight, "score", (name) => base[name] && base[name].corners);
-    return names;
-  };
-
-  // The outline is judged at 1600px, the size a standard-profile frame arrives at.
-  const PREVIEW_MAX_EDGE = 1600;
-  const previewSized = (canvas) => ImageUtils.createScaledCanvas(canvas, PREVIEW_MAX_EDGE).canvas;
-
-  /** The live outline's quad on every scene, against the stored reference (localStorage previewRef). */
-  window.previewCompare = async function (engine = "score") {
+  window.previewCompare = async function (engine = "refined") {
     await Detect.ensureOpenCV();
-    const ref = JSON.parse(localStorage.getItem("previewRef") || "{}");
+    const ref = stored(previewRefKey(engine));
     const rows = [], times = [];
     let hits = 0, same = 0;
     for (const name of SCENES) {
-      const canvas = await canvasFor(name);
-      const source = previewSized(canvas);
       const t0 = performance.now();
-      const corners = await Detect.previewCorners(source, { engine });
+      const { corners, width, height } = await previewQuadFor(name, engine);
       times.push(performance.now() - t0);
       if (corners) hits++;
       const r = ref[name];
@@ -601,18 +467,17 @@
         else rows.push(`${name} ${corners ? "hit" : "miss"} vs reference ${r ? "hit" : "miss"}`);
         continue;
       }
-      const shift = Math.max(...KEYS.map((k) => Math.hypot(corners[k].x - r[k].x, corners[k].y - r[k].y))) / Math.hypot(source.width, source.height) * 100;
+      const shift = maxShiftPercent(corners, r, Math.hypot(width, height));
       if (shift <= 1.5) same++; else rows.push(`${name} ${shift.toFixed(1)}%`);
     }
-    times.sort((a, b) => a - b);
-    return { hits: `${hits}/${SCENES.length}`, same, differ: rows, medianMs: +times[Math.floor(times.length / 2)].toFixed(1) };
+    return { hits: `${hits}/${SCENES.length}`, same, differ: rows, medianMs: +median(times).toFixed(1) };
   };
 
   // ---------------------------------------------------------------
-  // Robustness: the same scene under a global change should crop the same.
-  // Each variant is a canvas plus the map from original to variant pixels,
-  // so the untouched result can be compared with the variant's in the
-  // variant's own frame.
+  // Console API — robustness: the same scene under a global change should
+  // crop the same. Each variant is a canvas plus the map from original to
+  // variant pixels, so the untouched crop can be compared in the variant's
+  // own frame.
   // ---------------------------------------------------------------
 
   function filteredCopy(source, filter, scale = 1) {
@@ -646,6 +511,12 @@
     blur: (source) => ({ canvas: filteredCopy(source, "blur(2px)"), map: (p) => p }),
   };
 
+  function variantOf(source, label) {
+    const make = VARIANTS[label];
+    if (!make) throw new Error(`Unknown variant "${label}" — one of ${Object.keys(VARIANTS).join(", ")}`);
+    return make(source);
+  }
+
   /**
    * Every scene under every variant, compared with the scene's own
    * untouched crop: per-variant mean and minimum IoU, and the scene/variant
@@ -654,64 +525,115 @@
    * @param prepare    (canvas) => the canvas the engine actually sees
    */
   async function variantSuite(detectQuad, prepare = (canvas) => canvas) {
+    await Detect.ensureOpenCV();
     const perVariant = {};
     const weak = [];
     for (const name of SCENES) {
-      const source = prepare(await canvasFor(name));
+      const original = await canvasFor(name);
+      const source = prepare(original);
       const base = await detectQuad(source);
       for (const [label, make] of Object.entries(VARIANTS)) {
         const { canvas, map } = make(source);
         const got = await detectQuad(canvas);
-        const value = base && got ? iou(KEYS.map((k) => got[k]), KEYS.map((k) => map(base[k]))) : (base || got ? 0 : 1);
+        const value = base && got ? iou(got, mapCorners(base, map)) : (base || got ? 0 : 1);
         (perVariant[label] = perVariant[label] || []).push(value);
         if (value < 0.9) weak.push(`${name} ${label} ${value.toFixed(3)}`);
         ImageUtils.releaseCanvas(canvas);
       }
+      if (source !== original) ImageUtils.releaseCanvas(source);
     }
     const summary = {};
     for (const [label, values] of Object.entries(perVariant)) {
-      summary[label] = { mean: +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(3),
-                         min: +Math.min(...values).toFixed(3), below09: values.filter((v) => v < 0.9).length };
+      summary[label] = { mean: +mean(values).toFixed(3), min: +Math.min(...values).toFixed(3), below09: values.filter((v) => v < 0.9).length };
     }
     return { summary, weak };
   }
 
-  window.robustness = async function (engine = "refined") {
-    await Detect.ensureOpenCV();
+  window.robustness = function (engine = "refined") {
     return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine })).corners);
   };
 
   /** The live outline's quad under the same variants, at the preview's own size. */
-  window.previewRobustness = async function (engine = "legacy") {
-    await Detect.ensureOpenCV();
+  window.previewRobustness = function (engine = "refined") {
     return variantSuite((canvas) => Detect.previewCorners(canvas, { engine }), previewSized);
   };
 
-  /** A contact sheet of scene/variant pairs: the variant's crop (blue) over the untouched crop mapped in (red dashed). */
+  // ---------------------------------------------------------------
+  // Console API — contact sheets
+  // ---------------------------------------------------------------
+
+  /** A contact sheet: each scene's crop by `engine` over `referenceFor(name)`. */
+  async function contactSheet(names, tileHeight, engine, referenceFor) {
+    resetHost(true);
+    for (const name of names) {
+      const canvas = await canvasFor(name);
+      const result = await resultFor(name, engine);
+      host.appendChild(sceneTile({ canvas, height: tileHeight, label: name, reference: referenceFor(name), crop: cropOf(result), lineWidth: 3 }));
+    }
+  }
+
+  window.showEngines = function (names, tileHeight = 300, engine = "refined") {
+    return contactSheet(names || SCENES, tileHeight, engine, legacyQuad);
+  };
+
+  window.showMovers = async function (names, tileHeight = 300, engine = "refined") {
+    if (!names) names = (await window.compareToBaseline(engine)).moved.map((line) => line.split(" ")[0]);
+    await contactSheet(names, tileHeight, engine, (name) => baselineQuad(engine, name));
+    return names;
+  };
+
+  /** A contact sheet of scene/variant pairs: the variant's crop over the untouched crop mapped in. */
   window.showVariants = async function (pairs, engine = "refined", tileHeight = 400) {
-    const host = document.getElementById("scene");
-    host.innerHTML = "";
-    host.style.flexWrap = "wrap";
+    await Detect.ensureOpenCV();
+    resetHost(true);
     for (const [name, label] of pairs) {
       const source = await canvasFor(name);
       const base = (await Detect.detectCorners(source, { engine })).corners;
-      const { canvas, map } = VARIANTS[label](source);
+      const { canvas, map } = variantOf(source, label);
       const got = (await Detect.detectCorners(canvas, { engine })).corners;
-      const view = document.createElement("canvas");
-      const scale = tileHeight / canvas.height;
-      view.className = "photo";
-      view.width = Math.round(canvas.width * scale); view.height = tileHeight;
-      view.style.height = tileHeight + "px";
-      const ctx = view.getContext("2d");
-      ctx.drawImage(canvas, 0, 0, view.width, view.height);
-      const mapped = {};
-      for (const k of KEYS) { const p = map(base[k]); mapped[k] = { x: p.x * scale, y: p.y * scale }; }
-      strokeQuad(ctx, mapped, "#ef4444", 3, [8, 6]);
-      strokeQuad(ctx, scaleQuad(got, scale), "#3b82f6", 3, []);
-      ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.fillText(`${name} ${label}`, 8, 22);
-      host.appendChild(view);
+      host.appendChild(sceneTile({ canvas, height: tileHeight, label: `${name} ${label}`, reference: mapCorners(base, map), crop: got, lineWidth: 3 }));
       ImageUtils.releaseCanvas(canvas);
     }
+  };
+
+  /** Close-ups: for each [scene, side letter T/R/B/L], the strip of the
+   *  photo along that side of the `engine` crop, with the legacy crop and
+   *  the refit's located points — `band` source px to either side of it. */
+  window.showSides = async function (pairs, engine = "refined", band = 160, tileWidth = 640) {
+    resetHost(true);
+    for (const [name, letter] of pairs) {
+      const type = SIDE_LETTERS.indexOf(letter);
+      if (type < 0) throw new Error(`Side "${letter}" is not one of ${SIDE_LETTERS.split("").join(", ")}`);
+      const canvas = await canvasFor(name);
+      const result = await resultFor(name, engine);
+      const crop = cropOf(result);
+      const [a, b] = [[crop.tl, crop.tr], [crop.tr, crop.br], [crop.br, crop.bl], [crop.bl, crop.tl]][type];
+      const x = Math.max(0, Math.min(a.x, b.x) - band), y = Math.max(0, Math.min(a.y, b.y) - band);
+      const box = { x, y, width: Math.min(canvas.width, Math.max(a.x, b.x) + band) - x, height: Math.min(canvas.height, Math.max(a.y, b.y) + band) - y };
+      const marks = refitMarks(result, type);
+      host.appendChild(sceneTile({ canvas, box, width: tileWidth, label: `${name} ${letter}`, reference: legacyQuad(name), crop, points: marks ? [marks] : [] }));
+    }
+  };
+
+  /** The tiles on show, packed into one JPEG data URL `columns` wide — for
+   *  pulling a contact sheet out of the page in one string. */
+  window.packSheet = function (columns = 3, quality = 0.5) {
+    const tiles = [...host.querySelectorAll("canvas.photo")].map((canvas) => ({ canvas, width: canvas.offsetWidth, height: canvas.offsetHeight }));
+    if (!tiles.length) throw new Error("Nothing on show — run a contact sheet first");
+    const width = Math.max(...tiles.map((t) => t.width));
+    const rowHeights = [];
+    for (let i = 0; i < tiles.length; i += columns) rowHeights.push(Math.max(...tiles.slice(i, i + columns).map((t) => t.height)));
+    const sheet = document.createElement("canvas");
+    sheet.width = width * columns;
+    sheet.height = rowHeights.reduce((sum, h) => sum + h, 0);
+    const ctx = sheet.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, sheet.width, sheet.height);
+    let y = 0;
+    tiles.forEach((tile, i) => {
+      if (i && i % columns === 0) y += rowHeights[i / columns - 1];
+      ctx.drawImage(tile.canvas, (i % columns) * width, y, tile.width, tile.height);
+    });
+    return sheet.toDataURL("image/jpeg", quality);
   };
 
   show(SCENES[0]);
