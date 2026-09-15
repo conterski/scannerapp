@@ -8,12 +8,13 @@
 
   const { CORNER_KEYS, clamp, mapCorners, scaleCorners } = ImageUtils;
 
-  // Stage layout: how much room the photo may take once the controls below it
-  // have been accounted for.
+  // Stage layout: the photo takes the room the viewport leaves once the
+  // header and the controls below have been measured, never more — the
+  // editor is not meant to scroll. The floor only keeps an absurdly short
+  // viewport from shrinking the stage to nothing.
   const STAGE_HORIZONTAL_MARGIN = 32;
   const STAGE_MAX_WIDTH = 688;
-  const CONTROLS_RESERVED_HEIGHT = 330;
-  const STAGE_MIN_HEIGHT = 240;
+  const STAGE_MIN_HEIGHT = 120;
   const MAX_DEVICE_PIXEL_RATIO = 2; // beyond this the crispness isn't worth the memory
 
   const PREVIEW_MAX_EDGE = 500;
@@ -57,7 +58,8 @@
     cacheElements();
     wireHandles();
     wireControls();
-    window.addEventListener("resize", () => { if (session) layoutStage(); });
+    // On the next frame, once the controls have reflowed to the new width.
+    window.addEventListener("resize", () => requestAnimationFrame(() => { if (session) layoutStage(); }));
   }
 
   /**
@@ -139,8 +141,10 @@
   function wireHandles() {
     document.querySelectorAll(".corner-handle").forEach((handle) => {
       elements.cornerHandles[handle.dataset.corner] = handle;
-      attachCornerDrag(handle);
+      attachCornerDrag(handle, () => handle.dataset.corner);
     });
+    // A press on the photo itself takes hold of the nearest corner.
+    attachCornerDrag(elements.canvas, (event) => nearestCorner(pointerToSource(event)));
     document.querySelectorAll(".edge-handle").forEach((handle) => {
       elements.edgeHandles[handle.dataset.edge] = handle;
       attachEdgeDrag(handle);
@@ -202,7 +206,10 @@
   function layoutStage() {
     const source = session.source;
     const availableWidth = Math.min(window.innerWidth - STAGE_HORIZONTAL_MARGIN, STAGE_MAX_WIDTH);
-    const availableHeight = Math.max(STAGE_MIN_HEIGHT, window.innerHeight - CONTROLS_RESERVED_HEIGHT);
+    // Everything in the view but the stage: the header above it, the controls
+    // and paddings below. The page sits at scroll 0 whenever this runs.
+    const chromeHeight = elements.view.getBoundingClientRect().top + elements.view.scrollHeight - elements.stage.offsetHeight;
+    const availableHeight = Math.max(STAGE_MIN_HEIGHT, Math.floor(window.innerHeight - chromeHeight));
     const scale = Math.min(availableWidth / source.width, availableHeight / source.height, 1);
     session.scale = scale;
 
@@ -260,19 +267,28 @@
   // Corner handles
   // ---------------------------------------------------------------
 
-  function attachCornerDrag(handle) {
+  /** Drags one corner from `target`; `cornerAt(event)` names the corner the
+   *  press takes hold of. */
+  function attachCornerDrag(target, cornerAt) {
+    let key = null;
     const moveCorner = (event) => {
       const point = pointerToSource(event);
-      session.corners[handle.dataset.corner] = point;
+      session.corners[key] = point;
       positionHandles();
       updateLoupe(point.x, point.y);
     };
-    PointerDrag.startPointerDrag(handle, {
+    PointerDrag.startPointerDrag(target, {
       canStart: () => Boolean(session),
-      onDragStart: (event) => { beginHandleDrag(handle); moveCorner(event); },
+      onDragStart: (event) => { key = cornerAt(event); beginHandleDrag(elements.cornerHandles[key]); moveCorner(event); },
       onDragMove: moveCorner,
-      onDragEnd: () => endHandleDrag(handle),
+      onDragEnd: () => endHandleDrag(elements.cornerHandles[key]),
     });
+  }
+
+  /** The corner nearest to a point in source pixels. */
+  function nearestCorner(point) {
+    const distanceTo = (key) => Math.hypot(session.corners[key].x - point.x, session.corners[key].y - point.y);
+    return CORNER_KEYS.reduce((best, key) => (distanceTo(key) < distanceTo(best) ? key : best));
   }
 
   function pointerToSource(event) {
