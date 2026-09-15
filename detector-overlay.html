@@ -31,7 +31,7 @@
        storeBaseline(engine)               the engine's crops and outline quads, as the baseline to compare against
        compareToBaseline(engine)           which scenes' crops moved > 0.5% of the diagonal since storeBaseline
        previewCompare(engine)              the live outline's quad on every scene against the stored reference
-       robustness(engine)                  every scene under global and local changes vs its own crop: IoU and cuts per variant — the fragility check
+       robustness(engine, labels?)         every scene under global and local changes (or the named ones) vs its own crop: IoU and cuts per variant
        previewRobustness(engine)           the same for the live outline's quad
        scoreScene(name, quad?)             the score breakdown of a quad in the scene's own pixels (default: the legacy crop)
        showEngines(names?, height?, engine) contact sheet: the engine's crop (blue) over the legacy crop (red dashed)
@@ -677,8 +677,9 @@
    * how many crops cut into it, and the scene/variant pairs below 0.9.
    * @param detectQuad async (canvas) => quad or null
    * @param prepare    (canvas) => the canvas the engine actually sees
+   * @param labels     the variants to run (all without)
    */
-  async function variantSuite(detectQuad, prepare = (canvas) => canvas) {
+  async function variantSuite(detectQuad, prepare = (canvas) => canvas, labels = Object.keys(VARIANTS)) {
     await Detect.ensureOpenCV();
     const perVariant = {};
     const weak = [];
@@ -686,7 +687,7 @@
       const original = await canvasFor(name);
       const source = prepare(original);
       const base = await detectQuad(source);
-      for (const label of Object.keys(VARIANTS)) {
+      for (const label of labels) {
         const { canvas, map } = await variantOf(source, label);
         const got = await detectQuad(canvas);
         const grade = base && got ? gradeQuad(got, canonical(mapCorners(base, map)), canvas) : { iou: base || got ? 0 : 1, cut: false };
@@ -704,8 +705,8 @@
     return { summary, weak };
   }
 
-  window.robustness = function (engine = "refined") {
-    return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine })).corners);
+  window.robustness = function (engine = "refined", labels) {
+    return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine })).corners, undefined, labels);
   };
 
   /** The live outline's quad under the same variants, at the preview's own size. */
