@@ -16,12 +16,22 @@
      writes both, the compare functions read them. The legacy baseline is
      also the red dashed reference on every contact sheet.
 
+     Ground truth (testdata/ground-truth.json) holds every scene's paper corners;
+     entries flagged `provisional` are the detector's own crops, not hand marks —
+     the metrics say so. Grading a crop against the truth: CUT when any side lies
+     inside the truth by more than 2% of the short side (the blank-margin allowance
+     of CRITERIA.md rule 1); SIDE_ERROR the largest signed side distance; EXCESS the
+     mean background included; CORNER_ERROR the largest corner displacement over the
+     diagonal; IoU. ZERO_CUT_RATE is the headline: a crop with a cut loses to any
+     crop without one, whatever its IoU.
+
      Console API — async unless noted, `engine` defaults to "refined":
-       compareEngines(engine)              every scene: the engine's crop vs the legacy baseline, receipts' IoU, timing
+       compareEngines(engine)              every scene graded against the truth: rows, ZERO_CUT_RATE, mean SIDE/CORNER/EXCESS, IoU (all, and hand-marked only), timing
+       exportTruth(name, engine)           the engine's crop of a scene as a ground-truth entry, to paste over a provisional one
        storeBaseline(engine)               the engine's crops and outline quads, as the baseline to compare against
        compareToBaseline(engine)           which scenes' crops moved > 0.5% of the diagonal since storeBaseline
        previewCompare(engine)              the live outline's quad on every scene against the stored reference
-       robustness(engine)                  every scene under six global changes vs its own crop (IoU) — the fragility check
+       robustness(engine)                  every scene under global and local changes vs its own crop: IoU and cuts per variant — the fragility check
        previewRobustness(engine)           the same for the live outline's quad
        scoreScene(name, quad?)             the score breakdown of a quad in the scene's own pixels (default: the legacy crop)
        showEngines(names?, height?, engine) contact sheet: the engine's crop (blue) over the legacy crop (red dashed)
@@ -104,11 +114,37 @@
     return truthCache;
   }
 
-  /** The hand-marked crop of a receipt scene in the canvas's pixels, or null. */
-  function groundTruthQuad(truth, name, canvas) {
-    const marks = name.startsWith("receipt") && truth.receipts[name.replace(/\D/g, "")];
+  /** A scene's ground-truth crop in the canvas's pixels, with its provenance:
+   *  { quad, provisional } — or null for a scene without one. */
+  function truthFor(truth, name, canvas) {
+    const marks = truth.scenes[name];
     if (!marks) return null;
-    return mapCorners(marks, ([x, y]) => ({ x: x / 100 * canvas.width, y: y / 100 * canvas.height }));
+    return { quad: mapCorners(marks, ([x, y]) => ({ x: x / 100 * canvas.width, y: y / 100 * canvas.height })), provisional: !!marks.provisional };
+  }
+
+  const SIDE_CORNERS = [["tl", "tr"], ["tr", "br"], ["br", "bl"], ["bl", "tl"]]; // by side type
+  const CUT_TOLERANCE_PERCENT = 2; // of the short side, inside the truth: rule 1's blank-margin allowance
+
+  /** How a crop sits against the truth. Side distances are signed along the
+   *  truth's outward normals, in % of the short side (positive = outside). */
+  function gradeQuad(crop, truth, bounds) {
+    const shortSide = Math.min(bounds.width, bounds.height);
+    const centre = { x: mean(KEYS.map((k) => truth[k].x)), y: mean(KEYS.map((k) => truth[k].y)) };
+    const sides = SIDE_CORNERS.map(([a, b]) => {
+      const length = Math.hypot(truth[b].x - truth[a].x, truth[b].y - truth[a].y) || 1;
+      let nx = -(truth[b].y - truth[a].y) / length, ny = (truth[b].x - truth[a].x) / length;
+      if (nx * (centre.x - truth[a].x) + ny * (centre.y - truth[a].y) > 0) { nx = -nx; ny = -ny; }
+      const out = (p) => ((p.x - truth[a].x) * nx + (p.y - truth[a].y) * ny) / shortSide * 100;
+      return +((out(crop[a]) + out(crop[b])) / 2).toFixed(2);
+    });
+    const corners = KEYS.map((k) => Math.hypot(crop[k].x - truth[k].x, crop[k].y - truth[k].y));
+    return {
+      sides, cut: sides.some((d) => d < -CUT_TOLERANCE_PERCENT),
+      sideError: +Math.max(...sides.map(Math.abs)).toFixed(2),
+      excess: +mean(sides.map((d) => Math.max(0, d))).toFixed(2),
+      cornerError: +(Math.max(...corners) / Math.hypot(bounds.width, bounds.height) * 100).toFixed(2),
+      iou: +iou(crop, truth).toFixed(3),
+    };
   }
 
   const stored = (key) => JSON.parse(localStorage.getItem(key) || "{}");
@@ -123,6 +159,14 @@
   const legacyQuad = (name) => baselineQuad("legacy", name);
 
   const quadPolygon = (quad) => KEYS.map((k) => quad[k]);
+
+  /** The quad's corners relabelled tl/tr/br/bl by position — a rotated or
+   *  mirrored quad carries its labels round with it. */
+  function canonical(quad) {
+    const points = quadPolygon(quad);
+    const by = (score) => points.reduce((best, p) => (score(p) < score(best) ? p : best));
+    return { tl: by((p) => p.x + p.y), tr: by((p) => p.y - p.x), br: by((p) => -p.x - p.y), bl: by((p) => p.x - p.y) };
+  }
 
   /** Sutherland–Hodgman clip of convex `subject` by convex `clipper`, in
    *  either winding: "inside" is the side the clipper's own centroid is on. */
@@ -298,9 +342,9 @@
     await Detect.ensureOpenCV();
     const canvas = await canvasFor(name);
     const result = await Detect.detectDebug(canvas, { engine });
-    const truth = groundTruthQuad(await groundTruth(), name, canvas);
+    const truth = truthFor(await groundTruth(), name, canvas);
     if (generation !== showGeneration) return; // a later show() has taken over
-    current = { name, canvas, result, truth, engine };
+    current = { name, canvas, result, truth: truth && truth.quad, engine };
     pick.value = name;
     render(current);
   }
@@ -401,31 +445,59 @@
 
   window.compareEngines = async function (engine = "refined") {
     const truth = await groundTruth();
-    const rows = [], times = [], receipts = [];
+    const rows = [], times = [], grades = [], marked = [];
     await forEachScene(engine, (name, canvas, result, ms) => {
       times.push(ms);
       const legacy = legacyQuad(name);
       const crop = cropOf(result);
       const shift = legacy ? maxShiftPercent(crop, legacy, Math.hypot(canvas.width, canvas.height)) : null;
-      const gt = groundTruthQuad(truth, name, canvas);
-      let iouText = "";
-      if (gt) {
-        const after = iou(crop, gt), before = legacy ? iou(legacy, gt) : null;
-        receipts.push({ before, after });
-        iouText = ` IoU ${round(before, 3)}->${after.toFixed(3)}`;
+      const gt = truthFor(truth, name, canvas);
+      const grade = gt && gradeQuad(crop, gt.quad, canvas);
+      if (grade) {
+        grades.push({ ...grade, provisional: gt.provisional, confidence: result.confidence && result.confidence.overall });
+        if (!gt.provisional) marked.push(grade.iou);
       }
       const r = result.refinement;
       const detail = r ? `${r.refined ? "REFINED" : "kept"} ${round(r.scoreBefore, 3)}->${round(r.scoreAfter, 3)} ${r.moves.length} moves` : "";
-      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${iouText}  ${detail}`);
+      const graded = grade ? ` ${grade.cut ? "CUT " : "    "}sides ${grade.sides.map((d) => (d > 0 ? "+" : "") + d.toFixed(1)).join("/")} IoU ${grade.iou}${gt.provisional ? " (prov)" : ""}` : "";
+      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${graded}  ${detail}`);
     });
-    const withLegacy = receipts.filter((r) => r.before !== null);
+    const meanOf = (key) => +mean(grades.map((g) => g[key])).toFixed(3);
     return {
       rows, medianMs: +median(times).toFixed(0),
-      receiptsIoU: {
-        before: withLegacy.length ? +mean(withLegacy.map((r) => r.before)).toFixed(3) : null,
-        after: +mean(receipts.map((r) => r.after)).toFixed(3),
-      },
+      zeroCutRate: +((grades.filter((g) => !g.cut).length / grades.length)).toFixed(3),
+      cuts: grades.filter((g) => g.cut).length,
+      meanSideError: meanOf("sideError"), meanCornerError: meanOf("cornerError"), meanExcess: meanOf("excess"), meanIoU: meanOf("iou"),
+      markedIoU: +mean(marked).toFixed(3), // over the hand-marked scenes only
+      provisional: grades.filter((g) => g.provisional).length,
+      calibration: calibration(grades),
     };
+  };
+
+  /** Whether the detector's confidence tracks the difficulty it met: the rank
+   *  correlation between per-scene confidence and side error, and the cut/clean
+   *  split per confidence band. Null until the engine reports confidence. */
+  function calibration(grades) {
+    const rated = grades.filter((g) => typeof g.confidence === "number");
+    if (rated.length < 3) return null;
+    const rank = (values) => { const order = values.map((v, i) => [v, i]).sort((p, q) => p[0] - q[0]); const ranks = []; order.forEach(([, i], r) => { ranks[i] = r; }); return ranks; };
+    const a = rank(rated.map((g) => g.confidence)), b = rank(rated.map((g) => -g.sideError));
+    const n = rated.length;
+    const spearman = 1 - 6 * a.reduce((sum, r, i) => sum + (r - b[i]) ** 2, 0) / (n * (n * n - 1));
+    const bands = { high: [], medium: [], low: [] };
+    for (const g of rated) bands[g.confidence >= 0.7 ? "high" : g.confidence >= 0.4 ? "medium" : "low"].push(g);
+    const summary = {};
+    for (const [band, list] of Object.entries(bands)) summary[band] = { scenes: list.length, cut: list.filter((g) => g.cut).length, meanSideError: list.length ? +mean(list.map((g) => g.sideError)).toFixed(2) : null };
+    return { spearman: +spearman.toFixed(3), bands: summary };
+  }
+
+  /** A scene's crop by `engine` as a ground-truth entry, to paste into
+   *  testdata/ground-truth.json once the crop has been checked or corrected. */
+  window.exportTruth = async function (name, engine = "refined") {
+    const canvas = await canvasFor(name);
+    const crop = cropOf(await resultFor(name, engine));
+    const pct = (p) => [+ImageUtils.clamp(p.x / canvas.width * 100, 0, 100).toFixed(1), +ImageUtils.clamp(p.y / canvas.height * 100, 0, 100).toFixed(1)];
+    return `"${name}": { ${KEYS.map((k) => `"${k}": ${JSON.stringify(pct(crop[k]))}`).join(", ")}, "provisional": false }`;
   };
 
   window.storeBaseline = async function (engine = "refined") {
@@ -490,6 +562,58 @@
     return canvas;
   }
 
+  /** A copy of `source` with `fn(r, g, b, x, y) => [r, g, b]` applied to every pixel. */
+  function pixelPass(source, fn) {
+    const canvas = filteredCopy(source, "none");
+    const ctx = canvas.getContext("2d");
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = image.data;
+    for (let i = 0, pixel = 0; i < d.length; i += 4, pixel++) {
+      const [r, g, b] = fn(d[i], d[i + 1], d[i + 2], pixel % canvas.width, Math.floor(pixel / canvas.width));
+      d[i] = r; d[i + 1] = g; d[i + 2] = b;
+    }
+    ctx.putImageData(image, 0, 0);
+    return canvas;
+  }
+
+  /** A copy of `source` with `paint(ctx)` drawn over it. */
+  function paintedCopy(source, paint) {
+    const canvas = filteredCopy(source, "none");
+    paint(canvas.getContext("2d"), canvas.width, canvas.height);
+    return canvas;
+  }
+
+  const same = (p) => p;
+  const gain = (rk, gk, bk) => (r, g, b) => [r * rk, g * gk, b * bk];
+  const gamma = (exponent) => (r, g, b) => [r, g, b].map((v) => 255 * Math.pow(v / 255, exponent));
+  const gaussian = () => { let u = 0, v = 0; while (!u) u = Math.random(); v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+  /** The homography taking four source points to four destination points,
+   *  as a function on points — for the perspective variant's map. */
+  function homography(from, to) {
+    const rows = [], rhs = [];
+    for (let i = 0; i < 4; i++) {
+      const { x, y } = from[i], { x: u, y: v } = to[i];
+      rows.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); rhs.push(u);
+      rows.push([0, 0, 0, x, y, 1, -v * x, -v * y]); rhs.push(v);
+    }
+    for (let c = 0; c < 8; c++) { // Gaussian elimination with partial pivoting
+      let pivot = c;
+      for (let r = c + 1; r < 8; r++) if (Math.abs(rows[r][c]) > Math.abs(rows[pivot][c])) pivot = r;
+      [rows[c], rows[pivot]] = [rows[pivot], rows[c]]; [rhs[c], rhs[pivot]] = [rhs[pivot], rhs[c]];
+      for (let r = 0; r < 8; r++) {
+        if (r === c) continue;
+        const f = rows[r][c] / rows[c][c];
+        for (let k = c; k < 8; k++) rows[r][k] -= f * rows[c][k];
+        rhs[r] -= f * rhs[c];
+      }
+    }
+    const h = rhs.map((value, i) => value / rows[i][i]);
+    return (p) => { const w = h[6] * p.x + h[7] * p.y + 1; return { x: (h[0] * p.x + h[1] * p.y + h[2]) / w, y: (h[3] * p.x + h[4] * p.y + h[5]) / w }; };
+  }
+
+  // Global changes a phone makes between two shots, then the local ones a
+  // room makes: a window on one side, a lamp overhead, a hand in the frame.
   const VARIANTS = {
     rot90: (source) => {
       const canvas = document.createElement("canvas");
@@ -506,21 +630,47 @@
       return { canvas, map: (p) => ({ x: source.width - p.x, y: p.y }) };
     },
     scale06: (source) => ({ canvas: filteredCopy(source, "none", 0.6), map: (p) => ({ x: p.x * 0.6, y: p.y * 0.6 }) }),
-    dark: (source) => ({ canvas: filteredCopy(source, "brightness(0.65)"), map: (p) => p }),
-    bright: (source) => ({ canvas: filteredCopy(source, "brightness(1.25) contrast(0.85)"), map: (p) => p }),
-    blur: (source) => ({ canvas: filteredCopy(source, "blur(2px)"), map: (p) => p }),
+    dark: (source) => ({ canvas: filteredCopy(source, "brightness(0.65)"), map: same }),
+    bright: (source) => ({ canvas: filteredCopy(source, "brightness(1.25) contrast(0.85)"), map: same }),
+    blur: (source) => ({ canvas: filteredCopy(source, "blur(2px)"), map: same }),
+    gammaDark: (source) => ({ canvas: pixelPass(source, gamma(1.4)), map: same }),
+    gammaLight: (source) => ({ canvas: pixelPass(source, gamma(0.7)), map: same }),
+    gradient: (source) => ({ canvas: pixelPass(source, (r, g, b, x) => { const k = 0.6 + 0.6 * x / source.width; return [r * k, g * k, b * k]; }), map: same }),
+    shadow: (source) => ({ canvas: pixelPass(source, (r, g, b, x, y) => { const t = ImageUtils.clamp((x + y - 0.9 * source.width) / 40, 0, 1); const k = 1 - 0.45 * t; return [r * k, g * k, b * k]; }), map: same }),
+    vignette: (source) => ({ canvas: pixelPass(source, (r, g, b, x, y) => { const k = 1 - 0.5 * Math.hypot(x / source.width - 0.5, y / source.height - 0.5) / 0.7071; return [r * k, g * k, b * k]; }), map: same }),
+    jpeg: (source) => { const canvas = document.createElement("canvas"); canvas.width = source.width; canvas.height = source.height; const image = new Image(); image.src = source.toDataURL("image/jpeg", 0.35); return { canvas, map: same, ready: new Promise((resolve) => { image.onload = () => { canvas.getContext("2d").drawImage(image, 0, 0); resolve(); }; }) }; },
+    noise: (source) => ({ canvas: pixelPass(source, (r, g, b) => { const n = gaussian() * 12; return [r + n, g + n, b + n]; }), map: same }),
+    whiteBalance: (source) => ({ canvas: pixelPass(source, gain(1.15, 1, 0.85)), map: same }),
+    warm: (source) => ({ canvas: pixelPass(source, gain(1.1, 1.02, 0.9)), map: same }),
+    cool: (source) => ({ canvas: pixelPass(source, gain(0.9, 1, 1.12)), map: same }),
+    localBlur: (source) => ({ canvas: paintedCopy(source, (ctx, w, h) => { ctx.filter = "blur(2px)"; ctx.drawImage(source, 0, 0, w / 2, h / 2, 0, 0, w / 2, h / 2); }), map: same }),
+    occlusion: (source) => ({ canvas: paintedCopy(source, (ctx, w, h) => { const s = 0.12 * Math.min(w, h); ctx.fillStyle = "#c9967a"; ctx.beginPath(); ctx.roundRect(w * 0.55, h * 0.1, s * 2, s, s / 3); ctx.fill(); }), map: same }),
+    perspective: (source) => {
+      // A mild keystone: the trapezoid inset at the top becomes the frame.
+      const w = source.width, h = source.height;
+      const from = [{ x: 0.05 * w, y: 0.03 * h }, { x: 0.97 * w, y: 0 }, { x: w, y: h }, { x: 0, y: 0.98 * h }];
+      const to = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ready = Detect.warpPerspective(source, { tl: from[0], tr: from[1], br: from[2], bl: from[3] }, { maxDim: Math.max(w, h) })
+        .then((warped) => { canvas.getContext("2d").drawImage(warped, 0, 0, w, h); ImageUtils.releaseCanvas(warped); });
+      return { canvas, map: homography(from, to), ready };
+    },
   };
 
-  function variantOf(source, label) {
+  /** A variant of `source`, with its canvas drawn (some are drawn asynchronously). */
+  async function variantOf(source, label) {
     const make = VARIANTS[label];
     if (!make) throw new Error(`Unknown variant "${label}" — one of ${Object.keys(VARIANTS).join(", ")}`);
-    return make(source);
+    const variant = make(source);
+    await variant.ready;
+    return variant;
   }
 
   /**
    * Every scene under every variant, compared with the scene's own
-   * untouched crop: per-variant mean and minimum IoU, and the scene/variant
-   * pairs below 0.9.
+   * untouched crop (taken as the truth): per-variant mean and minimum IoU,
+   * how many crops cut into it, and the scene/variant pairs below 0.9.
    * @param detectQuad async (canvas) => quad or null
    * @param prepare    (canvas) => the canvas the engine actually sees
    */
@@ -532,19 +682,20 @@
       const original = await canvasFor(name);
       const source = prepare(original);
       const base = await detectQuad(source);
-      for (const [label, make] of Object.entries(VARIANTS)) {
-        const { canvas, map } = make(source);
+      for (const label of Object.keys(VARIANTS)) {
+        const { canvas, map } = await variantOf(source, label);
         const got = await detectQuad(canvas);
-        const value = base && got ? iou(got, mapCorners(base, map)) : (base || got ? 0 : 1);
-        (perVariant[label] = perVariant[label] || []).push(value);
-        if (value < 0.9) weak.push(`${name} ${label} ${value.toFixed(3)}`);
+        const grade = base && got ? gradeQuad(got, canonical(mapCorners(base, map)), canvas) : { iou: base || got ? 0 : 1, cut: false };
+        (perVariant[label] = perVariant[label] || []).push(grade);
+        if (grade.iou < 0.9 || grade.cut) weak.push(`${name} ${label} ${grade.iou.toFixed(3)}${grade.cut ? " CUT" : ""}`);
         ImageUtils.releaseCanvas(canvas);
       }
       if (source !== original) ImageUtils.releaseCanvas(source);
     }
     const summary = {};
-    for (const [label, values] of Object.entries(perVariant)) {
-      summary[label] = { mean: +mean(values).toFixed(3), min: +Math.min(...values).toFixed(3), below09: values.filter((v) => v < 0.9).length };
+    for (const [label, grades] of Object.entries(perVariant)) {
+      const values = grades.map((g) => g.iou);
+      summary[label] = { mean: +mean(values).toFixed(3), min: +Math.min(...values).toFixed(3), below09: values.filter((v) => v < 0.9).length, cuts: grades.filter((g) => g.cut).length };
     }
     return { summary, weak };
   }
@@ -589,9 +740,9 @@
     for (const [name, label] of pairs) {
       const source = await canvasFor(name);
       const base = (await Detect.detectCorners(source, { engine })).corners;
-      const { canvas, map } = variantOf(source, label);
+      const { canvas, map } = await variantOf(source, label);
       const got = (await Detect.detectCorners(canvas, { engine })).corners;
-      host.appendChild(sceneTile({ canvas, height: tileHeight, label: `${name} ${label}`, reference: mapCorners(base, map), crop: got, lineWidth: 3 }));
+      host.appendChild(sceneTile({ canvas, height: tileHeight, label: `${name} ${label}`, reference: canonical(mapCorners(base, map)), crop: got, lineWidth: 3 }));
       ImageUtils.releaseCanvas(canvas);
     }
   };
