@@ -6,13 +6,17 @@
 (function () {
   "use strict";
 
-  // Each 1.3x the bytes of its predecessor (2500px at 0.92, 1600px at 0.72),
-  // measured on rendered scans of twelve sample photos: standard is already
-  // at the app's decode size, so its allowance went to quality — 0.95 is
-  // 1.30x, 0.96 would be 1.44x; compact went to pixels first, 1800px at 0.76
-  // being 1.27x where 0.77 would be 1.31x.
-  const STANDARD_PROFILE = { maxDim: 2500, quality: 0.95 };
-  const COMPACT_PROFILE = { maxDim: 1800, quality: 0.76 };
+  // Each profile spends a 1.3x byte allowance over the one before it on
+  // pixels first and quality second, measured on rendered scans of twelve
+  // sample photos (bytes grow as pixels to the power 0.67 at a fixed quality;
+  // a quality step of 0.01 is 3–11% more, steeper the higher it goes).
+  // Standard sits at the app's decode size (DECODE_MAX_EDGE in app.js) and
+  // moves with it: 2500px at 0.92 went to 0.95 (1.30x), then to 2850px where
+  // the pixels alone are 1.19x and a step to 0.96 would have made it 1.32x.
+  // Compact: 1600px at 0.72 went to 1800px at 0.76 (1.27x), then 2050px at
+  // 0.78 (1.19x for the pixels, 1.27x with the quality).
+  const STANDARD_PROFILE = { maxDim: 2850, quality: 0.95 };
+  const COMPACT_PROFILE = { maxDim: 2050, quality: 0.78 };
 
   // Compact re-encodes the stored original at low quality but keeps its
   // resolution, so each page's detected corners stay valid against it.

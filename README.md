@@ -5,8 +5,8 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 **Features**
 
 - **High detail capture** (on by default) — the in-page camera keeps more of
-  what the sensor delivers, and works to keep it clean: 2500px frames instead
-  of 1800px (~3.5 MP against ~1.8 MP), a 60fps stream so no frame is exposed
+  what the sensor delivers, and works to keep it clean: 2850px frames instead
+  of 2050px (~4.6 MP against ~2.4 MP), a 60fps stream so no frame is exposed
   for longer than 1/60s and a handheld shot doesn't smear, sensor grain
   removed from the full frame before it is scaled down with an area
   resample, and each tap keeping the sharpest of seven frames, with the lens

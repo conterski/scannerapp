@@ -9,9 +9,11 @@
   "use strict";
 
   // Bounds decoded photos so iOS Safari doesn't run out of canvas memory with
-  // many 12 MP originals. Standard-quality scans are capped at the same size,
-  // which makes the output cap a no-op unless Compact is on.
-  const DECODE_MAX_EDGE = 2500;
+  // many 12 MP originals: 2850px is 4.6 MP, 18 MB a canvas, and the source
+  // cache holds three. Standard-quality scans are capped at the same size,
+  // which makes the output cap a no-op unless Compact is on, and high-detail
+  // capture keeps this many pixels — the three move together.
+  const DECODE_MAX_EDGE = 2850;
 
   // Some pickers report no MIME type at all, so an extension is the fallback.
   // A type that IS present and isn't an image must still lose.
