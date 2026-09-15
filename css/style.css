@@ -596,6 +596,15 @@ html, body {
   right: 16px;
   top: max(12px, env(safe-area-inset-top));
 }
+/* What the camera delivers, floated like the torch so the pill stays put. */
+.capture-top .frame-info {
+  position: absolute;
+  left: 16px;
+  top: calc(max(12px, env(safe-area-inset-top)) + 9px);
+  font-size: 11px;
+  opacity: 0.75;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
 .shot-count {
   background: rgba(10, 12, 16, 0.6);
   backdrop-filter: blur(10px);

@@ -9,8 +9,11 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   of 2050px (~4.6 MP against ~2.4 MP), a 60fps stream so no frame is exposed
   for longer than 1/60s and a handheld shot doesn't smear, sensor grain
   removed from the full frame before it is scaled down with an area
-  resample, and each tap keeping the sharpest of seven frames, with the lens
-  aimed at the document where the camera allows it. Photos run roughly
+  resample (grain only — a printed rule or the edge of a stroke keeps its own
+  pixels), and each tap keeping the sharpest of seven frames, with the lens
+  aimed at the document where the camera allows it. The capture screen shows
+  the frame the camera actually delivers (size and frame rate), since a phone
+  may answer the request with less. Photos run roughly
   twice the size of the setting off; turn it off to keep files smaller. It
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.

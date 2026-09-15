@@ -16,7 +16,7 @@
 
   const IDS = [
     "captureView", "captureVideo", "captureOutline", "captureFlash", "captureControls",
-    "shotCount", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn",
+    "shotCount", "frameInfo", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
   ];
@@ -56,6 +56,16 @@
       let isTorchOn = false;
 
       // ----- rendering -----
+
+      /** The frame the camera delivers, and the size the profile keeps of it
+       *  when that is smaller: "3840×2160 · 60 fps → 2850". Shown so a
+       *  phone that answers a size request with a smaller frame can be seen
+       *  to, rather than guessed at. */
+      function describeFrame({ width, height, frameRate }) {
+        if (!width || !height) return "";
+        const kept = CaptureQuality.currentProfile().maxEdge;
+        return `${width}×${height}${frameRate ? ` · ${Math.round(frameRate)} fps` : ""}${Math.max(width, height) > kept ? ` → ${kept}` : ""}`;
+      }
 
       function renderCount() {
         const n = store.count();
@@ -184,6 +194,7 @@
         els.captureControls.hidden = false;
         els.captureDoneBtn.disabled = false;
         els.torchBtn.hidden = true;
+        els.frameInfo.textContent = ""; // set once the camera says what it delivers
         renderTorch();
       }
 
@@ -274,6 +285,7 @@
           if (!accepting) return;
           els.shutterBtn.disabled = false;
           els.torchBtn.hidden = !camera.supportsTorch();
+          els.frameInfo.textContent = describeFrame(camera.frameSettings());
           outline.start(); // frames are flowing now
         },
         (err) => {

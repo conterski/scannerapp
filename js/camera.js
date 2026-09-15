@@ -251,6 +251,15 @@
       return typeof track.getSettings === "function" ? track.getSettings() : {};
     }
 
+    /** What the camera actually delivers against what was asked —
+     *  { width, height, frameRate }, any of them missing where the browser
+     *  does not say. The constraints are ideals, so this is the only way to
+     *  know whether the frame is the size the profile keeps. */
+    function frameSettings() {
+      const track = videoTrack();
+      return track ? currentSettings(track) : {};
+    }
+
     /** Applies a track constraint that is a request, not a requirement: a
      *  refusal is logged, never surfaced, since the session goes on the same. */
     function request(track, constraint, what) {
@@ -347,7 +356,7 @@
       if (video) video.srcObject = null;
     }
 
-    return { start, stop, supportsTorch, setTorch, focusOn };
+    return { start, stop, supportsTorch, setTorch, focusOn, frameSettings };
   }
 
   window.CameraStream = {

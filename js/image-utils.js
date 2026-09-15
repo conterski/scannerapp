@@ -86,9 +86,12 @@
       .catch(() => decodeViaImageElement(blob));
   }
 
+  /** Decoded and bounded by `maxEdge` — through the area resample, since a
+   *  library photo larger than the bound is downscaled here and nowhere
+   *  else: a bilinear pick leaves every thin line stair-stepped. */
   async function decodeImageToCanvas(blob, maxEdge) {
     const source = await decodeWithExifOrientation(blob);
-    const { canvas } = createScaledCanvas(source, maxEdge);
+    const { canvas } = createScaledCanvas(source, maxEdge, { smoothing: "high" });
     source.close?.();
     return canvas;
   }
