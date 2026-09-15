@@ -326,8 +326,9 @@
     return { colour: attempt.refused ? COLOUR.refused : COLOUR.accepted, points: attempt.located.filter(Boolean).map(full), line };
   }
 
-  /** The crop a debug result found, in the scene's own pixels. */
-  const cropOf = (result) => scaleCorners(result.corners, 1 / result.scale);
+  /** The crop a debug result found — verified at native resolution where it
+   *  was — in the scene's own pixels. */
+  const cropOf = (result) => scaleCorners(result.verified || result.corners, 1 / result.scale);
 
   // ---------------------------------------------------------------
   // One scene
@@ -375,7 +376,8 @@
     p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
       `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
       `<span class="muted mono">${r.moves.map((m) => `${m.side >= 0 ? SIDE_NAMES[m.side][0] : ""}${describeMove(m)}`).join(" ")}</span><br>` +
-      `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span>`;
+      `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span><br>` +
+      `<span class="muted mono">native: ${(scene.result.verification || []).map((v, type) => `${SIDE_NAMES[type][0]} ${v.found ? (v.seam ? "seam" : "edge") : "-"}${v.offset ? " " + (v.offset > 0 ? "+" : "") + v.offset.toFixed(0) + "px" : ""}${v.contentDepth ? " PRINT" : ""}`).join(" · ")} · conf ${scene.result.confidence ? scene.result.confidence.overall : "-"}</span>`;
     return p;
   }
 
@@ -452,7 +454,7 @@
       const legacy = legacyQuad(name);
       // What the app would use: the looser fallback below the low threshold.
       const conservative = result.conservative && result.confidence.overall < Detect.CONFIDENCE_LOW;
-      const crop = scaleCorners(conservative ? result.conservative : result.corners, 1 / result.scale);
+      const crop = scaleCorners(conservative ? result.conservative : result.verified || result.corners, 1 / result.scale);
       const shift = legacy ? maxShiftPercent(crop, legacy, Math.hypot(canvas.width, canvas.height)) : null;
       const gt = truthFor(truth, name, canvas);
       const grade = gt && gradeQuad(crop, gt.quad, canvas);

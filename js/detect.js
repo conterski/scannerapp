@@ -29,8 +29,17 @@
   const CONFIDENCE_HIGH = 0.5;
   const CONFIDENCE_LOW = 0.3;
 
+  // Native-resolution verification (worker/side-verify.js): the strip of the
+  // photo cut along each side of the crop, this many source px either side
+  // of it and at most this many columns long. A side the verification finds
+  // an edge under is trusted at least this much.
+  const STRIP_HALF_WIDTH = 24;
+  const STRIP_MAX_LENGTH = 1600;
+  const VERIFIED_CONFIDENCE = 0.7;
+  const stripScratch = ImageUtils.createScratchCanvas();
+
   const MIN_WARP_DIMENSION = 8;
-  const { clamp, mapCorners, scaleCorners, quadArea, imageDataOf } = ImageUtils;
+  const { CORNER_KEYS, clamp, mapCorners, scaleCorners, quadArea, imageDataOf } = ImageUtils;
 
   // The worker and its modules are fetched by URL rather than by a
   // <script> tag, so the deploy-time cache-busting stamp never reaches them on
@@ -180,16 +189,61 @@
       await detector.ensureReady();
       const { response, scale } = await runDetection(sourceCanvas, false, options);
       if (!response.corners) return { ...nothing, failed: false };
-      const corners = toFullResolutionCorners(response.corners, scale, bounds);
+      let corners = toFullResolutionCorners(response.corners, scale, bounds);
       if (!isPlausibleDocumentQuad(corners, bounds)) return { ...nothing, failed: false };
-      const confidence = response.confidence || nothing.confidence;
+      let confidence = response.confidence || nothing.confidence;
       const conservative = confidence.overall < CONFIDENCE_LOW && response.conservative;
-      return { corners: conservative ? toFullResolutionCorners(conservative, scale, bounds) : corners, confidence, failed: false };
+      if (conservative) corners = toFullResolutionCorners(conservative, scale, bounds);
+      else ({ corners, confidence } = await verifyAtNativeResolution(sourceCanvas, corners, confidence));
+      return { corners, confidence, failed: false };
     } catch (error) {
       console.warn("Corner detection failed, using full image:", error);
       return { ...nothing, failed: true };
     }
   }
+
+  /**
+   * The crop checked against the photo at its own resolution
+   * (worker/side-verify.js): a strip along each side is cut here — the only
+   * place the full-resolution photo is at hand — and read in the worker,
+   * which moves a side out past print it was cutting or onto an edge found
+   * a little way off. A side with an edge under it is trusted at least
+   * VERIFIED_CONFIDENCE; one with print beyond it is warned about.
+   * @returns { corners, confidence, verification: [per side] }
+   */
+  async function verifyAtNativeResolution(sourceCanvas, corners, confidence) {
+    const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
+    const centre = { x: mean(CORNER_KEYS.map((k) => corners[k].x)), y: mean(CORNER_KEYS.map((k) => corners[k].y)) };
+    const strips = [], buffers = [];
+    for (const [from, to] of SIDE_CORNERS) {
+      const a = corners[from], b = corners[to];
+      const length = distance(a, b) || 1;
+      const width = Math.min(STRIP_MAX_LENGTH, Math.round(length)), height = 2 * STRIP_HALF_WIDTH;
+      const u = { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
+      let n = { x: -u.y, y: u.x };
+      if (n.x * (centre.x - a.x) + n.y * (centre.y - a.y) > 0) n = { x: -n.x, y: -n.y }; // outward: rows grow away from the crop
+      const context = stripScratch.context(width, height);
+      context.clearRect(0, 0, width, height);
+      const along = width / length;
+      // Source → strip: columns along the side, rows along the outward normal.
+      context.setTransform(u.x * along, n.x, u.y * along, n.y,
+        -(u.x * a.x + u.y * a.y) * along, STRIP_HALF_WIDTH - (n.x * a.x + n.y * a.y));
+      context.drawImage(sourceCanvas, 0, 0);
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      const { data } = imageDataOf(stripScratch.canvas);
+      strips.push({ width, height, buffer: data.buffer });
+      buffers.push(data.buffer);
+    }
+    const response = await callDetector("verify", { strips, corners, width: bounds.width, height: bounds.height }, buffers);
+    const sides = confidence.sides.map((side, type) => (response.sides[type].found ? Math.max(side, VERIFIED_CONFIDENCE) : side));
+    const warnings = confidence.warnings.concat(
+      response.sides.map((side, type) => (side.contentDepth ? `${SIDE_NAMES[type]}: print beyond, moved out` : null)).filter(Boolean));
+    return { corners: response.quad, confidence: { overall: +Math.min(...sides).toFixed(3), sides, warnings }, verification: response.sides };
+  }
+
+  const SIDE_CORNERS = [["tl", "tr"], ["tr", "br"], ["br", "bl"], ["bl", "tl"]]; // by side type
+  const SIDE_NAMES = ["top", "right", "bottom", "left"];
+  const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
 
   /** The score's breakdown for `corners` (full-res), for the overlay page:
    *  how the cost function reads a quad. */
@@ -209,7 +263,13 @@
   async function detectDebug(sourceCanvas, options) {
     await detector.ensureReady();
     const { response, scale } = await runDetection(sourceCanvas, true, options);
-    return { corners: response.corners, conservative: response.conservative, scale, confidence: response.confidence, refinement: response.refinement };
+    const result = { corners: response.corners, conservative: response.conservative, scale, confidence: response.confidence, refinement: response.refinement };
+    if (response.corners && response.confidence) {
+      const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
+      const verified = await verifyAtNativeResolution(sourceCanvas, toFullResolutionCorners(response.corners, scale, bounds), response.confidence);
+      Object.assign(result, { verified: scaleCorners(verified.corners, scale), confidence: verified.confidence, verification: verified.verification });
+    }
+    return result;
   }
 
   // ---------------------------------------------------------------

@@ -6,6 +6,7 @@
  *   init        → loads OpenCV
  *   detect      {width, height, buffer, engine?, debug?}         → {corners|null, refinement?}
  *   previewQuad {width, height, buffer}                          → {corners|null}
+ *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
  *   warp        {width, height, buffer, corners, dstW, dstH}     → {buffer}
  *   denoise     {width, height, buffer}                          → {buffer}
@@ -37,6 +38,7 @@ importScripts(...[
   "worker/quad-score.js",
   "worker/line-candidates.js",
   "worker/side-refit.js",
+  "worker/side-verify.js",
   "worker/quad-search.js",
   "worker/guided-filter.js",
   "worker/enhance.js",
@@ -809,6 +811,7 @@ function scoreGivenQuad({ width, height, buffer, corners }) {
 const HANDLERS = new Map([
   ["init", () => ({ result: {} })],
   ["detect", (payload) => ({ result: detect(payload) })],
+  ["verify", ({ strips, corners, width, height }) => ({ result: verifySides(strips, corners, { width, height }) })],
   ["scoreQuad", (payload) => ({ result: scoreGivenQuad(payload) })],
   ["previewQuad", (payload) => ({ result: previewQuad(payload) })],
   ["warp", (payload) => {
