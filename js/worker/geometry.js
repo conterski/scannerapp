@@ -166,6 +166,13 @@ function boundingBoxOfPoints(points) {
 
 function bboxOf(quad) { return boundingBoxOfPoints(quadPoints(quad)); }
 
+/** Intersection over union of two quads' areas. */
+function quadIoU(a, b) {
+  const intersection = polygonArea(clipPolyToQuad(quadPoints(a), b));
+  const union = shoelaceArea(a) + shoelaceArea(b) - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
 function bboxIoU(a, b) {
   const overlapX = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
   const overlapY = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));

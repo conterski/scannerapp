@@ -173,7 +173,9 @@
    * Detects document corners in `sourceCanvas` (full-res normalized image),
    * falling back to the whole image when no plausible document quad is found
    * and when detection itself fails.
-   * @param options { engine } — see engineFor; the app never passes it
+   * @param options { engine, prior } — engine see engineFor, the app never
+   *                passes it; prior { quad, stability } the live outline a
+   *                camera shot was taken against, in full-res coordinates
    * @returns { corners, confidence, failed } — corners {tl,tr,br,bl} in
    *          full-res coordinates: the detector's crop, or its looser
    *          fallback below CONFIDENCE_LOW; `confidence` { overall, sides,
@@ -333,12 +335,14 @@
 
   async function runDetection(sourceCanvas, wantsDebug, options) {
     const { imageData, scale } = detectionPixels(sourceCanvas);
+    const prior = options && options.prior;
     const response = await callDetector("detect", {
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
       debug: wantsDebug,
       engine: engineFor(options),
+      prior: prior && { corners: scaleCorners(prior.quad, scale), stability: prior.stability },
     }, [imageData.data.buffer]);
     return { response, scale };
   }

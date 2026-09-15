@@ -4,7 +4,7 @@
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init        → loads OpenCV
- *   detect      {width, height, buffer, engine?, debug?}         → {corners|null, refinement?}
+ *   detect      {width, height, buffer, engine?, debug?, prior?} → {corners|null, confidence, refinement?}
  *   previewQuad {width, height, buffer}                          → {corners|null}
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
@@ -566,6 +566,14 @@ function releasePipeline(pipeline) {
  * The re-rank of the legacy's candidates runs before the print extent is
  * known — the extent needs the winner's segments — so it reads seams as
  * rules where the refinement, later, reads them as seams.
+ *
+ * A camera shot brings the outline the user shot against as `prior`
+ * { corners, stability }: it draws the re-rank towards it, and it stands as
+ * the crop where the detector finds nothing, or where it holds the
+ * detector's crop and the detector's does not beat its score clearly — more
+ * clearly the steadier it held. Never where it would cut: the outline runs
+ * on a quarter of the pixels with no margin, and the user's eye at
+ * viewfinder size cannot vouch against a cut, so a tighter prior loses.
  * @returns { corners, confidence } — confidence from quadConfidence, plus
  *          `conservative`, the legacy crop, where the refined crop differs
  *          from it; with debug also refinement: { ...refineGivenQuad's
@@ -576,18 +584,28 @@ function detectRefined(payload) {
   try {
     img = cv.matFromImageData(toImageData(payload.width, payload.height, payload.buffer));
     const frame = buildFrame(img);
+    const prior = payload.prior && { ...payload.prior, score: scoreQuad(frame, payload.prior.corners) };
     const legacy = detectByLegacy({ ...payload, wantSegments: true,
-      chooseBest: (candidates, best) => rerankByScore(frame, candidates, best) });
-    if (!legacy.corners) return { corners: null };
-    const lines = linePools(frame, legacy.segments);
-    frame.printExtent = printedExtent(lines.all, frame);
-    const outcome = refineGivenQuad(frame, legacy.corners, lines.pools);
-    const corners = outcome.refined
-      ? expandQuad(outcome.quad, SAFETY_MARGIN_FRACTION * frame.shortSide, frame)
-      : legacy.corners;
-    const result = { corners, confidence: quadConfidence(outcome.score) };
-    if (outcome.refined) result.conservative = legacy.corners;
-    if (payload.debug) result.refinement = { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent };
+      chooseBest: (candidates, best) => rerankByScore(frame, candidates, best, prior) });
+    let result = { corners: null };
+    if (legacy.corners) {
+      const lines = linePools(frame, legacy.segments);
+      frame.printExtent = printedExtent(lines.all, frame);
+      const outcome = refineGivenQuad(frame, legacy.corners, lines.pools);
+      const corners = outcome.refined
+        ? expandQuad(outcome.quad, SAFETY_MARGIN_FRACTION * frame.shortSide, frame)
+        : legacy.corners;
+      result = { corners, confidence: quadConfidence(outcome.score) };
+      if (outcome.refined) result.conservative = legacy.corners;
+      if (payload.debug) result.refinement = { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent };
+    }
+    if (prior && !prior.score.rejected && (!result.corners ||
+        (fracOutsideQuad(quadPoints(result.corners), prior.corners) <= RERANK.priorHolds &&
+         scoreQuad(frame, result.corners).total - prior.score.total < RERANK.priorMargin + RERANK.priorMarginSteady * prior.stability))) {
+      const confidence = quadConfidence(prior.score);
+      confidence.warnings.push("prior kept");
+      return { corners: prior.corners, confidence, refinement: result.refinement };
+    }
     return result;
   } finally {
     releaseMats(img);
@@ -613,19 +631,30 @@ const RERANK = Object.freeze({
   margin: 0.05,            // over the legacy pick's score
   maxLegacyOutside: 0.1,   // "contains": this share of the legacy pick at most lies outside
   cutMargin: 0.05,         // a containing candidate wins outright when it cuts this much less
+  // A camera shot's prior (detectRefined): a candidate gains its overlap
+  // with the prior times priorWeight, and the detector's crop must beat the
+  // prior's score by priorMargin — each plus its Steady share at full
+  // stability — where the prior holds all but priorHolds of the crop.
+  priorWeight: 0.15,
+  priorWeightSteady: 0.35,
+  priorMargin: 0.03,
+  priorMarginSteady: 0.05,
+  priorHolds: 0.02,
 });
 
-/** The candidate that carries on: `best` itself unless the score overrules it. */
-function rerankByScore(frame, candidates, best) {
+/** The candidate that carries on: `best` itself unless the score overrules it.
+ *  @param prior a camera shot's { corners, stability }, or undefined */
+function rerankByScore(frame, candidates, best, prior) {
   if (!best) return best;
   const field = candidates.filter((candidate) => candidate.corners && !candidate.rejected)
     .sort((p, q) => q.score - p.score).slice(0, RERANK.candidates);
+  const priorWeight = prior ? RERANK.priorWeight + RERANK.priorWeightSteady * prior.stability : 0;
   const scored = field.map((candidate) => {
     const score = scoreQuad(frame, candidate.corners);
     // How much of its sides cut the sheet's print — the first thing ranked;
     // a quad the score cannot read at all (out of frame, not a sheet) ranks last.
     const cuts = score.rejected === "cuts" ? Math.max(...score.sides.map((side) => side.confirmedContent)) : score.rejected ? Infinity : 0;
-    return { candidate, total: score.total, cuts };
+    return { candidate, total: score.total + (priorWeight ? priorWeight * quadIoU(candidate.corners, prior.corners) : 0), cuts };
   });
   const legacy = scored.find((entry) => entry.candidate === best);
   if (!legacy || legacy.cuts === Infinity) return best; // a pick the score cannot even read stays the legacy's

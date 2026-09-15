@@ -66,6 +66,7 @@
 <script src="js/promise-utils.js"></script>
 <script src="js/image-utils.js"></script>
 <script src="js/detect.js"></script>
+<script src="js/capture-outline.js"></script>
 <script>
 (function () {
   "use strict";
@@ -714,6 +715,80 @@
   /** The live outline's quad under the same variants, at the preview's own size. */
   window.previewRobustness = function (engine = "refined") {
     return variantSuite((canvas) => Detect.previewCorners(canvas, { engine }), previewSized);
+  };
+
+  // ---------------------------------------------------------------
+  // Console API — the camera path: each scene shot as the live outline
+  // would have framed it, its preview quad going along as the prior at the
+  // given stability, graded against the truth beside the prior and the
+  // detector alone; and the outline itself over a synthetic feed.
+  // ---------------------------------------------------------------
+
+  window.priorCompare = async function (stability = 0.8, engine = "refined") {
+    const truth = await groundTruth();
+    const rows = [], tally = { kept: 0, cuts: 0, priorCuts: 0, worse: 0, better: 0 };
+    for (const name of SCENES) {
+      const canvas = await canvasFor(name);
+      const preview = await previewQuadFor(name, engine);
+      if (!preview.corners) { rows.push(`${name.padEnd(13)} no outline`); continue; }
+      const prior = mapCorners(preview.corners, (p) => ({ x: p.x / preview.width * canvas.width, y: p.y / preview.height * canvas.height }));
+      const result = await Detect.detectDebug(canvas, { engine, prior: { quad: prior, stability } });
+      const gt = truthFor(truth, name, canvas);
+      const [withPrior, alone, ofPrior] = [cropOf(result), cropOf(await resultFor(name, engine)), prior].map((quad) => gradeQuad(quad, gt.quad, canvas));
+      const kept = result.confidence.warnings.includes("prior kept");
+      tally.kept += kept; tally.cuts += withPrior.cut; tally.priorCuts += ofPrior.cut;
+      tally.worse += withPrior.sideError > alone.sideError + 0.5; tally.better += withPrior.sideError < alone.sideError - 0.5;
+      const cell = (grade) => `${grade.sideError.toFixed(1)}${grade.cut ? " CUT" : ""}`;
+      rows.push(`${name.padEnd(13)} ${kept ? "prior kept" : "detector  "}  side error: prior ${cell(ofPrior)} · alone ${cell(alone)} · with prior ${cell(withPrior)}  conf ${result.confidence.overall.toFixed(2)}`);
+    }
+    return { rows, ...tally };
+  };
+
+  /** The live outline over a synthetic feed of `name`: the sheet jittered
+   *  by ±1.5 % of the short side with the exposure flickering, then moved
+   *  by 15 % for the second half. Reports the outline's largest per-frame
+   *  jump while the sheet only jittered, and how many frames it took to
+   *  follow the move. */
+  window.outlineJitter = async function (name = "ok1.jpeg", frames = 40) {
+    const scene = previewSized(await canvasFor(name));
+    const feed = document.createElement("canvas");
+    feed.width = scene.width; feed.height = scene.height;
+    const video = document.createElement("video");
+    Object.assign(video.style, { position: "fixed", left: 0, top: 0, width: "320px", height: "240px", opacity: 0 });
+    video.muted = true; video.srcObject = feed.captureStream(); document.body.append(video);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const shortSide = Math.min(scene.width, scene.height);
+    const context = feed.getContext("2d");
+    const paint = (i) => {
+      const jitter = () => (Math.random() - 0.5) * 0.03 * shortSide;
+      const move = i >= frames / 2 ? 0.15 * shortSide : 0;
+      context.filter = `brightness(${0.9 + Math.random() * 0.2})`;
+      context.fillStyle = "#888"; context.fillRect(0, 0, feed.width, feed.height);
+      context.drawImage(scene, jitter() + move, jitter());
+    };
+    paint(0);
+    await video.play();
+    // The outline's loop runs on animation frames, which a hidden page never
+    // gets; a timer stands in for them while the test runs.
+    const animationFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = (fn) => setTimeout(() => fn(performance.now()), 16);
+    const outline = CaptureOutline.create(svg, video);
+    outline.start();
+    const jumps = [];
+    let last = null;
+    for (let i = 0; i < frames; i++) {
+      paint(i);
+      await PromiseUtils.delay(150);
+      const now = outline.corners();
+      if (now && last) jumps.push(Math.max(...KEYS.map((k) => Math.hypot((now.quad[k].x - last.quad[k].x) * scene.width, (now.quad[k].y - last.quad[k].y) * scene.height))) / shortSide * 100);
+      else jumps.push(null);
+      last = now;
+    }
+    outline.stop(); video.remove(); ImageUtils.releaseCanvas(scene);
+    window.requestAnimationFrame = animationFrame;
+    const jittering = jumps.slice(2, frames / 2).filter((j) => j !== null), moving = jumps.slice(frames / 2);
+    const followed = moving.findIndex((j) => j > 5);
+    return { maxJumpPercent: +Math.max(...jittering).toFixed(2), meanJumpPercent: +mean(jittering).toFixed(2), framesToFollowMove: followed < 0 ? null : followed + 1, jumps: jumps.map((j) => (j === null ? "-" : j.toFixed(1))).join(" ") };
   };
 
   // ---------------------------------------------------------------

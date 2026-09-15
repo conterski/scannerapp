@@ -122,7 +122,7 @@
         if (!accepting) return;
         flash();
         const region = outline.region();
-        const viewfinderCorners = outline.corners();
+        const viewfinder = outline.corners();
         const frame = camera.focusOn(region)
           .then(() => CameraStream.grabSharpest(els.captureVideo, region));
         encodeChain = encodeChain
@@ -131,7 +131,7 @@
             if (!canvas) return; // the stream had no frame yet
             return CameraStream.captureJpeg(canvas)
               .then((blob) => {
-                store.add(blob, viewfinderCorners);
+                store.add(blob, viewfinder);
                 renderCount();
                 renderStrip();
               })

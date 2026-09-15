@@ -194,9 +194,11 @@
   }
 
   /**
-   * @param items    [{ file, viewfinderCorners }] — the outline shown when a
-   *                 camera shot was taken, as fractions of the frame, becomes
-   *                 that page's crop; null leaves the crop to the detector.
+   * @param items    [{ file, viewfinderCorners, stability }] — the outline
+   *                 shown when a camera shot was taken, as fractions of the
+   *                 frame, and how steadily it held: the prior the detector
+   *                 weighs that page's crop against; null leaves the crop to
+   *                 the detector alone.
    * @param insertAt where the new pages go, as an index into `pages`. Omit it
    *                 to ask the user — the picker, rapid capture and the
    *                 single-shot fallback all come through here, so asking once
@@ -328,16 +330,16 @@
     return ImageUtils.decodeImageToCanvas(file, DECODE_MAX_EDGE).catch((error) => error);
   }
 
-  /** The outline the user framed against is the crop they expect of a camera
-   *  shot; the detector, run on the saved photo, is what a shot taken with no
-   *  outline showing and every library photo get. */
-  async function registerPage({ file, viewfinderCorners }, decoded, index, tally) {
+  /** The detector runs on the saved photo; a camera shot's outline, the crop
+   *  the user framed against, goes along as the prior the detector must beat
+   *  clearly to depart from. */
+  async function registerPage({ file, viewfinderCorners, stability }, decoded, index, tally) {
     try {
       if (decoded instanceof Error) throw decoded;
       const outline = viewfinderCorners && cornersAtSize(viewfinderCorners, decoded);
-      const detected = outline ? null : await detectCornersTallying(decoded, tally);
-      const page = createPage(await blobToStore(file, decoded), outline || detected.corners, outline);
-      page.needsCheck = !!detected && detected.confidence.overall < Detect.CONFIDENCE_HIGH; // the card asks for a look
+      const detected = await detectCornersTallying(decoded, tally, outline && { prior: { quad: outline, stability } });
+      const page = createPage(await blobToStore(file, decoded), detected.corners, outline);
+      page.needsCheck = detected.confidence.overall < Detect.CONFIDENCE_HIGH; // the card asks for a look
       if (page.needsCheck) tally.needsCheck++;
       // splice at pages.length is a push, so appending needs no special case.
       pages.splice(index, 0, page);
@@ -348,8 +350,8 @@
     }
   }
 
-  async function detectCornersTallying(decoded, tally) {
-    const detected = await Detect.detectCorners(decoded);
+  async function detectCornersTallying(decoded, tally, options) {
+    const detected = await Detect.detectCorners(decoded, options);
     if (detected.failed) tally.detectionFailures++;
     return detected;
   }
