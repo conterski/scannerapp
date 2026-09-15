@@ -374,7 +374,7 @@
     if (!r) { p.innerHTML = `<b>${scene.name}</b> · ${scene.engine} crop`; return p; }
     p.innerHTML = `<b>${scene.name}</b> · ${r.refined ? "REFINED" : "legacy kept"} · score ${round(r.scoreBefore, 3)} → ${round(r.scoreAfter, 3)} ` +
       `· print extent ${r.printExtent ? `${r.printExtent.rules} rules` : "none"}<br>` +
-      `<span class="muted mono">${r.moves.map((m) => `${SIDE_NAMES[m.side][0]}${describeMove(m)}`).join(" ")}</span><br>` +
+      `<span class="muted mono">${r.moves.map((m) => `${m.side >= 0 ? SIDE_NAMES[m.side][0] : ""}${describeMove(m)}`).join(" ")}</span><br>` +
       `<span class="muted mono">refits: ${(r.refits || []).map((a) => `${SIDE_NAMES[a.side][0]} ${Math.round(a.consensus * 100)}% ${a.refused ? "✗" + a.refused : "✓" + a.inward}`).join(" · ")}</span>`;
     return p;
   }
@@ -384,6 +384,7 @@
       case "offset": return (move.amount > 0 ? "+" : "") + move.amount;
       case "line": return "→line" + move.amount;
       case "refit": return `refit-${move.amount}(${Math.round(move.consensus * 100)}%)`;
+      case "uncut": return "UNCUT";
       default: return "∠" + move.amount;
     }
   }
@@ -449,7 +450,9 @@
     await forEachScene(engine, (name, canvas, result, ms) => {
       times.push(ms);
       const legacy = legacyQuad(name);
-      const crop = cropOf(result);
+      // What the app would use: the looser fallback below the low threshold.
+      const conservative = result.conservative && result.confidence.overall < Detect.CONFIDENCE_LOW;
+      const crop = scaleCorners(conservative ? result.conservative : result.corners, 1 / result.scale);
       const shift = legacy ? maxShiftPercent(crop, legacy, Math.hypot(canvas.width, canvas.height)) : null;
       const gt = truthFor(truth, name, canvas);
       const grade = gt && gradeQuad(crop, gt.quad, canvas);
@@ -460,7 +463,8 @@
       const r = result.refinement;
       const detail = r ? `${r.refined ? "REFINED" : "kept"} ${round(r.scoreBefore, 3)}->${round(r.scoreAfter, 3)} ${r.moves.length} moves` : "";
       const graded = grade ? ` ${grade.cut ? "CUT " : "    "}sides ${grade.sides.map((d) => (d > 0 ? "+" : "") + d.toFixed(1)).join("/")} IoU ${grade.iou}${gt.provisional ? " (prov)" : ""}` : "";
-      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${graded}  ${detail}`);
+      const confidence = result.confidence ? ` conf ${result.confidence.overall.toFixed(2)}${conservative ? " →fallback" : ""}` : "";
+      rows.push(`${name.padEnd(13)} shift ${shift === null ? "-" : shift.toFixed(1) + "%"}${graded}${confidence}  ${detail}`);
     });
     const meanOf = (key) => +mean(grades.map((g) => g[key])).toFixed(3);
     return {
@@ -485,7 +489,7 @@
     const n = rated.length;
     const spearman = 1 - 6 * a.reduce((sum, r, i) => sum + (r - b[i]) ** 2, 0) / (n * (n * n - 1));
     const bands = { high: [], medium: [], low: [] };
-    for (const g of rated) bands[g.confidence >= 0.7 ? "high" : g.confidence >= 0.4 ? "medium" : "low"].push(g);
+    for (const g of rated) bands[g.confidence >= Detect.CONFIDENCE_HIGH ? "high" : g.confidence >= Detect.CONFIDENCE_LOW ? "medium" : "low"].push(g);
     const summary = {};
     for (const [band, list] of Object.entries(bands)) summary[band] = { scenes: list.length, cut: list.filter((g) => g.cut).length, meanSideError: list.length ? +mean(list.map((g) => g.sideError)).toFixed(2) : null };
     return { spearman: +spearman.toFixed(3), bands: summary };

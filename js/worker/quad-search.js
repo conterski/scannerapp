@@ -22,6 +22,9 @@ const SEARCH = Object.freeze({
   // fold for the sheet's on the very scenes the refinement is for.
   acceptGain: 0.03,
   outwardAllowance: 2,         // px at 800px a side may still move outward, to sit on its edge
+  // A crop that cuts the sheet's own print is widened past the print by
+  // this much of the short side — the one outward move this stage makes.
+  uncutClearanceOfShortSide: 0.02,
   refine: {
     offsets: [1, 2, 4, 8],     // px along the normal, both ways, at 800px
     rotationsDeg: [0.5, 1],    // about the side's midpoint, both ways
@@ -72,6 +75,8 @@ function refineQuad(frame, start, pools) {
 
   let current = { quad: start, score: scoreQuad(frame, start, trialOptions) };
   const moves = [];
+  // A start that is itself invalid has no gains to measure moves by.
+  if (current.score.rejected) return { quad: start, score: current.score, moves };
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     const lines = sideLinesOf(current.quad);
     let best = null;
@@ -114,15 +119,34 @@ function refineQuad(frame, start, pools) {
  * than SEARCH.acceptGain — a crop that arrived here is a detector's answer,
  * and a marginal preference is not a reason to move it. Sides hidden in
  * part by a fold are first refitted to their visible edge (side-refit.js),
- * and the descent starts from there.
- * @returns { quad, refined: bool, scoreBefore, scoreAfter, moves, refits }
+ * and the descent starts from there. A crop that cuts the sheet's own print
+ * is not refined but widened past it.
+ * @returns { quad, score, refined: bool, scoreBefore, scoreAfter, moves, refits }
+ *          — score is the returned quad's
  */
 function refineGivenQuad(frame, quad, pools) {
   const before = scoreQuad(frame, quad);
-  if (before.rejected) return { quad, refined: false, scoreBefore: before.total, scoreAfter: before.total, moves: [], refits: [] };
+  if (before.rejected === "cuts") {
+    const widened = uncutQuad(frame, quad, before);
+    return { quad: widened, score: scoreQuad(frame, widened), refined: true, scoreBefore: before.total, scoreAfter: NaN,
+             moves: [{ side: -1, kind: "uncut", amount: 0, gain: 0 }], refits: [] };
+  }
+  if (before.rejected) return { quad, score: before, refined: false, scoreBefore: before.total, scoreAfter: before.total, moves: [], refits: [] };
   const refit = refitSides(frame, quad);
   const result = refineQuad(frame, refit.quad, pools);
   const refined = result.score.total - before.total >= SEARCH.acceptGain;
-  return { quad: refined ? result.quad : quad, refined, scoreBefore: before.total, scoreAfter: result.score.total,
-           moves: refit.moves.concat(result.moves), refits: refit.tried };
+  return { quad: refined ? result.quad : quad, score: refined ? result.score : before, refined,
+           scoreBefore: before.total, scoreAfter: result.score.total, moves: refit.moves.concat(result.moves), refits: refit.tried };
+}
+
+/** Every side with the sheet's own print past it, moved out past that
+ *  print; `quad` itself if the widened shape is no longer a quad. */
+function uncutQuad(frame, quad, score) {
+  const lines = sideLinesOf(quad);
+  score.sides.forEach((side, type) => {
+    if (side.confirmedContent <= SCORE.content.maxConfirmedShare) return;
+    const normal = outwardNormal(quad, sideOf(quad, type));
+    lines[type] = shiftedLine(lines[type], normal, side.contentDepth + SEARCH.uncutClearanceOfShortSide * frame.shortSide);
+  });
+  return quadFromSideLines(lines, frame) || quad;
 }

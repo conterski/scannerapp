@@ -564,8 +564,10 @@ function releasePipeline(pipeline) {
  * The re-rank of the legacy's candidates runs before the print extent is
  * known — the extent needs the winner's segments — so it reads seams as
  * rules where the refinement, later, reads them as seams.
- * @returns { corners } — with debug: { corners, refinement: { ...refineGivenQuad's
- *          outcome, legacy: the legacy crop, printExtent } }
+ * @returns { corners, confidence } — confidence from quadConfidence, plus
+ *          `conservative`, the legacy crop, where the refined crop differs
+ *          from it; with debug also refinement: { ...refineGivenQuad's
+ *          outcome, legacy: the legacy crop, printExtent }
  */
 function detectRefined(payload) {
   let img = null;
@@ -581,8 +583,10 @@ function detectRefined(payload) {
     const corners = outcome.refined
       ? expandQuad(outcome.quad, SAFETY_MARGIN_FRACTION * frame.shortSide, frame)
       : legacy.corners;
-    if (!payload.debug) return { corners };
-    return { corners, refinement: { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent } };
+    const result = { corners, confidence: quadConfidence(outcome.score) };
+    if (outcome.refined) result.conservative = legacy.corners;
+    if (payload.debug) result.refinement = { ...outcome, legacy: legacy.corners, printExtent: frame.printExtent };
+    return result;
   } finally {
     releaseMats(img);
   }
@@ -595,14 +599,18 @@ function detectRefined(payload) {
 // just outside them — and tells a whole sheet from a part of one. The
 // score's pick must beat the legacy's clearly and must contain it: the
 // score may trade a part for the whole, never the whole for a part — a
-// wrong whole is loose, a wrong part is a cut. (A field widened with the
-// score engine's own mask quads, and a guarded path to a smaller quad,
-// were tried: they tightened one scene and made the choice less stable
-// under exposure and scale on four others, at the cost of the masks.)
+// wrong whole is loose, a wrong part is a cut. Cutting comes before the
+// score: a candidate with the sheet's own print past its sides loses to
+// any containing one with less of it, whatever their scores. (A field
+// widened with the score engine's own mask quads, and a guarded path to a
+// smaller quad, were tried: they tightened one scene and made the choice
+// less stable under exposure and scale on four others, at the cost of the
+// masks.)
 const RERANK = Object.freeze({
   candidates: 5,           // the legacy's best few by its own score are the field
   margin: 0.05,            // over the legacy pick's score
   maxLegacyOutside: 0.1,   // "contains": this share of the legacy pick at most lies outside
+  cutMargin: 0.05,         // a containing candidate wins outright when it cuts this much less
 });
 
 /** The candidate that carries on: `best` itself unless the score overrules it. */
@@ -610,15 +618,24 @@ function rerankByScore(frame, candidates, best) {
   if (!best) return best;
   const field = candidates.filter((candidate) => candidate.corners && !candidate.rejected)
     .sort((p, q) => q.score - p.score).slice(0, RERANK.candidates);
-  const scored = field.map((candidate) => ({ candidate, total: scoreQuad(frame, candidate.corners).total }));
+  const scored = field.map((candidate) => {
+    const score = scoreQuad(frame, candidate.corners);
+    // How much of its sides cut the sheet's print — the first thing ranked;
+    // a quad the score cannot read at all (out of frame, not a sheet) ranks last.
+    const cuts = score.rejected === "cuts" ? Math.max(...score.sides.map((side) => side.confirmedContent)) : score.rejected ? Infinity : 0;
+    return { candidate, total: score.total, cuts };
+  });
   const legacy = scored.find((entry) => entry.candidate === best);
-  if (!legacy || !isFinite(legacy.total)) return best; // a pick the score cannot even read stays the legacy's
+  if (!legacy || legacy.cuts === Infinity) return best; // a pick the score cannot even read stays the legacy's
   let top = legacy;
   for (const entry of scored) {
-    if (entry.total <= top.total) continue;
-    if (fracOutsideQuad(quadPoints(best.corners), entry.candidate.corners) <= RERANK.maxLegacyOutside) top = entry;
+    if (entry === legacy || fracOutsideQuad(quadPoints(best.corners), entry.candidate.corners) > RERANK.maxLegacyOutside) continue;
+    const cutsLess = entry.cuts <= top.cuts - RERANK.cutMargin;
+    const scoresBetter = entry.cuts <= top.cuts && entry.total > top.total;
+    if (cutsLess || scoresBetter) top = entry;
   }
-  return top !== legacy && top.total - legacy.total >= RERANK.margin ? top.candidate : best;
+  if (top === legacy) return best;
+  return top.cuts < legacy.cuts || top.total - legacy.total >= RERANK.margin ? top.candidate : best;
 }
 
 function detect(payload) {

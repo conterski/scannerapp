@@ -19,8 +19,9 @@
 
   /** @type {Array<{id:number, blob:Blob, corners:Object, viewfinderCorners:Object|null,
    *  quarterTurns:number, outputBlob:Blob, outputURL:string, renderedSig:string,
-   *  renderFailed:boolean}>} — see createPage. Stored as `quarter` on disk —
-   *  Store's page record maps the name. */
+   *  renderFailed:boolean, needsCheck:boolean}>} — see createPage. Stored as
+   *  `quarter` on disk — Store's page record maps the name; needsCheck is not
+   *  stored, it lasts until the crop is edited. */
   const pages = [];
   let nextPageId = 1;
 
@@ -232,6 +233,7 @@
       // Last, so it replaces the placement note: an uncropped page is the more
       // useful thing to know about.
       if (tally.detectionFailures) reportDetectionFailures(tally.detectionFailures);
+      else if (tally.needsCheck) AppChrome.showTemporaryStatus(`${AppChrome.plural(tally.needsCheck, "page")} may need a crop check — look for the marker.`);
     } finally {
       busy.end();
     }
@@ -302,7 +304,7 @@
     const pageRenders = [];
     // Counted rather than reported per photo: a dead worker fails every
     // remaining photo, and one message is enough to explain the whole run.
-    const tally = { detectionFailures: 0 };
+    const tally = { detectionFailures: 0, needsCheck: 0 };
     // Advances only when a page is actually registered, so a photo that fails
     // to process leaves no gap in the run.
     let cursor = insertAt;
@@ -333,8 +335,10 @@
     try {
       if (decoded instanceof Error) throw decoded;
       const outline = viewfinderCorners && cornersAtSize(viewfinderCorners, decoded);
-      const corners = outline || await detectCornersTallying(decoded, tally);
-      const page = createPage(await blobToStore(file, decoded), corners, outline);
+      const detected = outline ? null : await detectCornersTallying(decoded, tally);
+      const page = createPage(await blobToStore(file, decoded), outline || detected.corners, outline);
+      page.needsCheck = !!detected && detected.confidence.overall < Detect.CONFIDENCE_HIGH; // the card asks for a look
+      if (page.needsCheck) tally.needsCheck++;
       // splice at pages.length is a push, so appending needs no special case.
       pages.splice(index, 0, page);
       return page;
@@ -345,9 +349,9 @@
   }
 
   async function detectCornersTallying(decoded, tally) {
-    const { corners, failed } = await Detect.detectCorners(decoded);
-    if (failed) tally.detectionFailures++;
-    return corners;
+    const detected = await Detect.detectCorners(decoded);
+    if (detected.failed) tally.detectionFailures++;
+    return detected;
   }
 
   /** Corners given as fractions of the frame, in the pixels of `size`. The
@@ -496,6 +500,7 @@
   function applyEditorResult(page, result, source) {
     page.corners = result.corners;
     page.quarterTurns = result.quarterTurns;
+    page.needsCheck = false; // the user has looked
     // Skip the warp entirely when nothing changed (e.g. paging through to
     // review scans); otherwise render off the critical path and persist.
     if (page.outputBlob && page.renderedSig === renderSig(page)) return;

@@ -163,6 +163,20 @@ html, body {
   border: 2px solid transparent;
 }
 .page-card--failed { border-color: var(--danger); }
+/* The detector could not vouch for this crop: a marker until the page is edited. */
+.page-card--check::after {
+  content: "check crop";
+  position: absolute;
+  left: 6px;
+  bottom: 52px;
+  background: #f59e0b;
+  color: #1a1a1a;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 8px;
+  pointer-events: none;
+}
 .page-failed {
   font-size: 12px;
   line-height: 1.4;

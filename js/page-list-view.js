@@ -128,6 +128,7 @@
     const card = document.createElement("div");
     card.className = "page-card";
     if (page.renderFailed) card.classList.add("page-card--failed");
+    if (page.needsCheck) card.classList.add("page-card--check");
     card.dataset.index = String(index);
     return card;
   }

@@ -19,6 +19,16 @@
   // A quad smaller than this share of the photo is noise, not a document.
   const MIN_DOCUMENT_AREA_FRACTION = 0.08;
 
+  // What the detector's confidence in a crop (its weakest side: an edge
+  // under it, read as an edge, nothing of the sheet beyond it) means. Below
+  // CONFIDENCE_HIGH a page is worth a look; below CONFIDENCE_LOW the crop
+  // handed out is the detector's looser fallback rather than a tight one it
+  // cannot vouch for — extra background over a possible cut. Calibrated on
+  // the 36 scenes: the graded-PASS ones sit at 0.5–0.85, the folds, stacks
+  // and receipts-on-pages below 0.4.
+  const CONFIDENCE_HIGH = 0.5;
+  const CONFIDENCE_LOW = 0.3;
+
   const MIN_WARP_DIMENSION = 8;
   const { clamp, mapCorners, scaleCorners, quadArea, imageDataOf } = ImageUtils;
 
@@ -155,23 +165,29 @@
    * falling back to the whole image when no plausible document quad is found
    * and when detection itself fails.
    * @param options { engine } — see engineFor; the app never passes it
-   * @returns { corners, failed } — corners {tl,tr,br,bl} in full-res
-   *          coordinates; `failed` separates the engine giving up from the
-   *          photo simply having no document in it, so a caller can say so.
+   * @returns { corners, confidence, failed } — corners {tl,tr,br,bl} in
+   *          full-res coordinates: the detector's crop, or its looser
+   *          fallback below CONFIDENCE_LOW; `confidence` { overall, sides,
+   *          warnings } from the worker, 0 for the whole image; `failed`
+   *          separates the engine giving up from the photo simply having no
+   *          document in it.
    */
   async function detectCorners(sourceCanvas, options) {
     const bounds = { width: sourceCanvas.width, height: sourceCanvas.height };
     const wholeImage = fullImageCorners(bounds.width, bounds.height);
+    const nothing = { corners: wholeImage, confidence: { overall: 0, sides: [0, 0, 0, 0], warnings: ["no document found"] } };
     try {
       await detector.ensureReady();
       const { response, scale } = await runDetection(sourceCanvas, false, options);
-      if (!response.corners) return { corners: wholeImage, failed: false };
+      if (!response.corners) return { ...nothing, failed: false };
       const corners = toFullResolutionCorners(response.corners, scale, bounds);
-      const isDocument = isPlausibleDocumentQuad(corners, bounds);
-      return { corners: isDocument ? corners : wholeImage, failed: false };
+      if (!isPlausibleDocumentQuad(corners, bounds)) return { ...nothing, failed: false };
+      const confidence = response.confidence || nothing.confidence;
+      const conservative = confidence.overall < CONFIDENCE_LOW && response.conservative;
+      return { corners: conservative ? toFullResolutionCorners(conservative, scale, bounds) : corners, confidence, failed: false };
     } catch (error) {
       console.warn("Corner detection failed, using full image:", error);
-      return { corners: wholeImage, failed: true };
+      return { ...nothing, failed: true };
     }
   }
 
@@ -193,7 +209,7 @@
   async function detectDebug(sourceCanvas, options) {
     await detector.ensureReady();
     const { response, scale } = await runDetection(sourceCanvas, true, options);
-    return { corners: response.corners, scale, refinement: response.refinement };
+    return { corners: response.corners, conservative: response.conservative, scale, confidence: response.confidence, refinement: response.refinement };
   }
 
   // ---------------------------------------------------------------
@@ -378,6 +394,6 @@
 
   window.Detect = {
     ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewCorners, warpPerspective,
-    denoiseCanvas, fullImageCorners,
+    denoiseCanvas, fullImageCorners, CONFIDENCE_HIGH, CONFIDENCE_LOW,
   };
 })();

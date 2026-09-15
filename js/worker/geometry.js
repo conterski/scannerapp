@@ -15,6 +15,7 @@
 
 const SIDE_COUNT = 4;
 const SIDE_TOP = 0, SIDE_RIGHT = 1, SIDE_BOTTOM = 2, SIDE_LEFT = 3;
+const SIDE_NAMES = ["top", "right", "bottom", "left"]; // by side type
 const DEG = Math.PI / 180;
 
 /** Sign per side that turns a midpoint coordinate into "how far out" it sits,
