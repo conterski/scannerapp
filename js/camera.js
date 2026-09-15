@@ -26,11 +26,12 @@
   // shutter stays disabled and the camera light stays on, with no error shown.
   const FIRST_FRAME_TIMEOUT_MS = 10000;
 
-  // How many successive frames a tap compares, keeping the sharpest. Five
-  // span four frame intervals — under 140ms at 30fps — long enough for a
-  // hand's tremor to pass through a still moment and for the lens to settle
-  // after a focus request, too short for the scene to change.
-  const FRAMES_PER_SHOT = 5;
+  // How many successive frames a tap compares, keeping the sharpest. The
+  // first is grabbed on the tap itself, which is when the press jolts the
+  // phone; seven span six frame intervals past it — 100ms at 60fps, 200ms
+  // at 30fps — long enough for the hand to settle and for a lens to finish
+  // focusing, too short for the scene to change.
+  const FRAMES_PER_SHOT = 7;
 
   // The share of the frame scored for sharpness when the outline has nothing
   // to offer: the middle, which is where a document being framed is.

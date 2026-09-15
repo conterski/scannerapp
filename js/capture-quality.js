@@ -5,17 +5,19 @@
  * Rapid capture grabs a video frame rather than a still, so the frame is the
  * ceiling on everything downstream — no later processing can recover detail
  * that was never captured. High detail asks the camera for more, keeps more of
- * it, and pays for the pixels with a lower JPEG quality.
+ * it, and cleans it so the encoder spends its bytes on detail.
  *
  * The numbers are measured on the real pipeline, not modelled. High detail
- * keeps 2400x1350 where standard keeps 1600x900 — 3.2 MP against 1.4 MP —
- * at JPEG quality 0.85, downscaled from the native frame with the
- * browser's area resample. Denoising removes the grain JPEG would otherwise
- * spend bits on, which is what makes the pixels this cheap. The budget went
- * on pixels rather than encoder quality on purpose: on the sample set, 2400px
- * at 0.85 costs 13% more bytes than 2200px did, while 2200px at 0.90 would
- * have cost 26% for a far smaller visible gain; 2500px at 0.85 measured 20%,
- * the whole allowance with nothing left for a noisier frame.
+ * keeps 2500x1406 where standard keeps 1800x1013 — 3.5 MP against 1.8 MP —
+ * downscaled from the native frame with the browser's area resample.
+ * Denoising removes the grain JPEG would otherwise spend bits on, which is
+ * what makes the pixels this cheap. Each profile spends a 1.3x byte
+ * allowance over the previous one (2400px at 0.85, 1600px at 0.80) on pixels
+ * first and encoder quality second: 2500px is as far as the app decodes
+ * (DECODE_MAX_EDGE), and at that size 0.89 measured 1.25x the bytes where
+ * 0.90 measured 1.33x; standard at 1800px and 0.82 measured 1.26x where 0.83
+ * measured 1.32x. Measured over twelve sample photos with each profile's
+ * keep-to-frame ratio applied to them.
  *
  * Exposes window.CaptureQuality.
  */
@@ -25,15 +27,15 @@
   // `maxEdge` never upscales — ImageUtils.createScaledCanvas clamps its scale
   // at 1 — so a device that can't deliver these sizes simply keeps what it has.
   const STANDARD_PROFILE = {
-    maxEdge: 1600,
-    jpegQuality: 0.80,
+    maxEdge: 1800,
+    jpegQuality: 0.82,
     denoise: false,
     video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
   };
 
   // Asks for more than it keeps on purpose: downscaling from a larger frame
-  // averages out sensor noise and aliasing, so 2400px taken from a 2560px
-  // frame is cleaner than 2400px taken from a 2400px one. 2560x1440 rather
+  // averages out sensor noise and aliasing, so 2500px taken from a 2560px
+  // frame is cleaner than 2500px taken from a 2500px one. 2560x1440 rather
   // than 4K because too high an `ideal` can make Safari choose a
   // low-framerate capture mode, which is exactly what `frameRate` fights.
   //
@@ -50,8 +52,8 @@
   // and visible sensor grain, and the filter that removes it has to run on the
   // full frame before the downscale — see CameraStream.captureJpeg.
   const HIGH_DETAIL_PROFILE = {
-    maxEdge: 2400,
-    jpegQuality: 0.85,
+    maxEdge: 2500,
+    jpegQuality: 0.89,
     denoise: true,
     video: {
       width: { ideal: 2560 },
