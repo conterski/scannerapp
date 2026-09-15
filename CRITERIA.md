@@ -60,3 +60,45 @@ A photo added from the library is never touched.
 Keep the original photo and note which edge failed and what the edge wrongly
 followed (table line / shadow / other paper / background). Real failure photos
 are the test set for fixing the detector — see `testdata/` workflow.
+
+## Test set and ground truth
+
+`testdata/` (kept out of git — the photos are real receipts) holds the scene
+photos and `ground-truth.json`: for every scene the paper corners as % of the
+image width/height (`tl, tr, br, bl`), `provisional` (true = the detector's own
+crop checked by eye, false = marked by hand on a 10 % grid overlay), and
+`scene`, every label that applies to what the photo shows:
+
+| Label | What the photo shows |
+|-------|----------------------|
+| `plain` | one sheet on a desk, nothing on or under it |
+| `pad` | the sheet on its own pad or carbon copies — paper of the same size beyond a seam |
+| `stack` | a loose stack of sheets, edges staggered |
+| `page` | the sheet on a larger printed page or sheet |
+| `fold` | a leaf or corner folded over the sheet |
+| `hand` | a hand or finger in the frame, on or beside the sheet |
+
+Labels to add as the set grows, one column each: **paper** (white / thermal /
+carbon-coloured / glossy), **background** (wood / white desk / dark / patterned),
+**print** (form / dense text / blank / border box), **lighting** (even / shadow
+across / lamp fall-off / flash / dark), **perspective** (flat / tilted / keystone).
+Each photo wants four annotations: the paper corners, the scene labels, which
+sides are occluded, and whether the crop shown by the app was PASS /
+ACCEPTABLE / FAIL by the rules above.
+
+Workflow (`detector-overlay.html`, console): `compareEngines()` grades every
+scene against the truth — ZERO_CUT_RATE first, then side / corner error, excess
+margin, IoU and the confidence calibration; `robustness()` runs the variant
+suite; `priorCompare()` and `outlineJitter()` cover the camera path. To correct
+a provisional entry: fix the crop in the app's editor, then `exportTruth(name)`
+prints the entry to paste over it with `provisional: false`.
+
+Scene hypotheses (pad / page / fold / hand / stack) were measured on
+2026-09-15 as a label derived from the score's evidence — the share of a side's
+samples read as skin, as a seam or as a printed line, the nested-edge share and
+whether a side was refitted. No threshold on any of them separates the hand
+labels: skin fires on wooden desks (0.5–0.8 on pads with no hand), a refit is
+accepted on plain receipts as on folds, and the receipt-on-page scenes read as
+plain because the crop sits on the page's edge. 12 of 36 right; the label was
+not shipped. A hypothesis needs evidence the score does not yet read — a second
+seam band below a side for a stack, a rule crossing the crop's edge for a page.
