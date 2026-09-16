@@ -4,7 +4,7 @@
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init        → loads OpenCV
- *   detect      {width, height, buffer, engine?, debug?, prior?} → {corners|null, confidence, refinement?}
+ *   detect      {width, height, buffer, engine?, debug?, prior?, skip?} → {corners|null, confidence, refinement?}
  *   previewQuad {width, height, buffer}                          → {corners|null}
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
@@ -488,14 +488,14 @@ function gridGateFailure(corners, bounds) {
 function assembleCorners(best, pipeline, locks) {
   const { gray, width, height, candidates, getSegments } = pipeline;
   const fuseMeta = {};
-  const fused = fuseQuad(candidates, best, { gray, width, height, getSegments, locks, meta: fuseMeta });
+  const fused = pipeline.skip.has("fusion") ? null : fuseQuad(candidates, best, { gray, width, height, getSegments, locks, meta: fuseMeta });
 
   // refineQuadEdges returns its input unchanged without hull evidence, so this
   // needs no guard of its own — the same condition the net applies below.
   let corners = fused || refineQuadEdges(best.corners, best.hullPts, pipeline);
-  corners = snapSidesOutward(pipeline, corners, locks);
+  if (!pipeline.skip.has("snap")) corners = snapSidesOutward(pipeline, corners, locks);
 
-  if (fused && best.hullPts && best.hullPts.length >= 3) {
+  if (!pipeline.skip.has("net") && fused && best.hullPts && best.hullPts.length >= 3) {
     corners = applyHullCutNet(corners, {
       best, candidates, contributors: fuseMeta.contributors, locked: locks, width, height,
     });
@@ -515,7 +515,7 @@ function assembleCorners(best, pipeline, locks) {
  */
 function buildCorners(best, pipeline) {
   const baseLocks = lockedSidesFor(best, pipeline.reuniteLock);
-  const gridLocks = gridLocksFor(pipeline, baseLocks);
+  const gridLocks = pipeline.skip.has("grid") ? null : gridLocksFor(pipeline, baseLocks);
   if (!gridLocks) return assembleCorners(best, pipeline, baseLocks);
   const built = assembleCorners(best, pipeline, gridLocks);
   if (!gridGateFailure(built, pipeline)) return built;
@@ -687,8 +687,9 @@ function detect(payload) {
  * @param wantSegments also return the Hough segments (found on demand)
  * @returns { corners | null, segments? }
  */
-function detectByLegacy({ width, height, buffer, wantSegments, chooseBest }) {
+function detectByLegacy({ width, height, buffer, wantSegments, chooseBest, skip }) {
   const pipeline = createPipeline(width, height);
+  pipeline.skip = new Set(skip || []); // stages left out: reunite, split, grid, fusion, snap, net
   try {
     allocatePipelineMats(pipeline, buffer, DETECT_KERNELS);
     collectCandidates(pipeline);
@@ -701,10 +702,10 @@ function detectByLegacy({ width, height, buffer, wantSegments, chooseBest }) {
 
     let best = selectBestCandidate(candidates);
     if (chooseBest) best = chooseBest(candidates, best);
-    const reunion = reuniteSeveredSection(best, pipeline);
+    const reunion = pipeline.skip.has("reunite") ? { best, lock: null } : reuniteSeveredSection(best, pipeline);
     best = reunion.best;
     pipeline.reuniteLock = reunion.lock;
-    best = applySafeSplitOverride(best, candidates);
+    if (!pipeline.skip.has("split")) best = applySafeSplitOverride(best, candidates);
 
     const corners = best ? buildCorners(best, pipeline) : null;
     return wantSegments ? { corners, segments: pipeline.getSegments() } : { corners };

@@ -342,6 +342,7 @@
       buffer: imageData.data.buffer,
       debug: wantsDebug,
       engine: engineFor(options),
+      skip: options && options.skip, // legacy stages to leave out — the overlay's ablation switch
       prior: prior && { corners: scaleCorners(prior.quad, scale), stability: prior.stability },
     }, [imageData.data.buffer]);
     return { response, scale };

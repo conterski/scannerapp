@@ -38,7 +38,8 @@
        showMovers(names?, height?, engine) contact sheet over the stored baseline instead
        showVariants(pairs, engine, height) contact sheet of [scene, variant] pairs, the variant's crop over the untouched one
        showSides(pairs, engine, band?, tile?) close-ups along one side, [["fail1.jpeg","T"], ...], with the refit's located points
-       packSheet(columns?, quality?)       (sync) the tiles on show as one JPEG data URL -->
+       packSheet(columns?, quality?)       (sync) the tiles on show as one JPEG data URL
+       detectOptions                       (object) options added to every detector run above — skip: ["reunite"|"split"|"grid"|"fusion"|"snap"|"net"] leaves legacy stages out, to measure what each still earns -->
 <style>
   body { margin: 0; background: #14161c; color: #eceef2; font: 13px -apple-system, "Segoe UI", sans-serif; }
   header { padding: 8px 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -225,6 +226,10 @@
   // its results rather than detecting every scene again.
   let lastRun = { engine: null, results: {} };
 
+  // Extra detector options for every run from the console — e.g.
+  // detectOptions.skip = ["snap"] leaves a legacy stage out (an ablation).
+  window.detectOptions = {};
+
   /** Detects every scene (or `names`) with `engine`, calling `fn(name,
    *  canvas, result, ms)` per scene; returns the results by name. */
   async function forEachScene(engine, fn, names = SCENES) {
@@ -233,7 +238,7 @@
     for (const name of names) {
       const canvas = await canvasFor(name);
       const t0 = performance.now();
-      const result = await Detect.detectDebug(canvas, { engine });
+      const result = await Detect.detectDebug(canvas, { engine, ...detectOptions });
       const ms = performance.now() - t0;
       results[name] = result;
       if (fn) await fn(name, canvas, result, ms);
@@ -245,7 +250,7 @@
   async function resultFor(name, engine) {
     if (lastRun.engine === engine && lastRun.results[name]) return lastRun.results[name];
     await Detect.ensureOpenCV();
-    return Detect.detectDebug(await canvasFor(name), { engine });
+    return Detect.detectDebug(await canvasFor(name), { engine, ...detectOptions });
   }
 
   const previewSized = (canvas) => ImageUtils.createScaledCanvas(canvas, PREVIEW_MAX_EDGE).canvas;
@@ -343,7 +348,7 @@
     const engine = engineSelect.value;
     await Detect.ensureOpenCV();
     const canvas = await canvasFor(name);
-    const result = await Detect.detectDebug(canvas, { engine });
+    const result = await Detect.detectDebug(canvas, { engine, ...detectOptions });
     const truth = truthFor(await groundTruth(), name, canvas);
     if (generation !== showGeneration) return; // a later show() has taken over
     current = { name, canvas, result, truth: truth && truth.quad, engine };
@@ -709,7 +714,7 @@
   }
 
   window.robustness = function (engine = "refined", labels) {
-    return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine })).corners, undefined, labels);
+    return variantSuite(async (canvas) => (await Detect.detectCorners(canvas, { engine, ...detectOptions })).corners, undefined, labels);
   };
 
   /** The live outline's quad under the same variants, at the preview's own size. */
