@@ -595,12 +595,10 @@
   }
 
   /** The strip: every tab, the one on screen marked, and "+" for the next.
-   *  Without a store there are no tabs to switch between, so no strip. */
+   *  Without a store there are no tabs to switch between, so it stays empty. */
   function renderTabs() {
     if (!Store || !Store.isAvailable) return;
-    const strip = $("tabStrip");
-    strip.hidden = false;
-    strip.replaceChildren(...[...tabs, "+"].map((label) => {
+    $("tabStrip").replaceChildren(...[...tabs, "+"].map((label) => {
       const button = document.createElement("button");
       button.className = label === tab ? "btn btn-tiny btn-primary" : "btn btn-tiny";
       button.textContent = label;

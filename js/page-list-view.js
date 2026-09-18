@@ -87,6 +87,7 @@
   function setListChromeVisible(visible) {
     isListShowing = visible;
     $("listToolbar").hidden = !visible;
+    $("tabStrip").hidden = !visible;
     updateScrollAnchors();
   }
 

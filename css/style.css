@@ -26,6 +26,7 @@ html, body {
 
 .app-header {
   display: flex;
+  flex-wrap: wrap; /* the tab strip takes a row of its own */
   align-items: center;
   gap: 12px;
   padding: max(12px, env(safe-area-inset-top)) 16px 12px;
@@ -144,8 +145,9 @@ html, body {
 .btn-danger-ghost { background: var(--surface-2); color: var(--danger); }
 
 .list-toolbar { display: flex; gap: 8px; margin-left: auto; }
-/* The tabs: one page set each, the one on screen in the primary colour. */
-.tab-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 8px; }
+/* The tabs: one page set each, the one on screen in the primary colour. In
+   the header, so they stay put under it while the list scrolls. */
+.tab-strip { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 
