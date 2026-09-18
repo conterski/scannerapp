@@ -6,7 +6,13 @@
  *                                                   once and never rewritten
  *   pages {id, corners, viewfinderCorners,        — lightweight edit state plus
  *          quarter, outputBlob}                     the rendered scan
- *   meta  {key:"order", ids:[...]}                — page order
+ *   meta  {key:"order" | "order:<tab>", ids}      — one page order per tab
+ *
+ * A tab is its order record: the pages it lists, in that order. Tab 1 keeps
+ * the key every session saved before tabs existed already has. A tab with no
+ * pages has no record — it exists only while it is on screen. Page ids are
+ * unique across tabs, so a page and its blob never need to say which tab
+ * they belong to.
  *
  * Every method returns a promise; callers fire-and-forget and swallow failures
  * so persistence can never break the app (private mode, quota, and so on).
@@ -45,50 +51,60 @@
     });
   }
 
-  /** Persists the current page order (call after add/remove/reorder). */
-  function saveOrder(pages) {
+  const orderKey = (tab) => (tab === 1 ? ORDER_KEY : `${ORDER_KEY}:${tab}`);
+  const tabOf = (key) => (key === ORDER_KEY ? 1 : Number(key.slice(ORDER_KEY.length + 1)));
+
+  /** Persists a tab's page order (call after add/remove/reorder). A tab left
+   *  with no pages loses its record: it is no tab until pages fill it again. */
+  function saveOrder(pages, tab) {
     return runTransaction([META_STORE], "readwrite", (transaction) => {
-      transaction.objectStore(META_STORE).put({
-        key: ORDER_KEY, ids: pages.map((page) => page.id),
-      });
+      const meta = transaction.objectStore(META_STORE);
+      if (pages.length) meta.put({ key: orderKey(tab), ids: pages.map((page) => page.id) });
+      else meta.delete(orderKey(tab));
     });
   }
 
-  function removePage(id) {
+  function removePages(ids) {
     return runTransaction([BLOB_STORE, PAGE_STORE], "readwrite", (transaction) => {
-      transaction.objectStore(BLOB_STORE).delete(id);
-      transaction.objectStore(PAGE_STORE).delete(id);
-    });
-  }
-
-  function clear() {
-    return runTransaction(ALL_STORES, "readwrite", (transaction) => {
-      for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
+      for (const id of ids) {
+        transaction.objectStore(BLOB_STORE).delete(id);
+        transaction.objectStore(PAGE_STORE).delete(id);
+      }
     });
   }
 
   /**
-   * Loads the saved session in page order. A record is skipped unless BOTH its
-   * blob and its metadata are present, which makes partial or racing writes
-   * self-healing rather than corrupting.
-   * @returns Promise<Array<{id, blob, corners, viewfinderCorners, quarter, outputBlob}>>
+   * Loads one tab's pages in order, with the tabs there are and the highest
+   * page id in use anywhere. A record is skipped unless BOTH its blob and its
+   * metadata are present, which makes partial or racing writes self-healing
+   * rather than corrupting. A tab with no record loads empty — that is how a
+   * new tab starts. Pages listed by no tab are restored only while no tab
+   * has a record at all: a session from before the order record existed.
+   * @returns Promise<{ pages: [{id, blob, corners, viewfinderCorners, quarter,
+   *          outputBlob}], tabs: [1, …] ascending, maxId }>
    */
-  function loadAll() {
+  function loadAll(tab) {
     return runTransaction(ALL_STORES, "readonly", async (transaction) => {
-      const [pageRecords, blobRecords, orderRecord] = await Promise.all([
+      const [pageRecords, blobRecords, metaRecords] = await Promise.all([
         requestToPromise(transaction.objectStore(PAGE_STORE).getAll()),
         requestToPromise(transaction.objectStore(BLOB_STORE).getAll()),
-        requestToPromise(transaction.objectStore(META_STORE).get(ORDER_KEY)),
+        requestToPromise(transaction.objectStore(META_STORE).getAll()),
       ]);
-      return joinRecordsInOrder(pageRecords, blobRecords, orderRecord);
+      const orders = metaRecords.filter((record) => record.key.startsWith(ORDER_KEY));
+      const order = orders.find((record) => record.key === orderKey(tab));
+      const ids = order ? order.ids : orders.length ? [] : pageRecords.map((record) => record.id);
+      return {
+        pages: joinRecordsInOrder(pageRecords, blobRecords, ids),
+        tabs: [...new Set([1, tab, ...orders.map((record) => tabOf(record.key))])].sort((a, b) => a - b),
+        // Over every tab's listing too: a page whose write failed is still listed, and its id is still taken.
+        maxId: Math.max(0, ...pageRecords.map((record) => record.id), ...orders.flatMap((record) => record.ids)),
+      };
     });
   }
 
-  function joinRecordsInOrder(pageRecords, blobRecords, orderRecord) {
+  function joinRecordsInOrder(pageRecords, blobRecords, orderedIds) {
     const pageById = new Map(pageRecords.map((record) => [record.id, record]));
     const blobById = new Map(blobRecords.map((record) => [record.id, record.blob]));
-    const orderedIds = (orderRecord && orderRecord.ids) ||
-      pageRecords.map((record) => record.id);
 
     const restored = [];
     for (const id of orderedIds) {
@@ -180,6 +196,6 @@
 
   window.Store = {
     isAvailable: detectIndexedDBSupport(),
-    addPage, savePage, saveOrder, removePage, clear, loadAll,
+    addPage, savePage, saveOrder, removePages, loadAll,
   };
 })();

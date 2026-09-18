@@ -17,6 +17,10 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   twice the size of the setting off; turn it off to keep files smaller. It
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
+- **Tabs** — small numbered tabs above the pages, each its own set of scans
+  with its own export; **+** opens the next. Keep batches of receipts apart
+  without exporting and clearing in between. An emptied tab disappears when
+  you leave it; the tab you were on is remembered.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters between photo and scan** — scanning applies geometric

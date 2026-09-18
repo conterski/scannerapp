@@ -144,6 +144,8 @@ html, body {
 .btn-danger-ghost { background: var(--surface-2); color: var(--danger); }
 
 .list-toolbar { display: flex; gap: 8px; margin-left: auto; }
+/* The tabs: one page set each, the one on screen in the primary colour. */
+.tab-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 8px; }
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 

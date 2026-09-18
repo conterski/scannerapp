@@ -27,6 +27,14 @@
   const pages = [];
   let nextPageId = 1;
 
+  // Tabs: independent page sets, each its own order record in the store (see
+  // store.js). `pages` holds the tab on screen; `tabs` every tab there is.
+  // The tab last shown is remembered across reloads.
+  const TAB_KEY = "scannerapp:tab";
+  let tab = 1;
+  let tabs = [1];
+  try { tab = Math.max(1, Number(localStorage.getItem(TAB_KEY)) || 1); } catch (error) { /* private mode: tab 1 */ }
+
   // Decoded originals for the editing session, and which renders are current
   // or still in flight. Both are bookkeeping the pipeline reads constantly and
   // neither is anyone else's business, so they are created here and passed
@@ -526,7 +534,7 @@
     if (!confirm(`Delete page ${index + 1}?`)) return;
     pages.splice(index, 1);
     forgetPage(page);
-    persist(Store.removePage(page.id));
+    persist(Store.removePages([page.id]));
     persistPageOrder();
     renderPageList();
   }
@@ -550,20 +558,56 @@
     for (let index = pages.length - 1; index >= 0; index--) {
       if (!selectedIds.has(pages[index].id)) continue;
       forgetPage(pages[index]);
-      persist(Store.removePage(pages[index].id));
       pages.splice(index, 1);
     }
+    persist(Store.removePages([...selectedIds]));
     persistPageOrder();
     PageListView.exitSelectMode();
   }
 
   function clearAllPages() {
     if (!pages.length) return;
-    if (!confirm(`Delete all ${pages.length} pages? This can't be undone.`)) return;
-    pages.forEach(forgetPage);
-    pages.length = 0;
-    persist(Store.clear());
+    if (!confirm(`Delete all ${pages.length} pages on this tab? This can't be undone.`)) return;
+    persist(Store.removePages(pages.map((page) => page.id)));
+    pages.splice(0).forEach(forgetPage);
+    persistPageOrder(); // an emptied tab loses its record
     PageListView.exitSelectMode();
+  }
+
+  /** Shows another tab: the one on screen is let go — its pages persist as
+   *  they are — and the other's pages are restored in its place. Queued with
+   *  the whole-document work so a switch never lands mid-batch or mid-pass,
+   *  and two quick taps run in turn; and it waits for the renders in flight,
+   *  since an edit is persisted when its render lands and only while its
+   *  page is still on screen. */
+  function switchTab(next) {
+    libraryJobs.run(async () => {
+      if (next === tab) return;
+      await renders.whenSettled();
+      pages.splice(0).forEach(forgetPage);
+      sources.clear();
+      tab = next;
+      try { localStorage.setItem(TAB_KEY, String(tab)); } catch (error) { /* remembered for this visit only */ }
+      PageListView.exitSelectMode(); // paints the empty list at once: no stale card to tap
+      await restoreSavedSession();
+      renderPageList();
+    }).catch((error) => console.error("Switching tabs failed:", error));
+  }
+
+  /** The strip: every tab, the one on screen marked, and "+" for the next.
+   *  Without a store there are no tabs to switch between, so no strip. */
+  function renderTabs() {
+    if (!Store || !Store.isAvailable) return;
+    const strip = $("tabStrip");
+    strip.hidden = false;
+    strip.replaceChildren(...[...tabs, "+"].map((label) => {
+      const button = document.createElement("button");
+      button.className = label === tab ? "btn btn-tiny btn-primary" : "btn btn-tiny";
+      button.textContent = label;
+      if (label === tab) button.setAttribute("aria-current", "page");
+      button.onclick = () => switchTab(label === "+" ? Math.max(...tabs) + 1 : label);
+      return button;
+    }));
   }
 
   function discardPage(page) {
@@ -585,7 +629,10 @@
     renders.forget(page.id);
   }
 
-  function renderPageList() { PageListView.render(pages); }
+  function renderPageList() {
+    PageListView.render(pages);
+    renderTabs();
+  }
 
   // ---------------------------------------------------------------
   // Compact scans (storage saver)
@@ -603,7 +650,7 @@
   function confirmLossyCompression() {
     if (!pages.length) return true;
     return confirm(
-      `Compress ${AppChrome.plural(pages.length, "saved scan")} to save space?` +
+      `Compress ${AppChrome.plural(pages.length, "saved scan")} on this tab to save space?` +
       `\n\nThis lowers their resolution and can't be undone.`);
   }
 
@@ -656,8 +703,9 @@
       ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
   }
 
-  /** Turning it on or off re-renders every page, so one PDF never mixes an
-   *  enhanced page with an untouched one. */
+  /** Turning it on or off re-renders every page of the tab on screen, so
+   *  its PDF never mixes an enhanced page with an untouched one; another
+   *  tab keeps the scans it has until the setting is toggled on it. */
   async function setNaturalFlashEnabled(enabled) {
     if (enabled === ScanEnhance.isEnabled()) return;
     ScanEnhance.setEnabled(enabled);
@@ -777,21 +825,24 @@
     operation.catch((error) => console.warn("Persist failed:", error));
   }
 
-  function persistPageOrder() { persist(Store.saveOrder(pages)); }
+  function persistPageOrder() { persist(Store.saveOrder(pages, tab)); }
 
+  /** The tab on screen, from the store: its pages, the tabs there are, and
+   *  the next free page id — free across every tab, since ids are unique. */
   async function restoreSavedSession() {
     if (!Store || !Store.isAvailable) return;
-    let records = [];
+    let loaded;
     try {
-      records = await Store.loadAll();
+      loaded = await Store.loadAll(tab);
     } catch (error) {
       console.warn("Session restore failed:", error);
       return;
     }
-    for (const record of records) {
+    for (const record of loaded.pages) {
       if (record.corners) pages.push(pageFromRecord(record));
     }
-    if (pages.length) nextPageId = Math.max(...pages.map((page) => page.id)) + 1;
+    tabs = loaded.tabs;
+    nextPageId = Math.max(nextPageId, loaded.maxId + 1);
     rerenderPagesMissingOutput();
   }
 
@@ -849,7 +900,7 @@
 
   // Exposed for debugging/testing.
   window.Scanner = {
-    pages, addFiles, addPhotos, startCapture, movePage,
+    pages, addFiles, addPhotos, startCapture, movePage, switchTab,
     renderList: renderPageList, clearAll: clearAllPages,
   };
 })();
