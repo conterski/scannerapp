@@ -64,6 +64,13 @@
     });
   }
 
+  /** Every tab, every page: the whole session. */
+  function clear() {
+    return runTransaction(ALL_STORES, "readwrite", (transaction) => {
+      for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
+    });
+  }
+
   function removePages(ids) {
     return runTransaction([BLOB_STORE, PAGE_STORE], "readwrite", (transaction) => {
       for (const id of ids) {
@@ -196,6 +203,6 @@
 
   window.Store = {
     isAvailable: detectIndexedDBSupport(),
-    addPage, savePage, saveOrder, removePages, loadAll,
+    addPage, savePage, saveOrder, removePages, clear, loadAll,
   };
 })();

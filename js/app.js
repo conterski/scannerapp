@@ -86,6 +86,7 @@
       onInsertAfterPage: insertAfterPage,
       onDeleteSelected: deleteSelectedPages,
       onClearAll: clearAllPages,
+      onClearAllTabs: clearAllTabs,
       onSelectModeChanged: renderPageList,
     });
     wirePhotoInputs();
@@ -574,6 +575,21 @@
     PageListView.exitSelectMode();
   }
 
+  function clearAllTabs() {
+    if (!confirm(`Delete every page on all ${tabs.length} tabs? This can't be undone.`)) return;
+    persist(Store.clear());
+    pages.splice(0).forEach(forgetPage);
+    sources.clear();
+    showTab(1);
+    tabs = [1];
+    PageListView.exitSelectMode();
+  }
+
+  function showTab(next) {
+    tab = next;
+    try { localStorage.setItem(TAB_KEY, String(tab)); } catch (error) { /* remembered for this visit only */ }
+  }
+
   /** Shows another tab: the one on screen is let go — its pages persist as
    *  they are — and the other's pages are restored in its place. Queued with
    *  the whole-document work so a switch never lands mid-batch or mid-pass,
@@ -586,8 +602,7 @@
       await renders.whenSettled();
       pages.splice(0).forEach(forgetPage);
       sources.clear();
-      tab = next;
-      try { localStorage.setItem(TAB_KEY, String(tab)); } catch (error) { /* remembered for this visit only */ }
+      showTab(next);
       PageListView.exitSelectMode(); // paints the empty list at once: no stale card to tap
       await restoreSavedSession();
       renderPageList();
@@ -598,6 +613,7 @@
    *  Without a store there are no tabs to switch between, so it stays empty. */
   function renderTabs() {
     if (!Store || !Store.isAvailable) return;
+    $("clearAllTabsBtn").hidden = tabs.length < 2; // one tab: "Clear tab" already says it all
     $("tabStrip").replaceChildren(...[...tabs, "+"].map((label) => {
       const button = document.createElement("button");
       button.className = label === tab ? "btn btn-tiny btn-primary" : "btn btn-tiny";

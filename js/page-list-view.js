@@ -32,13 +32,14 @@
   // ---------------------------------------------------------------
 
   /** @param listHandlers { onEditPage, onDeletePage, onMovePage, onInsertAfterPage,
-   *                        onDeleteSelected, onClearAll, onSelectModeChanged } */
+   *                        onDeleteSelected, onClearAll, onClearAllTabs, onSelectModeChanged } */
   function init(listHandlers) {
     handlers = listHandlers;
     $("selectBtn").addEventListener("click", enterSelectMode);
     $("cancelSelectBtn").addEventListener("click", exitSelectMode);
     $("deleteSelectedBtn").addEventListener("click", () => handlers.onDeleteSelected());
     $("clearAllBtn").addEventListener("click", () => handlers.onClearAll());
+    $("clearAllTabsBtn").addEventListener("click", () => handlers.onClearAllTabs());
     $("scrollTopBtn").addEventListener("click", PageScroll.jumpToTop);
     $("scrollBottomBtn").addEventListener("click", PageScroll.jumpToBottom);
     // Rotating the phone changes what fits, and so whether the jumps are worth
