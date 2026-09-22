@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="css/style.css?v=1dd1fcf411">
+<link rel="stylesheet" href="css/style.css?v=66905683bc">
 </head>
 <body>
 
@@ -32,12 +32,12 @@
     <p class="hint">Add photos or use the camera to get started. Each page is auto-cropped, and colours are left untouched.</p>
   </div>
 
-  <!-- The message the export buttons share ahead of the scans (see
+  <!-- The message the export buttons share after the scans (see
        share-note.js). Static DOM: re-rendering the grid never touches the
        text or its focus. -->
   <section id="shareNote" class="share-note" hidden>
-    <textarea id="noteInput" class="note-input" rows="2" placeholder="Message &mdash; sent before the scans"></textarea>
-    <p id="noteProgress" class="note-progress" hidden></p>
+    <textarea id="noteInput" class="note-input" rows="2" placeholder="Message &mdash; sent after the scans"></textarea>
+    <p id="noteProgress" class="note-progress" hidden>Scans sent &mdash; tap Image or PDF again to send the message.</p>
   </section>
 
   <div id="pageGrid" class="page-grid"></div>
@@ -61,8 +61,8 @@
   <label class="compact-toggle">
     <input type="checkbox" id="messageCheck">
     <span class="compact-text">
-      <span class="compact-title">Message before the scans</span>
-      <span class="compact-sub">Image and PDF share the text box first, then the scans on a second tap</span>
+      <span class="compact-title">Message after the scans</span>
+      <span class="compact-sub">Image and PDF share the scans first, then the text box on a second tap</span>
     </span>
   </label>
 
@@ -181,30 +181,30 @@
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>
-<script src="js/promise-utils.js?v=1dd1fcf411"></script>
-<script src="js/image-utils.js?v=1dd1fcf411"></script>
-<script src="js/page-scroll.js?v=1dd1fcf411"></script>
-<script src="js/choice-prompt.js?v=1dd1fcf411"></script>
-<script src="js/pointer-drag.js?v=1dd1fcf411"></script>
-<script src="js/persisted-flag.js?v=1dd1fcf411"></script>
-<script src="js/capture-quality.js?v=1dd1fcf411"></script>
-<script src="js/scan-quality.js?v=1dd1fcf411"></script>
-<script src="js/detect.js?v=1dd1fcf411"></script>
-<script src="js/scan-render.js?v=1dd1fcf411"></script>
-<script src="js/frame-sharpness.js?v=1dd1fcf411"></script>
-<script src="js/camera.js?v=1dd1fcf411"></script>
-<script src="js/photo-store.js?v=1dd1fcf411"></script>
-<script src="js/capture-outline.js?v=1dd1fcf411"></script>
-<script src="js/capture-ui.js?v=1dd1fcf411"></script>
-<script src="js/editor.js?v=1dd1fcf411"></script>
-<script src="js/share-note.js?v=1dd1fcf411"></script>
-<script src="js/page-list-view.js?v=1dd1fcf411"></script>
-<script src="js/export.js?v=1dd1fcf411"></script>
-<script src="js/store.js?v=1dd1fcf411"></script>
-<script src="js/job-queue.js?v=1dd1fcf411"></script>
-<script src="js/app-chrome.js?v=1dd1fcf411"></script>
-<script src="js/source-cache.js?v=1dd1fcf411"></script>
-<script src="js/render-tracker.js?v=1dd1fcf411"></script>
-<script src="js/app.js?v=1dd1fcf411"></script>
+<script src="js/promise-utils.js?v=66905683bc"></script>
+<script src="js/image-utils.js?v=66905683bc"></script>
+<script src="js/page-scroll.js?v=66905683bc"></script>
+<script src="js/choice-prompt.js?v=66905683bc"></script>
+<script src="js/pointer-drag.js?v=66905683bc"></script>
+<script src="js/persisted-flag.js?v=66905683bc"></script>
+<script src="js/capture-quality.js?v=66905683bc"></script>
+<script src="js/scan-quality.js?v=66905683bc"></script>
+<script src="js/detect.js?v=66905683bc"></script>
+<script src="js/scan-render.js?v=66905683bc"></script>
+<script src="js/frame-sharpness.js?v=66905683bc"></script>
+<script src="js/camera.js?v=66905683bc"></script>
+<script src="js/photo-store.js?v=66905683bc"></script>
+<script src="js/capture-outline.js?v=66905683bc"></script>
+<script src="js/capture-ui.js?v=66905683bc"></script>
+<script src="js/editor.js?v=66905683bc"></script>
+<script src="js/share-note.js?v=66905683bc"></script>
+<script src="js/page-list-view.js?v=66905683bc"></script>
+<script src="js/export.js?v=66905683bc"></script>
+<script src="js/store.js?v=66905683bc"></script>
+<script src="js/job-queue.js?v=66905683bc"></script>
+<script src="js/app-chrome.js?v=66905683bc"></script>
+<script src="js/source-cache.js?v=66905683bc"></script>
+<script src="js/render-tracker.js?v=66905683bc"></script>
+<script src="js/app.js?v=66905683bc"></script>
 </body>
 </html>

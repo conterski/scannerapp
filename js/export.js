@@ -62,10 +62,6 @@
     return { method: await tryShare({ text }) };
   }
 
-  function canShareText() {
-    return Boolean(navigator.canShare && navigator.canShare({ text: "x" }));
-  }
-
   /** @returns "share" when the user completed the sheet, "cancelled" when they
    *  dismissed it, "unavailable" when sharing this data isn't possible here. */
   async function tryShare(data) {
@@ -165,5 +161,5 @@
       `-${padTwo(now.getHours())}${padTwo(now.getMinutes())}`;
   }
 
-  window.Exporter = { exportPdf, exportPhotos, shareText, canShareText };
+  window.Exporter = { exportPdf, exportPhotos, shareText };
 })();

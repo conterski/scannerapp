@@ -3,7 +3,7 @@
  * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
  * warp in ScanRenderer, persistence in Store, the busy overlay and status line
  * in AppChrome, decoded originals in SourceCache, render bookkeeping in
- * RenderTracker, the message box above the grid in ShareNote.
+ * RenderTracker, the message box sent after the scans in ShareNote.
  */
 (function () {
   "use strict";
@@ -772,15 +772,14 @@
       `cancelled.\n\nRemove ${count === 1 ? "it" : "them"} from the list and try again.`;
   }
 
-  /** Shares the message box first, the scans on the next tap: a tap
-   *  exports only once the message has gone. One share per tap is the
-   *  platform's rule, not a choice — a share sheet needs its own user
-   *  gesture, and text sent along with files is dropped or captioned by the
-   *  receiving app rather than sent ahead of them.
+  /** Shares the scans first, the message box on the next tap. One share per
+   *  tap is the platform's rule, not a choice — a share sheet needs its own
+   *  user gesture, and text sent along with files is dropped or captioned by
+   *  the receiving app rather than sent as a message of its own.
    *  @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
-    const message = ShareNote.nextUnsent();
-    if (message !== null && Exporter.canShareText()) {
+    const message = ShareNote.pendingMessage();
+    if (message !== null) {
       await shareMessage(message);
       return;
     }
@@ -799,8 +798,9 @@
       if (result.method === "download" && options.onDownloadFallback) {
         options.onDownloadFallback();
       }
-      // The run is complete: the next export starts again from message 1.
-      if (result.method !== "cancelled") ShareNote.resetProgress();
+      // Only a share can be followed by the message: where files download,
+      // text has nowhere to go either.
+      if (result.method === "share") ShareNote.markScansSent();
     } catch (error) {
       alert(options.failurePrefix + error.message);
     } finally {
@@ -809,11 +809,14 @@
   }
 
   /** No busy overlay: there is nothing to prepare, and a dismissed sheet
-   *  simply leaves the same message for the next tap. */
+   *  simply leaves the message for the next tap. A share that can't happen
+   *  at all ends the run too — holding the message would only block the
+   *  next export. */
   async function shareMessage(text) {
     const { method } = await Exporter.shareText(text);
-    if (method === "share") ShareNote.markSent();
-    else if (method === "unavailable") AppChrome.showTemporaryStatus("Couldn't share the message.");
+    if (method === "cancelled") return;
+    if (method === "unavailable") AppChrome.showTemporaryStatus("Couldn't share the message.");
+    ShareNote.resetProgress();
   }
 
   // ---------------------------------------------------------------

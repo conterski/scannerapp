@@ -38,14 +38,14 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 - Export:
   - **Download PDF** — all pages in order, one PDF
   - **Save to Photos** — on iPhone this opens the share sheet with the images in page order; tap **Save Images** to put them in the Photos app
-  - **A message ahead of the scans** — a text box above the pages, starting
+  - **A message after the scans** — a text box above the pages, starting
     as a payment request dated today. While it has text, **Image** or
-    **PDF** takes two taps: the first shares the message — pick the WhatsApp
-    chat, send, come back — and the second sends the scans, so they land
-    under it. One share per tap is the platform's rule: a share sheet needs
-    its own gesture, and text sent together with files is dropped or
+    **PDF** takes two taps: the first shares the scans — pick the WhatsApp
+    chat, send, come back — and the second sends the message, so it lands
+    under them. One share per tap is the platform's rule: a share sheet
+    needs its own gesture, and text sent together with files is dropped or
     captioned by the receiving app. Each tab keeps its own text; an emptied
-    tab starts fresh. The **Message before the scans** setting hides the box
+    tab starts fresh. The **Message after the scans** setting hides the box
     and makes the export a single tap again.
 
 **Tech**
