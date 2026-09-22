@@ -17,8 +17,8 @@
  * anti-cut passes), grid-evidence (the printed grid as proof of where a
  * sheet on a pad ends) — the legacy pipeline — then frame, quad-score,
  * line-candidates, side-refit and quad-search, which tighten its crop by a
- * score (engine "refined", the default); guided-filter and enhance grade
- * the scan. This file owns the pipeline that runs them in order.
+ * score (engine "refined", the default). This file owns the pipeline that
+ * runs them in order.
  */
 "use strict";
 
@@ -40,8 +40,6 @@ importScripts(...[
   "worker/side-refit.js",
   "worker/side-verify.js",
   "worker/quad-search.js",
-  "worker/guided-filter.js",
-  "worker/enhance.js",
 ].map((path) => path + ASSET_VERSION));
 
 // Morphology: an aggressive OPEN severs thin bright bridges between the paper
@@ -750,7 +748,7 @@ function previewQuad({ width, height, buffer }) {
 // warp
 // ------------------------------------------------------------------
 
-function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
+function warp({ width, height, buffer, corners, dstW, dstH }) {
   const { tl, tr, br, bl } = corners;
   let src = null, srcTri = null, dstTri = null, transform = null, dst = null;
   try {
@@ -764,15 +762,7 @@ function warp({ width, height, buffer, corners, dstW, dstH, enhance }) {
     // Bilinear resampling only — the geometry never filters pixel values.
     cv.warpPerspective(src, dst, transform, new cv.Size(dstW, dstH),
       cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-    // The optional natural-flash lift runs here, on the cropped scan, so its
-    // tiles only ever contain document rather than desk.
-    if (!enhance) return new Uint8ClampedArray(dst.data).buffer;
-    const enhanced = enhanceScan(dst);
-    try {
-      return new Uint8ClampedArray(enhanced.data).buffer;
-    } finally {
-      enhanced.delete();
-    }
+    return new Uint8ClampedArray(dst.data).buffer;
   } finally {
     releaseMats(src, srcTri, dstTri, transform, dst);
   }

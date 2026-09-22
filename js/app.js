@@ -3,7 +3,7 @@
  * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
  * warp in ScanRenderer, persistence in Store, the busy overlay and status line
  * in AppChrome, decoded originals in SourceCache, render bookkeeping in
- * RenderTracker, the message boxes above the grid in ShareNotes.
+ * RenderTracker, the message box above the grid in ShareNote.
  */
 (function () {
   "use strict";
@@ -75,10 +75,8 @@
     ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
-    ScanEnhance.loadPersistedSetting();
     $("highDetailCheck").checked = CaptureQuality.isEnabled();
     $("compactCheck").checked = ScanQuality.isEnabled();
-    $("enhanceCheck").checked = ScanEnhance.isEnabled();
     PageListView.init({
       onEditPage: editPage,
       onDeletePage: deletePage,
@@ -92,9 +90,9 @@
     wirePhotoInputs();
     wireOutputToggles();
     wireExportControls();
-    // The boxes are part of the tab's record, so an edit saves the tab — once
+    // The box is part of the tab's record, so an edit saves the tab — once
     // there is one: with no pages there is no record to hold the text.
-    ShareNotes.init({ onChange: () => { if (pages.length) persistTab(); } });
+    ShareNote.init({ onChange: () => { if (pages.length) persistTab(); } });
     await restoreSavedSession(); // repopulate pages before the first paint
     renderPageList();
   }
@@ -151,10 +149,6 @@
     $("compactCheck").addEventListener("change", async (event) => {
       await setCompactEnabled(event.target.checked);
       event.target.checked = ScanQuality.isEnabled(); // reverts if cancelled
-    });
-    $("enhanceCheck").addEventListener("change", async (event) => {
-      await setNaturalFlashEnabled(event.target.checked);
-      event.target.checked = ScanEnhance.isEnabled();
     });
   }
 
@@ -583,7 +577,7 @@
     persist(Store.clear());
     pages.splice(0).forEach(forgetPage);
     sources.clear();
-    ShareNotes.set(null);
+    ShareNote.set(null);
     showTab(1);
     tabs = [1];
     PageListView.exitSelectMode();
@@ -721,36 +715,6 @@
       ImageUtils.decodeImageToCanvas(page.blob, DECODE_MAX_EDGE));
   }
 
-  /** Turning it on or off re-renders every page of the tab on screen, so
-   *  its PDF never mixes an enhanced page with an untouched one; another
-   *  tab keeps the scans it has until the setting is toggled on it. */
-  async function setNaturalFlashEnabled(enabled) {
-    if (enabled === ScanEnhance.isEnabled()) return;
-    ScanEnhance.setEnabled(enabled);
-    if (pages.length) await rerenderAllScans();
-  }
-
-  function rerenderAllScans() {
-    return libraryJobs.run(rerenderEveryScan);
-  }
-
-  async function rerenderEveryScan() {
-    const busy = AppChrome.beginBusy("Updating scans…");
-    try {
-      await Detect.ensureOpenCV();
-      await forEachPageWithSource(busy, "Updating scans", async (page, source) => {
-        await regenerateOutput(page, source);
-        persist(Store.savePage(page));
-      });
-    } catch (error) {
-      console.error("Re-rendering failed:", error);
-      alert("Couldn't update the scans: " + error.message);
-    } finally {
-      busy.end();
-      renderPageList();
-    }
-  }
-
   async function recompressPage(page, source) {
     page.blob = await ImageUtils.encodeCanvasToJpeg(source, ScanQuality.COMPACT_ORIGINAL_QUALITY);
     await regenerateOutput(page, source);
@@ -771,7 +735,6 @@
     const profile = ScanQuality.currentProfile();
     const scan = await ScanRenderer.renderScan(source, page.corners, {
       quarterTurns: page.quarterTurns, maxDim: profile.maxDim,
-      enhance: ScanEnhance.isEnabled(),
     });
     let blob;
     try {
@@ -791,7 +754,7 @@
    *  nothing actually changed (e.g. paging through scans to review them). */
   function renderSig(page) {
     const { tl, tr, br, bl } = page.corners;
-    return JSON.stringify([tl, tr, br, bl, page.quarterTurns, ScanEnhance.isEnabled()]);
+    return JSON.stringify([tl, tr, br, bl, page.quarterTurns]);
   }
 
   // ---------------------------------------------------------------
@@ -809,14 +772,14 @@
       `cancelled.\n\nRemove ${count === 1 ? "it" : "them"} from the list and try again.`;
   }
 
-  /** Shares the message boxes first, the scans on the next tap: a tap
+  /** Shares the message box first, the scans on the next tap: a tap
    *  exports only once the message has gone. One share per tap is the
    *  platform's rule, not a choice — a share sheet needs its own user
    *  gesture, and text sent along with files is dropped or captioned by the
    *  receiving app rather than sent ahead of them.
    *  @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
-    const message = ShareNotes.nextUnsent();
+    const message = ShareNote.nextUnsent();
     if (message !== null && Exporter.canShareText()) {
       await shareMessage(message);
       return;
@@ -837,7 +800,7 @@
         options.onDownloadFallback();
       }
       // The run is complete: the next export starts again from message 1.
-      if (result.method !== "cancelled") ShareNotes.resetProgress();
+      if (result.method !== "cancelled") ShareNote.resetProgress();
     } catch (error) {
       alert(options.failurePrefix + error.message);
     } finally {
@@ -849,7 +812,7 @@
    *  simply leaves the same message for the next tap. */
   async function shareMessage(text) {
     const { method } = await Exporter.shareText(text);
-    if (method === "share") ShareNotes.markSent();
+    if (method === "share") ShareNote.markSent();
     else if (method === "unavailable") AppChrome.showTemporaryStatus("Couldn't share the message.");
   }
 
@@ -863,12 +826,12 @@
     operation.catch((error) => console.warn("Persist failed:", error));
   }
 
-  /** The tab's record: its page order and its message boxes. An emptied tab
-   *  loses the record, so its boxes go back to the defaults with it — the
+  /** The tab's record: its page order and its message box. An emptied tab
+   *  loses the record, so its box goes back to the default with it — the
    *  next batch starts with a fresh template rather than the last one's. */
   function persistTab() {
-    if (!pages.length) ShareNotes.set(null);
-    persist(Store.saveOrder(pages, tab, ShareNotes.get()));
+    if (!pages.length) ShareNote.set(null);
+    persist(Store.saveOrder(pages, tab, ShareNote.get()));
   }
 
   /** The tab on screen, from the store: its pages, the tabs there are, and
@@ -886,7 +849,7 @@
       if (record.corners) pages.push(pageFromRecord(record));
     }
     tabs = loaded.tabs;
-    ShareNotes.set(loaded.notes);
+    ShareNote.set(loaded.note);
     nextPageId = Math.max(nextPageId, loaded.maxId + 1);
     rerenderPagesMissingOutput();
   }

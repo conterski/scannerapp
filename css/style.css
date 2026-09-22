@@ -151,8 +151,8 @@ html, body {
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 
-/* ---------- Message boxes: shared ahead of the scans ---------- */
-.share-notes { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+/* ---------- Message box: shared ahead of the scans ---------- */
+.share-note { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .note-input {
   width: 100%;
   font: inherit;
@@ -164,7 +164,7 @@ html, body {
   border: 1px solid var(--surface-2);
   border-radius: var(--radius);
   resize: none;
-  overflow: hidden;           /* the box grows to its text instead (share-notes.js) */
+  overflow: hidden;           /* the box grows to its text instead (share-note.js) */
 }
 .note-input:focus { outline: none; border-color: var(--accent); }
 .note-input::placeholder { color: var(--text-dim); }

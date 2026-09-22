@@ -35,16 +35,15 @@
 
   /**
    * Source canvas plus the page's edits → the final scan canvas.
-   * @param options { quarterTurns, maxDim, enhance } — maxDim caps the
-   *                output's longest side (Compact mode), omit it for full
-   *                size; enhance applies the natural-flash lift
+   * @param options { quarterTurns, maxDim } — maxDim caps the output's
+   *                longest side (Compact mode), omit it for full size
    */
   function renderScan(sourceCanvas, corners, options) {
     const settings = options || {};
     return Detect.warpPerspective(
       sourceCanvas,
       rotateCornerLabels(corners, settings.quarterTurns || 0),
-      { maxDim: settings.maxDim, enhance: settings.enhance });
+      { maxDim: settings.maxDim });
   }
 
   window.ScanRenderer = { renderScan, normalizeQuarterTurns };

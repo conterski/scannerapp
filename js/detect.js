@@ -367,13 +367,12 @@
    * Perspective-warps `sourceCanvas` using corners {tl,tr,br,bl} (source px)
    * into a new canvas holding the deskewed document. A geometric transform
    * only — pixel values are untouched apart from bilinear resampling.
-   * @param options { maxDim, enhance } — `maxDim` caps the output's longest
-   *                side (OpenCV downsamples straight into the smaller target,
-   *                which is what Compact mode uses); `enhance` applies the
-   *                natural-flash lift to the cropped scan.
+   * @param options { maxDim } — caps the output's longest side (OpenCV
+   *                downsamples straight into the smaller target, which is
+   *                what Compact mode uses).
    */
   async function warpPerspective(sourceCanvas, corners, options) {
-    const { maxDim, enhance } = options || {};
+    const { maxDim } = options || {};
     await renderer.ensureReady();
     const { width: dstW, height: dstH } = outputSizeFor(corners, maxDim);
     const imageData = imageDataOf(sourceCanvas);
@@ -382,7 +381,7 @@
       height: imageData.height,
       buffer: imageData.data.buffer,
       corners: pickCorners(corners),
-      dstW, dstH, enhance: !!enhance,
+      dstW, dstH,
     }, [imageData.data.buffer]);
 
     return canvasFromBuffer(response.buffer, dstW, dstH);

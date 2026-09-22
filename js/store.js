@@ -7,11 +7,11 @@
  *   pages {id, corners, viewfinderCorners,        — lightweight edit state plus
  *          quarter, outputBlob}                     the rendered scan
  *   meta  {key:"order" | "order:<tab>", ids,      — one record per tab: its
- *          notes}                                    page order and its two
- *                                                    message boxes
+ *          note}                                     page order and the
+ *                                                    message box above it
  *
  * A tab is its order record: the pages it lists, in that order, and the
- * messages typed above them. Tab 1 keeps the key every session saved before
+ * message typed above them. Tab 1 keeps the key every session saved before
  * tabs existed already has. A tab with no pages has no record — it exists
  * only while it is on screen. Page ids are unique across tabs, so a page and
  * its blob never need to say which tab they belong to.
@@ -56,14 +56,14 @@
   const orderKey = (tab) => (tab === 1 ? ORDER_KEY : `${ORDER_KEY}:${tab}`);
   const tabOf = (key) => (key === ORDER_KEY ? 1 : Number(key.slice(ORDER_KEY.length + 1)));
 
-  /** Persists a tab: its page order and its message boxes (call after
-   *  add/remove/reorder and on every edit of the boxes). A tab left with no
-   *  pages loses its record, notes included: it is no tab until pages fill
+  /** Persists a tab: its page order and its message box (call after
+   *  add/remove/reorder and on every edit of the box). A tab left with no
+   *  pages loses its record, note included: it is no tab until pages fill
    *  it again. */
-  function saveOrder(pages, tab, notes) {
+  function saveOrder(pages, tab, note) {
     return runTransaction([META_STORE], "readwrite", (transaction) => {
       const meta = transaction.objectStore(META_STORE);
-      if (pages.length) meta.put({ key: orderKey(tab), ids: pages.map((page) => page.id), notes });
+      if (pages.length) meta.put({ key: orderKey(tab), ids: pages.map((page) => page.id), note });
       else meta.delete(orderKey(tab));
     });
   }
@@ -92,8 +92,8 @@
    * new tab starts. Pages listed by no tab are restored only while no tab
    * has a record at all: a session from before the order record existed.
    * @returns Promise<{ pages: [{id, blob, corners, viewfinderCorners, quarter,
-   *          outputBlob}], tabs: [1, …] ascending, maxId, notes: [text, text]
-   *          or null when the tab has none saved }>
+   *          outputBlob}], tabs: [1, …] ascending, maxId, note: text or null
+   *          when the tab has none saved }>
    */
   function loadAll(tab) {
     return runTransaction(ALL_STORES, "readonly", async (transaction) => {
@@ -110,7 +110,7 @@
         tabs: [...new Set([1, tab, ...orders.map((record) => tabOf(record.key))])].sort((a, b) => a - b),
         // Over every tab's listing too: a page whose write failed is still listed, and its id is still taken.
         maxId: Math.max(0, ...pageRecords.map((record) => record.id), ...orders.flatMap((record) => record.ids)),
-        notes: (order && order.notes) || null, // absent in sessions saved before the boxes existed
+        note: (order && order.note) || null, // absent in sessions saved before the box existed
       };
     });
   }
