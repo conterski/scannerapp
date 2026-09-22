@@ -151,6 +151,25 @@ html, body {
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 
+/* ---------- Message boxes: shared ahead of the scans ---------- */
+.share-notes { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.note-input {
+  width: 100%;
+  font: inherit;
+  font-size: 16px;            /* under 16px iOS zooms the page on focus */
+  line-height: 1.35;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius);
+  resize: none;
+  overflow: hidden;           /* the box grows to its text instead (share-notes.js) */
+}
+.note-input:focus { outline: none; border-color: var(--accent); }
+.note-input::placeholder { color: var(--text-dim); }
+.note-progress { font-size: 12px; color: var(--accent); }
+
 /* ---------- Page grid ---------- */
 .page-grid {
   display: grid;

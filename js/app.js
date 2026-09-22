@@ -3,7 +3,7 @@
  * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
  * warp in ScanRenderer, persistence in Store, the busy overlay and status line
  * in AppChrome, decoded originals in SourceCache, render bookkeeping in
- * RenderTracker.
+ * RenderTracker, the message boxes above the grid in ShareNotes.
  */
 (function () {
   "use strict";
@@ -92,6 +92,9 @@
     wirePhotoInputs();
     wireOutputToggles();
     wireExportControls();
+    // The boxes are part of the tab's record, so an edit saves the tab — once
+    // there is one: with no pages there is no record to hold the text.
+    ShareNotes.init({ onChange: () => { if (pages.length) persistTab(); } });
     await restoreSavedSession(); // repopulate pages before the first paint
     renderPageList();
   }
@@ -241,7 +244,7 @@
       if (!(await loadScannerEngine())) return;
       const wasAppended = position === pages.length;
       const tally = await addPhotoBatch(items, position, busy);
-      persistPageOrder();
+      persistTab();
       if (!wasAppended) reportInsertPosition(position);
       // Last, so it replaces the placement note: an uncropped page is the more
       // useful thing to know about.
@@ -536,7 +539,7 @@
     pages.splice(index, 1);
     forgetPage(page);
     persist(Store.removePages([page.id]));
-    persistPageOrder();
+    persistTab();
     renderPageList();
   }
 
@@ -547,7 +550,7 @@
     if (to < 0 || to >= pages.length || from === to) return;
     const [page] = pages.splice(from, 1);
     pages.splice(to, 0, page);
-    persistPageOrder();
+    persistTab();
     renderPageList();
   }
 
@@ -562,7 +565,7 @@
       pages.splice(index, 1);
     }
     persist(Store.removePages([...selectedIds]));
-    persistPageOrder();
+    persistTab();
     PageListView.exitSelectMode();
   }
 
@@ -571,7 +574,7 @@
     if (!confirm(`Delete all ${pages.length} pages on this tab? This can't be undone.`)) return;
     persist(Store.removePages(pages.map((page) => page.id)));
     pages.splice(0).forEach(forgetPage);
-    persistPageOrder(); // an emptied tab loses its record
+    persistTab(); // an emptied tab loses its record
     PageListView.exitSelectMode();
   }
 
@@ -580,6 +583,7 @@
     persist(Store.clear());
     pages.splice(0).forEach(forgetPage);
     sources.clear();
+    ShareNotes.set(null);
     showTab(1);
     tabs = [1];
     PageListView.exitSelectMode();
@@ -677,7 +681,7 @@
     try {
       await Detect.ensureOpenCV();
       await forEachPageWithSource(busy, "Compressing", recompressPage);
-      persistPageOrder();
+      persistTab();
     } catch (error) {
       console.error("Compression failed:", error);
       alert("Couldn't compress scans: " + error.message);
@@ -805,8 +809,18 @@
       `cancelled.\n\nRemove ${count === 1 ? "it" : "them"} from the list and try again.`;
   }
 
-  /** @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
+  /** Steps through the message boxes before the scans: each tap shares the
+   *  next unsent message, and only once they've all gone does a tap export.
+   *  One share per tap is the platform's rule, not a choice — a share sheet
+   *  needs its own user gesture, and text sent along with files is dropped
+   *  or captioned by the receiving app rather than sent ahead of them.
+   *  @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
+    const message = ShareNotes.nextUnsent();
+    if (message !== null && Exporter.canShareText()) {
+      await shareMessage(message);
+      return;
+    }
     const busy = AppChrome.beginBusy(options.busyText);
     try {
       await renders.whenSettled(); // never bundle a page that is still rendering
@@ -822,11 +836,21 @@
       if (result.method === "download" && options.onDownloadFallback) {
         options.onDownloadFallback();
       }
+      // The run is complete: the next export starts again from message 1.
+      if (result.method !== "cancelled") ShareNotes.resetProgress();
     } catch (error) {
       alert(options.failurePrefix + error.message);
     } finally {
       busy.end();
     }
+  }
+
+  /** No busy overlay: there is nothing to prepare, and a dismissed sheet
+   *  simply leaves the same message for the next tap. */
+  async function shareMessage(text) {
+    const { method } = await Exporter.shareText(text);
+    if (method === "share") ShareNotes.markSent();
+    else if (method === "unavailable") AppChrome.showTemporaryStatus("Couldn't share the message.");
   }
 
   // ---------------------------------------------------------------
@@ -839,7 +863,13 @@
     operation.catch((error) => console.warn("Persist failed:", error));
   }
 
-  function persistPageOrder() { persist(Store.saveOrder(pages, tab)); }
+  /** The tab's record: its page order and its message boxes. An emptied tab
+   *  loses the record, so its boxes go back to the defaults with it — the
+   *  next batch starts with a fresh template rather than the last one's. */
+  function persistTab() {
+    if (!pages.length) ShareNotes.set(null);
+    persist(Store.saveOrder(pages, tab, ShareNotes.get()));
+  }
 
   /** The tab on screen, from the store: its pages, the tabs there are, and
    *  the next free page id — free across every tab, since ids are unique. */
@@ -856,6 +886,7 @@
       if (record.corners) pages.push(pageFromRecord(record));
     }
     tabs = loaded.tabs;
+    ShareNotes.set(loaded.notes);
     nextPageId = Math.max(nextPageId, loaded.maxId + 1);
     rerenderPagesMissingOutput();
   }

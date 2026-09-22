@@ -1,5 +1,6 @@
 /* export.js — PDF download and "Save to Photos", both routed through the Web
- * Share API when it is available and through plain downloads when it isn't.
+ * Share API when it is available and through plain downloads when it isn't,
+ * plus the text-only share the message boxes use ahead of them.
  * Exposes window.Exporter.
  */
 (function () {
@@ -48,17 +49,35 @@
    * @returns {method: "share" | "cancelled" | "download"}
    */
   async function shareOrDownload(files, downloadAll) {
-    if (navigator.canShare && navigator.canShare({ files })) {
-      try {
-        await navigator.share({ files });
-        return { method: "share" };
-      } catch (error) {
-        if (error.name === "AbortError") return { method: "cancelled" };
-        console.warn("Sharing failed, downloading instead:", error);
-      }
-    }
+    const method = await tryShare({ files });
+    if (method !== "unavailable") return { method };
     await downloadAll();
     return { method: "download" };
+  }
+
+  /** A message on its own, for the chat it is meant to precede the scans in.
+   *  Nothing to fall back to: text that can't be shared stays on screen.
+   *  @returns {method: "share" | "cancelled" | "unavailable"} */
+  async function shareText(text) {
+    return { method: await tryShare({ text }) };
+  }
+
+  function canShareText() {
+    return Boolean(navigator.canShare && navigator.canShare({ text: "x" }));
+  }
+
+  /** @returns "share" when the user completed the sheet, "cancelled" when they
+   *  dismissed it, "unavailable" when sharing this data isn't possible here. */
+  async function tryShare(data) {
+    if (!(navigator.canShare && navigator.canShare(data))) return "unavailable";
+    try {
+      await navigator.share(data);
+      return "share";
+    } catch (error) {
+      if (error.name === "AbortError") return "cancelled";
+      console.warn("Sharing failed:", error);
+      return "unavailable";
+    }
   }
 
   function triggerDownload(blob, filename) {
@@ -146,5 +165,5 @@
       `-${padTwo(now.getHours())}${padTwo(now.getMinutes())}`;
   }
 
-  window.Exporter = { exportPdf, exportPhotos };
+  window.Exporter = { exportPdf, exportPhotos, shareText, canShareText };
 })();

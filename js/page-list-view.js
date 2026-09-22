@@ -110,6 +110,7 @@
     $("listToolbar").hidden = !hasPages || isSelectModeActive;
     $("actionBar").hidden = isSelectModeActive;
     $("exportHint").hidden = isSelectModeActive;
+    ShareNotes.setVisible(hasPages && !isSelectModeActive); // nothing to send ahead of, otherwise
     for (const toggle of document.querySelectorAll(".compact-toggle")) toggle.hidden = isSelectModeActive;
     $("selectBar").hidden = !isSelectModeActive;
     if (isSelectModeActive) updateSelectBar();
