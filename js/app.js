@@ -809,11 +809,11 @@
       `cancelled.\n\nRemove ${count === 1 ? "it" : "them"} from the list and try again.`;
   }
 
-  /** Steps through the message boxes before the scans: each tap shares the
-   *  next unsent message, and only once they've all gone does a tap export.
-   *  One share per tap is the platform's rule, not a choice — a share sheet
-   *  needs its own user gesture, and text sent along with files is dropped
-   *  or captioned by the receiving app rather than sent ahead of them.
+  /** Shares the message boxes first, the scans on the next tap: a tap
+   *  exports only once the message has gone. One share per tap is the
+   *  platform's rule, not a choice — a share sheet needs its own user
+   *  gesture, and text sent along with files is dropped or captioned by the
+   *  receiving app rather than sent ahead of them.
    *  @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
   async function runExport(options) {
     const message = ShareNotes.nextUnsent();

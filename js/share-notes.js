@@ -1,11 +1,11 @@
-/* share-notes.js — the two message boxes above the page grid, and how far
- * through sending them the user is.
+/* share-notes.js — the two message boxes above the page grid, sent as one
+ * message ahead of the scans, and whether that message has gone yet.
  *
  * A share sheet can't put text ahead of files: WhatsApp drops text that
- * arrives with images, or at best captions the first one. So each message is
+ * arrives with images, or at best captions the first one. So the message is
  * its own share, and since every share needs its own tap, the export buttons
- * step through them: message 1, message 2, then the scans. The progress kept
- * here is which step the next tap will take.
+ * take two: the message, then the scans. What is kept here is which of the
+ * two the next tap will do.
  *
  * Exposes window.ShareNotes.
  */
@@ -17,7 +17,7 @@
   const $ = (id) => document.getElementById(id);
 
   let onChange = () => {};
-  let sentCount = 0; // messages already shared in the current export run
+  let isMessageSent = false; // in the current export run
 
   /** Box 1 blank, box 2 the payment request with both dates set to today —
    *  read when the boxes are reset, so a fresh tab always starts on the day
@@ -71,26 +71,26 @@
     if (visible) inputs().forEach(fitHeight);
   }
 
-  /** The messages to send, in order — a blank box sends nothing. */
-  function messages() {
-    return get().map((text) => text.trim()).filter(Boolean);
+  /** The two boxes as one message, a blank line between them; a blank box
+   *  adds nothing, and two blank boxes make no message at all. */
+  function message() {
+    return get().map((text) => text.trim()).filter(Boolean).join("\n\n");
   }
 
-  /** The message the next tap should share, or null once they've all gone. */
+  /** The message the next tap should share, or null once it has gone (or
+   *  there is none). */
   function nextUnsent() {
-    const pending = messages();
-    return sentCount < pending.length ? pending[sentCount] : null;
+    const text = message();
+    return text && !isMessageSent ? text : null;
   }
 
   function markSent() {
-    sentCount++;
-    const total = messages().length;
-    const next = sentCount < total ? `message ${sentCount + 1}` : "the scans";
-    showProgress(`Message ${sentCount} of ${total} sent — tap Image or PDF again to send ${next}.`);
+    isMessageSent = true;
+    showProgress("Message sent — tap Image or PDF again to send the scans.");
   }
 
   function resetProgress() {
-    sentCount = 0;
+    isMessageSent = false;
     showProgress("");
   }
 
