@@ -405,28 +405,6 @@
   }
 
   // ---------------------------------------------------------------
-  // Capture denoising
-  // ---------------------------------------------------------------
-
-  /**
-   * Removes sensor grain from a camera frame, returning a new canvas of the
-   * same size. `sourceCanvas` is left untouched.
-   *
-   * Belongs to capture rather than to scanning: it only pays off on the full
-   * frame, before the capture downscale, so it runs before a photo is stored
-   * rather than on the warped scan.
-   */
-  async function denoiseCanvas(sourceCanvas) {
-    await renderer.ensureReady();
-    const { width, height } = sourceCanvas;
-    const imageData = imageDataOf(sourceCanvas);
-    const response = await renderer.call("denoise", {
-      width, height, buffer: imageData.data.buffer,
-    }, [imageData.data.buffer]);
-    return canvasFromBuffer(response.buffer, width, height);
-  }
-
-  // ---------------------------------------------------------------
   // Geometry helpers
   // ---------------------------------------------------------------
 
@@ -458,6 +436,6 @@
 
   window.Detect = {
     ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewCorners, warpPerspective,
-    denoiseCanvas, fullImageCorners, CONFIDENCE_HIGH, CONFIDENCE_LOW,
+    fullImageCorners, CONFIDENCE_HIGH, CONFIDENCE_LOW,
   };
 })();

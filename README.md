@@ -5,13 +5,11 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 **Features**
 
 - **High detail capture** (on by default) — the in-page camera keeps more of
-  what the sensor delivers, and works to keep it clean: 2850px frames instead
-  of 2050px (~4.6 MP against ~2.4 MP), a 60fps stream so no frame is exposed
-  for longer than 1/60s and a handheld shot doesn't smear, sensor grain
-  removed from the full frame before it is scaled down with an area
-  resample (grain only — a printed rule or the edge of a stroke keeps its own
-  pixels), and each tap keeping the sharpest of seven frames, with the lens
-  aimed at the document where the camera allows it. The capture screen shows
+  what the sensor delivers: 2850px frames instead of 2050px (~4.6 MP against
+  ~2.4 MP), scaled down from the native frame with an area resample, a 60fps
+  stream so no frame is exposed for longer than 1/60s and a handheld shot
+  doesn't smear, and each tap keeping the sharpest of seven frames, with the
+  lens aimed at the document where the camera allows it. The capture screen shows
   the frame the camera actually delivers (size and frame rate), since a phone
   may answer the request with less. Photos run roughly
   twice the size of the setting off; turn it off to keep files smaller. It
@@ -23,10 +21,9 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   you leave it; the tab you were on is remembered.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
-- **No filters between photo and scan** — scanning applies geometric
-  transforms only, never a colour change. (High detail capture does remove
-  sensor grain, but that happens inside the camera before a photo exists —
-  the scan still matches its photo exactly.)
+- **No filters, anywhere** — a photo is resampled and JPEG-encoded, never
+  filtered, and scanning applies geometric transforms only, never a colour
+  change.
 - **Choose where new photos go** — after picking from the library or finishing a
   capture session, a dialog asks whether they belong at the end (the default),
   at the beginning, or after a particular page. Re-shooting page 4 no longer

@@ -1,6 +1,6 @@
 /* scan-worker.js — runs OpenCV.js off the main thread: document detection and
- * its perspective warp, the capture-time denoise, and the quick look the live
- * viewfinder outline is drawn from.
+ * its perspective warp, and the quick look the live viewfinder outline is
+ * drawn from.
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init        → loads OpenCV
@@ -9,7 +9,6 @@
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
  *   warp        {width, height, buffer, corners, dstW, dstH}     → {buffer}
- *   denoise     {width, height, buffer}                          → {buffer}
  *
  * The detector lives in worker/, one shared global scope: geometry (pure
  * math), pixel-probes (what the pixels say), candidates (mask → scored
@@ -769,68 +768,6 @@ function warp({ width, height, buffer, corners, dstW, dstH }) {
 }
 
 // ------------------------------------------------------------------
-// denoise
-// ------------------------------------------------------------------
-
-// A 3x3 median is the only filter in this build that actually removes sensor
-// grain: bilateralFilter's range kernel preserves the very speckle it is aimed
-// at (+1.0 dB against this filter's +5.0 dB, measured at every sigma), and a
-// 5x5 median removes less noise than it does detail. But a median also
-// removes anything one pixel wide, and at frame size that is a printed rule,
-// the anti-aliased flank of a slanted edge, the thin stroke of small print:
-// measured on a frame with sensor grain, a 1px line at a 2° slant came back
-// broken in 410 of 740 columns, a 2px line at a third of its contrast. So
-// the median is applied only where the frame is flat — where |Laplacian| of
-// the blurred gray stays under DENOISE_EDGE_LEVEL — and an edge keeps its own
-// pixels, grain and all: grain beside an edge is hidden by the edge, grain on
-// blank paper is what JPEG would spend its bytes on.
-const DENOISE_KERNEL_SIZE = 3;
-const DENOISE_EDGE_LEVEL = 24;
-
-/**
- * Removes sensor grain from a full-resolution camera frame, leaving its
- * edges as they were.
- *
- * Only worth doing BEFORE the capture downscale. Measured on a noisy frame
- * against its clean original: filtering the full frame gains 2.7 dB, while
- * filtering after the downscale gains 1.2 dB at best and loses 1.5 dB at the
- * ratios high detail used to use — past that point the downscale has already
- * averaged the grain away, so the median only eats real pixels.
- *
- * @returns the filtered pixels as a transferable buffer
- */
-function denoise({ width, height, buffer }) {
-  let src = null, rgb = null, gray = null, edges = null, flat = null, kernel = null, out = null;
-  try {
-    src = cv.matFromImageData(toImageData(width, height, buffer));
-    rgb = new cv.Mat();
-    gray = new cv.Mat();
-    edges = new cv.Mat();
-    flat = new cv.Mat();
-    kernel = cv.Mat.ones(DENOISE_KERNEL_SIZE, DENOISE_KERNEL_SIZE, cv.CV_8U);
-    out = new cv.Mat();
-    // Canvas alpha is uniformly opaque, so dropping it around the filter loses
-    // nothing and costs nothing: sorting three channels instead of four
-    // measures 122ms against 159ms at 2560x1440.
-    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-    // Where the frame is flat: the Laplacian of a lightly blurred gray, so
-    // grain alone stays under the level; eroded, so an edge keeps its flanks.
-    cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(DENOISE_KERNEL_SIZE, DENOISE_KERNEL_SIZE), 0);
-    cv.Laplacian(gray, edges, cv.CV_16S);
-    cv.convertScaleAbs(edges, gray);
-    cv.threshold(gray, flat, DENOISE_EDGE_LEVEL, 255, cv.THRESH_BINARY_INV);
-    cv.erode(flat, flat, kernel);
-    cv.medianBlur(rgb, out, DENOISE_KERNEL_SIZE);
-    out.copyTo(rgb, flat);
-    cv.cvtColor(rgb, out, cv.COLOR_RGB2RGBA);
-    return new Uint8ClampedArray(out.data).buffer;
-  } finally {
-    releaseMats(src, rgb, gray, edges, flat, kernel, out);
-  }
-}
-
-// ------------------------------------------------------------------
 // Message dispatch
 // ------------------------------------------------------------------
 
@@ -859,10 +796,6 @@ const HANDLERS = new Map([
   ["previewQuad", (payload) => ({ result: previewQuad(payload) })],
   ["warp", (payload) => {
     const buffer = warp(payload);
-    return { result: { buffer }, transferables: [buffer] };
-  }],
-  ["denoise", (payload) => {
-    const buffer = denoise(payload);
     return { result: { buffer }, transferables: [buffer] };
   }],
 ]);

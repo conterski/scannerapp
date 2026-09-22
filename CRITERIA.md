@@ -15,11 +15,10 @@ to count as correct.
 | 6 | **Natural proportions** | The page doesn't look stretched or squashed compared to the real paper | Aspect ratio visually plausible |
 | 7 | **No filters** | Colors, brightness, and shadows in the scan match the photo exactly (a gray photo gives a gray scan — that's correct) | Pixel colors must be untouched |
 
-Rule 7 compares the scan against **the photo**, so **High detail capture** does
-not affect it: its grain removal happens in the camera, before a photo exists,
-and the scan still matches that photo exactly. Worth stating anyway — with High
-detail on, which is the default, the app is filtering pixels at capture time.
-A photo added from the library is never touched.
+Rule 7 compares the scan against **the photo**. Nothing filters a photo
+either: **High detail capture** changes only how much the camera is asked for
+and how much of the frame is kept, so a photo is resampled and encoded and
+that is all, whether it came from the camera or the library.
 
 ## Grading
 

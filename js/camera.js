@@ -8,11 +8,11 @@
 (function () {
   "use strict";
 
-  // How large a frame to ask for, how much of it to keep, at what quality and
-  // whether to denoise all come from CaptureQuality — this module drives the
-  // device, not policy. Frames are reduced to the stored size as early as the
-  // profile allows rather than at export time: a long session holds every shot
-  // in memory, and full-resolution iPhone frames exhaust it fast.
+  // How large a frame to ask for, how much of it to keep and at what quality
+  // all come from CaptureQuality — this module drives the device, not policy.
+  // Frames are reduced to the stored size at grab time rather than at export
+  // time: a long session holds every shot in memory, and full-resolution
+  // iPhone frames exhaust it fast.
   function mediaConstraints() {
     return {
       video: Object.assign(
@@ -106,19 +106,14 @@
   // downscale from the native frame is where fine print is won or lost.
   const KEPT_PHOTO_RESAMPLE = { smoothing: "high" };
 
-  /** Copies the current video frame into a canvas. Returns null while the
-   *  stream has no frame yet. Synchronous, so a tap captures the frame the
-   *  user actually saw.
-   *
-   *  A profile that denoises keeps the frame at its native size, because the
-   *  filter only works on unscaled grain; every other profile is capped here,
-   *  keeping its single resample and its smaller footprint in the queue. */
+  /** Copies the current video frame into a canvas, capped at the profile's
+   *  size. Returns null while the stream has no frame yet. Synchronous, so a
+   *  tap captures the frame the user actually saw. */
   function grabFrame(video) {
     const { width, height } = ImageUtils.sourceDimensions(video);
     if (!width || !height) return null;
-    const { maxEdge, denoise } = CaptureQuality.currentProfile();
-    const grabEdge = denoise ? Math.max(width, height) : maxEdge;
-    return ImageUtils.createScaledCanvas(video, grabEdge, KEPT_PHOTO_RESAMPLE).canvas;
+    const { maxEdge } = CaptureQuality.currentProfile();
+    return ImageUtils.createScaledCanvas(video, maxEdge, KEPT_PHOTO_RESAMPLE).canvas;
   }
 
   function centralRegion(video) {
@@ -181,40 +176,11 @@
     return best;
   }
 
-  /** Denoises a frame, falling back to it unchanged if the worker can't. A
-   *  failed filter must cost sharpness, never the photo. */
-  function reduceNoise(frame) {
-    return Detect.denoiseCanvas(frame).catch((error) => {
-      console.warn("Noise reduction failed, keeping the frame as captured:", error);
-      return frame;
-    });
-  }
-
-  /** Applies a cap only when there is something to cut. A scale-1 pass through
-   *  createScaledCanvas is a full-frame copy for no gain, and a stream smaller
-   *  than the cap is the common case on a device that can't reach it. */
-  function capLongestSide(canvas, maxEdge) {
-    return Math.max(canvas.width, canvas.height) > maxEdge
-      ? ImageUtils.createScaledCanvas(canvas, maxEdge, KEPT_PHOTO_RESAMPLE).canvas
-      : canvas;
-  }
-
-  /** Turns a grabbed frame into the JPEG that gets stored: grain removed while
-   *  the frame is still full size, then the profile's cap, then the encode.
-   *  Without denoising the cap was already applied at grab time, so the frame
-   *  goes straight to the encoder. `frame` stays the caller's to release;
-   *  the canvases made on the way are released here, each a full-resolution
-   *  one. */
-  async function captureJpeg(frame) {
-    const { maxEdge, jpegQuality, denoise } = CaptureQuality.currentProfile();
-    if (!denoise) return ImageUtils.encodeCanvasToJpeg(frame, jpegQuality);
-    const clean = await reduceNoise(frame);
-    const capped = capLongestSide(clean, maxEdge);
-    try {
-      return await ImageUtils.encodeCanvasToJpeg(capped, jpegQuality);
-    } finally {
-      for (const made of new Set([clean, capped])) if (made !== frame) ImageUtils.releaseCanvas(made);
-    }
+  /** Turns a grabbed frame into the JPEG that gets stored. The frame was
+   *  capped at grab time, so it goes straight to the encoder; it stays the
+   *  caller's to release. */
+  function captureJpeg(frame) {
+    return ImageUtils.encodeCanvasToJpeg(frame, CaptureQuality.currentProfile().jpegQuality);
   }
 
   function create() {
