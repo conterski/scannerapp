@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="css/style.css?v=1a031cf888">
+<link rel="stylesheet" href="css/style.css?v=7bacf9a2c8">
 </head>
 <body>
 
@@ -131,6 +131,14 @@
     </label>
 
     <label class="compact-toggle">
+      <input type="checkbox" id="pageNumberCheck">
+      <span class="compact-text">
+        <span class="compact-title">Page numbers</span>
+        <span class="compact-sub">A small number at the bottom right of each exported scan</span>
+      </span>
+    </label>
+
+    <label class="compact-toggle">
       <input type="checkbox" id="messageCheck">
       <span class="compact-text">
         <span class="compact-title">Message after the scans</span>
@@ -168,7 +176,10 @@
     <div class="capture-top">
       <span id="shotCount" class="shot-count">0 photos</span>
       <span id="frameInfo" class="frame-info"></span>
-      <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
+      <div class="capture-tools">
+        <button id="rotateBtn" class="torch-btn" type="button" title="Photos saved as the camera sees them" aria-label="Photos saved as the camera sees them"><span class="rotate-glyph">&#10227;</span></button>
+        <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
+      </div>
     </div>
     <div class="capture-bottom">
       <button id="shotStrip" class="shot-strip capture-side capture-side-left" type="button" title="Review photos" hidden></button>
@@ -195,30 +206,32 @@
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>
-<script src="js/promise-utils.js?v=1a031cf888"></script>
-<script src="js/image-utils.js?v=1a031cf888"></script>
-<script src="js/page-scroll.js?v=1a031cf888"></script>
-<script src="js/choice-prompt.js?v=1a031cf888"></script>
-<script src="js/pointer-drag.js?v=1a031cf888"></script>
-<script src="js/persisted-flag.js?v=1a031cf888"></script>
-<script src="js/capture-quality.js?v=1a031cf888"></script>
-<script src="js/scan-quality.js?v=1a031cf888"></script>
-<script src="js/detect.js?v=1a031cf888"></script>
-<script src="js/scan-render.js?v=1a031cf888"></script>
-<script src="js/frame-sharpness.js?v=1a031cf888"></script>
-<script src="js/camera.js?v=1a031cf888"></script>
-<script src="js/photo-store.js?v=1a031cf888"></script>
-<script src="js/capture-outline.js?v=1a031cf888"></script>
-<script src="js/capture-ui.js?v=1a031cf888"></script>
-<script src="js/editor.js?v=1a031cf888"></script>
-<script src="js/share-note.js?v=1a031cf888"></script>
-<script src="js/page-list-view.js?v=1a031cf888"></script>
-<script src="js/export.js?v=1a031cf888"></script>
-<script src="js/store.js?v=1a031cf888"></script>
-<script src="js/job-queue.js?v=1a031cf888"></script>
-<script src="js/app-chrome.js?v=1a031cf888"></script>
-<script src="js/source-cache.js?v=1a031cf888"></script>
-<script src="js/render-tracker.js?v=1a031cf888"></script>
-<script src="js/app.js?v=1a031cf888"></script>
+<script src="js/promise-utils.js?v=7bacf9a2c8"></script>
+<script src="js/image-utils.js?v=7bacf9a2c8"></script>
+<script src="js/page-scroll.js?v=7bacf9a2c8"></script>
+<script src="js/choice-prompt.js?v=7bacf9a2c8"></script>
+<script src="js/pointer-drag.js?v=7bacf9a2c8"></script>
+<script src="js/persisted-flag.js?v=7bacf9a2c8"></script>
+<script src="js/capture-quality.js?v=7bacf9a2c8"></script>
+<script src="js/scan-quality.js?v=7bacf9a2c8"></script>
+<script src="js/page-number.js?v=7bacf9a2c8"></script>
+<script src="js/detect.js?v=7bacf9a2c8"></script>
+<script src="js/scan-render.js?v=7bacf9a2c8"></script>
+<script src="js/capture-rotation.js?v=7bacf9a2c8"></script>
+<script src="js/frame-sharpness.js?v=7bacf9a2c8"></script>
+<script src="js/camera.js?v=7bacf9a2c8"></script>
+<script src="js/photo-store.js?v=7bacf9a2c8"></script>
+<script src="js/capture-outline.js?v=7bacf9a2c8"></script>
+<script src="js/capture-ui.js?v=7bacf9a2c8"></script>
+<script src="js/editor.js?v=7bacf9a2c8"></script>
+<script src="js/share-note.js?v=7bacf9a2c8"></script>
+<script src="js/page-list-view.js?v=7bacf9a2c8"></script>
+<script src="js/export.js?v=7bacf9a2c8"></script>
+<script src="js/store.js?v=7bacf9a2c8"></script>
+<script src="js/job-queue.js?v=7bacf9a2c8"></script>
+<script src="js/app-chrome.js?v=7bacf9a2c8"></script>
+<script src="js/source-cache.js?v=7bacf9a2c8"></script>
+<script src="js/render-tracker.js?v=7bacf9a2c8"></script>
+<script src="js/app.js?v=7bacf9a2c8"></script>
 </body>
 </html>

@@ -16,13 +16,22 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
 - **Settings** — the ⚙ button in the header holds the toggles below (High
-  detail capture, Compact scans, and the message box); ☑ selects pages and the
-  bins clear the tab or every tab.
+  detail capture, Compact scans, page numbers, and the message box); ☑ selects
+  pages and the bins clear the tab or every tab.
+- **Page numbers** (off by default) — a small translucent number in the bottom
+  right of each exported scan. It is added as the document is exported, not
+  baked into the saved scan, so reordering or deleting a page always renumbers
+  the rest and nothing is re-rendered.
 - **Tabs** — small numbered tabs above the pages, each its own set of scans
   with its own export; **+** opens the next. Keep batches of receipts apart
   without exporting and clearing in between. An emptied tab disappears when
   you leave it; the tab you were on is remembered.
 - Add photos from the library, or use the in-page camera for rapid capture: one tap per shot with no Retake/Use Photo confirmation, a running counter, a tappable strip that opens a review gallery (delete shots there), and a single **Done** that hands the whole set to the app
+- **⟳ on the camera screen** — if you shoot with the phone held sideways while
+  rotation lock is on, the phone hands the page a portrait frame with the
+  document on its side and cannot say so. Tap ⟳ until the arrow points the way
+  you are holding it and shots are saved upright from then on; the setting is
+  remembered, and any page can still be turned in the editor.
 - Automatic document detection: the background is cropped away and the page is perspective-corrected (deskewed)
 - **No filters, anywhere** — a photo is resampled and JPEG-encoded, never
   filtered, and scanning applies geometric transforms only, never a colour

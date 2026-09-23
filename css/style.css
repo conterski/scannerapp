@@ -26,7 +26,7 @@ html, body {
 
 .app-header {
   display: flex;
-  flex-wrap: wrap; /* the tab strip takes a row of its own */
+  flex-wrap: wrap; /* only the status line ever takes a row of its own */
   align-items: center;
   gap: 12px;
   padding: max(12px, env(safe-area-inset-top)) 16px 12px;
@@ -177,7 +177,11 @@ html, body {
    the header, so they stay put under it while the list scrolls; they share
    the row with the actions and scroll sideways once there are many. */
 .tab-strip {
-  flex: 1 1 auto;
+  /* A zero basis, not auto: a wrapping flex container breaks the line on an
+     item's content width before it shrinks the item, so with `auto` a third
+     tab pushed the whole strip onto a row of its own. At zero it asks for
+     nothing, takes what the row has left, and scrolls past that. */
+  flex: 1 1 0;
   display: flex;
   gap: 6px;
   min-width: 0;
@@ -644,7 +648,7 @@ html, body {
   opacity: 1;
 }
 
-/* The count pill stays centred; the torch floats over the row so its width
+/* The count pill stays centred; the tools float over the row so their width
    can't shift the pill, the same trick the shutter bar uses. */
 .capture-top {
   position: relative;
@@ -652,10 +656,14 @@ html, body {
   justify-content: center;
   padding: max(12px, env(safe-area-inset-top)) 16px 0;
 }
-.capture-top .torch-btn {
+/* The tools float over the row, so however many there are the count pill
+   stays on the viewport's centre. */
+.capture-top .capture-tools {
   position: absolute;
   right: 16px;
   top: max(12px, env(safe-area-inset-top));
+  display: flex;
+  gap: 8px;
 }
 /* What the camera delivers, floated like the torch so the pill stays put. */
 .capture-top .frame-info {
@@ -801,4 +809,8 @@ html, body {
   background: rgba(8, 10, 14, 0.94);
 }
 .capture-error p { color: var(--text-dim); max-width: 34ch; }
+
 .capture-error .btn { width: min(360px, 100%); }
+
+/* The glyph turns to show which way shots are being saved. */
+.rotate-glyph { display: block; transition: transform 0.15s ease; }

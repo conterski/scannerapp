@@ -23,15 +23,18 @@
   }
 
   function create() {
-    const shots = []; // { id, blob, url, viewfinderCorners, stability } in capture order
+    const shots = []; // { id, blob, url, viewfinderCorners, stability, quarterTurns } in capture order
     let nextId = 1;
 
-    /** @param viewfinder the outline shown at the tap — { quad } as fractions
-     *                    of the frame, { stability } how steadily it held —
-     *                    or null when none was showing */
-    function add(blob, viewfinder) {
+    /** @param viewfinder   the outline shown at the tap — { quad } as fractions
+     *                       of the frame, { stability } how steadily it held —
+     *                       or null when none was showing
+     *  @param quarterTurns  the rotation in force at that tap, so rotating
+     *                       mid-session leaves the shots already taken alone */
+    function add(blob, viewfinder, quarterTurns) {
       const shot = { id: nextId++, blob, url: URL.createObjectURL(blob),
-                     viewfinderCorners: viewfinder ? viewfinder.quad : null, stability: viewfinder ? viewfinder.stability : 0 };
+                     viewfinderCorners: viewfinder ? viewfinder.quad : null, stability: viewfinder ? viewfinder.stability : 0,
+                     quarterTurns: quarterTurns || 0 };
       shots.push(shot);
       return shot;
     }
@@ -50,12 +53,13 @@
     /** Hands the session's photos to the app as named files, each paired
      *  with its viewfinder outline. The files own their bytes, so the store
      *  may be disposed straight afterwards.
-     *  @returns [{ file, viewfinderCorners, stability }] */
+     *  @returns [{ file, viewfinderCorners, stability, quarterTurns }] */
     function toShots() {
       return shots.map((s, i) => ({
         file: toFile(s.blob, `${FILE_PREFIX}${i + 1}.jpg`),
         viewfinderCorners: s.viewfinderCorners,
         stability: s.stability,
+        quarterTurns: s.quarterTurns,
       }));
     }
 

@@ -16,7 +16,7 @@
 
   const IDS = [
     "captureView", "captureVideo", "captureOutline", "captureFlash", "captureControls",
-    "shotCount", "frameInfo", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn",
+    "shotCount", "frameInfo", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn", "rotateBtn",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
   ];
@@ -141,6 +141,10 @@
         renderCount(); // before any camera work: the tap has to read as taken
         const region = outline.region();
         const viewfinder = outline.corners();
+        // Read here with the outline, not when the JPEG lands: the encode
+        // finishes long after the tap, and a rotation made in between belongs
+        // to the shots that follow it, not to this one.
+        const quarterTurns = CaptureRotation.quarterTurns();
         const frame = camera.focusOn(region)
           .then(() => CameraStream.grabSharpest(els.captureVideo, region));
         encodeChain = encodeChain
@@ -148,7 +152,7 @@
           .then((canvas) => {
             if (!canvas) return; // the stream had no frame yet
             return CameraStream.captureJpeg(canvas)
-              .then((blob) => { store.add(blob, viewfinder); })
+              .then((blob) => { store.add(blob, viewfinder, quarterTurns); })
               .finally(() => ImageUtils.releaseCanvas(canvas));
           })
           .catch((err) => console.error("Capture failed:", err))
@@ -207,6 +211,7 @@
         els.torchBtn.hidden = true;
         els.frameInfo.textContent = ""; // set once the camera says what it delivers
         renderTorch();
+        renderRotation();
       }
 
       function teardown() {
@@ -230,6 +235,18 @@
         wireGalleryControls();
         wireFallbackControls();
         binder.on(els.torchBtn, "click", toggleTorch);
+        binder.on(els.rotateBtn, "click", () => { CaptureRotation.cycle(); renderRotation(); });
+      }
+
+      /** The glyph turns with the setting, and the button lights up whenever
+       *  shots are being turned at all — the same "this is on" the torch uses. */
+      function renderRotation() {
+        const turns = CaptureRotation.quarterTurns();
+        const description = CaptureRotation.describe();
+        els.rotateBtn.querySelector(".rotate-glyph").style.transform = `rotate(${turns * 90}deg)`;
+        els.rotateBtn.classList.toggle("is-on", turns !== 0);
+        els.rotateBtn.title = description;
+        els.rotateBtn.setAttribute("aria-label", description);
       }
 
       function renderTorch() {

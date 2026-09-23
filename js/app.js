@@ -3,7 +3,8 @@
  * ImageUtils, quality settings in ScanQuality, the grid in PageListView, the
  * warp in ScanRenderer, persistence in Store, the busy overlay and status line
  * in AppChrome, decoded originals in SourceCache, render bookkeeping in
- * RenderTracker, the message box sent after the scans in ShareNote.
+ * RenderTracker, the message box sent after the scans in ShareNote, the
+ * numbering of exported scans in PageNumber.
  */
 (function () {
   "use strict";
@@ -74,9 +75,12 @@
     Editor.init();
     ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
+    CaptureRotation.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
+    PageNumber.loadPersistedSetting();
     $("highDetailCheck").checked = CaptureQuality.isEnabled();
     $("compactCheck").checked = ScanQuality.isEnabled();
+    $("pageNumberCheck").checked = PageNumber.isEnabled();
     PageListView.init({
       onEditPage: editPage,
       onDeletePage: deletePage,
@@ -150,17 +154,22 @@
       await setCompactEnabled(event.target.checked);
       event.target.checked = ScanQuality.isEnabled(); // reverts if cancelled
     });
+    // Numbering happens as a document is exported, so this one changes
+    // nothing that is already on screen either.
+    $("pageNumberCheck").addEventListener("change", (event) => {
+      PageNumber.setEnabled(event.target.checked);
+    });
   }
 
   function wireExportControls() {
     $("pdfBtn").addEventListener("click", () => runExport({
       busyText: "Building PDF…",
-      exportBlobs: () => Exporter.exportPdf(outputBlobs()),
+      deliver: Exporter.exportPdf,
       failurePrefix: "PDF export failed: ",
     }));
     $("photosBtn").addEventListener("click", () => runExport({
       busyText: "Preparing images…",
-      exportBlobs: () => Exporter.exportPhotos(outputBlobs()),
+      deliver: Exporter.exportPhotos,
       failurePrefix: "Export failed: ",
       onDownloadFallback: () => AppChrome.showTemporaryStatus(
         "Sharing unavailable — images downloaded in order instead."),
@@ -202,11 +211,13 @@
   }
 
   /**
-   * @param items    [{ file, viewfinderCorners, stability }] — the outline
-   *                 shown when a camera shot was taken, as fractions of the
-   *                 frame, and how steadily it held: the prior the detector
-   *                 weighs that page's crop against; null leaves the crop to
-   *                 the detector alone.
+   * @param items    [{ file, viewfinderCorners, stability, quarterTurns }] —
+   *                 the outline shown when a camera shot was taken, as
+   *                 fractions of the frame, and how steadily it held: the
+   *                 prior the detector weighs that page's crop against; null
+   *                 leaves the crop to the detector alone. `quarterTurns` is
+   *                 how the camera screen was set to save that shot; a photo
+   *                 from the library brings its own orientation and has none.
    * @param insertAt where the new pages go, as an index into `pages`. Omit it
    *                 to ask the user — the picker, rapid capture and the
    *                 single-shot fallback all come through here, so asking once
@@ -341,12 +352,12 @@
   /** The detector runs on the saved photo; a camera shot's outline, the crop
    *  the user framed against, goes along as the prior the detector must beat
    *  clearly to depart from. */
-  async function registerPage({ file, viewfinderCorners, stability }, decoded, index, tally) {
+  async function registerPage({ file, viewfinderCorners, stability, quarterTurns }, decoded, index, tally) {
     try {
       if (decoded instanceof Error) throw decoded;
       const outline = viewfinderCorners && cornersAtSize(viewfinderCorners, decoded);
       const detected = await detectCornersTallying(decoded, tally, outline && { prior: { quad: outline, stability } });
-      const page = createPage(await blobToStore(file, decoded), detected.corners, outline);
+      const page = createPage(await blobToStore(file, decoded), detected.corners, outline, quarterTurns);
       page.needsCheck = detected.confidence.overall < Detect.CONFIDENCE_HIGH; // the card asks for a look
       if (page.needsCheck) tally.needsCheck++;
       // splice at pages.length is a push, so appending needs no special case.
@@ -401,14 +412,17 @@
   /** @param viewfinderCorners the crop the viewfinder proposed, kept apart
    *                           from `corners` so the editor's Auto can return
    *                           to it after the user has dragged; null for a
-   *                           photo that had no viewfinder */
-  function createPage(blob, corners, viewfinderCorners) {
+   *                           photo that had no viewfinder
+   *  @param quarterTurns      the rotation the page starts at — set for a
+   *                           shot taken with the phone held sideways, and
+   *                           none for a photo that arrives upright */
+  function createPage(blob, corners, viewfinderCorners, quarterTurns) {
     return {
       id: nextPageId++,
       blob,
       corners,
       viewfinderCorners: viewfinderCorners || null,
-      quarterTurns: 0,
+      quarterTurns: quarterTurns || 0,
       outputBlob: null,
       outputURL: null,
     };
@@ -763,6 +777,15 @@
 
   function outputBlobs() { return pages.map((page) => page.outputBlob); }
 
+  /** The scans as they should leave the app: numbered when the setting asks
+   *  for it, and the stored scans themselves when it doesn't — nothing is
+   *  decoded or re-encoded while it is off. */
+  function numberedOutputs(busy) {
+    const blobs = outputBlobs();
+    if (!PageNumber.isEnabled()) return Promise.resolve(blobs);
+    return PageNumber.stampAll(blobs, (done, total) => busy.update(`Numbering ${done} / ${total}…`));
+  }
+
   /** Pages that have no rendered scan. Once renders have settled these are the
    *  ones that never will, so exporting them would put a hole in the file. */
   function unexportablePages() { return pages.filter((page) => !page.outputBlob); }
@@ -776,7 +799,9 @@
    *  tap is the platform's rule, not a choice — a share sheet needs its own
    *  user gesture, and text sent along with files is dropped or captioned by
    *  the receiving app rather than sent as a message of its own.
-   *  @param options { busyText, exportBlobs, failurePrefix, onDownloadFallback? } */
+   *  @param options { busyText, deliver, failurePrefix, onDownloadFallback? } —
+   *  `deliver` takes the scans and hands them to the share sheet or a
+   *  download. */
   async function runExport(options) {
     const message = ShareNote.pendingMessage();
     if (message !== null) {
@@ -794,7 +819,7 @@
         alert(describeUnexportable(unexportable.length));
         return;
       }
-      const result = await options.exportBlobs();
+      const result = await options.deliver(await numberedOutputs(busy));
       if (result.method === "download" && options.onDownloadFallback) {
         options.onDownloadFallback();
       }
