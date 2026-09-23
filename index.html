@@ -9,19 +9,25 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="css/style.css?v=b250d43143">
+<link rel="stylesheet" href="css/style.css?v=1a031cf888">
 </head>
 <body>
 
 <header class="app-header">
-  <h1>ScannerApp</h1>
-  <span id="statusText" class="status" hidden></span>
-  <div id="listToolbar" class="list-toolbar" hidden>
-    <button id="selectBtn" class="btn btn-tiny">&#9745; Select</button>
-    <button id="clearAllBtn" class="btn btn-tiny btn-danger-ghost">Clear tab</button>
-    <button id="clearAllTabsBtn" class="btn btn-tiny btn-danger-ghost" hidden>Clear all tabs</button>
-  </div>
+  <img src="icon-180.png" alt="ScannerApp" class="app-logo" width="28" height="28">
   <nav id="tabStrip" class="tab-strip" aria-label="Tabs"></nav>
+  <!-- Icons rather than labels: the whole header is one row, so the tabs and
+       every action share it with the logo. Each keeps a title and a label.
+       Settings sits outside the toolbar because it is the one action that
+       still applies to an empty tab — High detail is set before the first
+       photo, not after it. -->
+  <button id="settingsBtn" class="icon-btn" type="button" title="Settings" aria-label="Settings">&#9881;</button>
+  <div id="listToolbar" class="list-toolbar" hidden>
+    <button id="selectBtn" class="icon-btn" type="button" title="Select pages" aria-label="Select pages">&#9745;</button>
+    <button id="clearAllBtn" class="icon-btn icon-btn--danger" type="button" title="Clear tab" aria-label="Clear tab">&#128465;</button>
+    <button id="clearAllTabsBtn" class="icon-btn icon-btn--danger icon-btn--all" type="button" title="Clear all tabs" aria-label="Clear all tabs" hidden>&#128465;</button>
+  </div>
+  <span id="statusText" class="status" hidden></span>
 </header>
 
 <!-- ============ PAGE LIST VIEW ============ -->
@@ -41,30 +47,6 @@
   </section>
 
   <div id="pageGrid" class="page-grid"></div>
-
-  <label class="compact-toggle">
-    <input type="checkbox" id="highDetailCheck">
-    <span class="compact-text">
-      <span class="compact-title">High detail capture</span>
-      <span class="compact-sub">More pixels and a shorter exposure &mdash; larger files, new photos only</span>
-    </span>
-  </label>
-
-  <label class="compact-toggle">
-    <input type="checkbox" id="compactCheck">
-    <span class="compact-text">
-      <span class="compact-title">Compact scans</span>
-      <span class="compact-sub">Smaller saved files &mdash; lower resolution &amp; quality; compresses the tab on screen</span>
-    </span>
-  </label>
-
-  <label class="compact-toggle">
-    <input type="checkbox" id="messageCheck">
-    <span class="compact-text">
-      <span class="compact-title">Message after the scans</span>
-      <span class="compact-sub">Image and PDF share the scans first, then the text box on a second tap</span>
-    </span>
-  </label>
 
   <p class="export-hint" id="exportHint">On iPhone, &ldquo;Image&rdquo; opens the share sheet &mdash; tap <b>Save Images</b> there.</p>
 
@@ -129,6 +111,38 @@
   <button id="scrollBottomBtn" class="anchor-btn" type="button" title="Jump to bottom" aria-label="Jump to bottom">&#8595;</button>
 </div>
 
+<div id="settingsSheet" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <h2 id="settingsTitle" class="modal-title">Settings</h2>
+    <label class="compact-toggle">
+      <input type="checkbox" id="highDetailCheck">
+      <span class="compact-text">
+        <span class="compact-title">High detail capture</span>
+        <span class="compact-sub">More pixels and a shorter exposure &mdash; larger files, new photos only</span>
+      </span>
+    </label>
+
+    <label class="compact-toggle">
+      <input type="checkbox" id="compactCheck">
+      <span class="compact-text">
+        <span class="compact-title">Compact scans</span>
+        <span class="compact-sub">Smaller saved files &mdash; lower resolution &amp; quality; compresses the tab on screen</span>
+      </span>
+    </label>
+
+    <label class="compact-toggle">
+      <input type="checkbox" id="messageCheck">
+      <span class="compact-text">
+        <span class="compact-title">Message after the scans</span>
+        <span class="compact-sub">Image and PDF share the scans first, then the text box on a second tap</span>
+      </span>
+    </label>
+    <div class="modal-actions">
+      <button id="settingsDoneBtn" class="btn btn-primary" type="button">Done</button>
+    </div>
+  </div>
+</div>
+
 <div id="choicePrompt" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="choicePromptTitle">
     <h2 id="choicePromptTitle" class="modal-title">Add photos</h2>
@@ -181,30 +195,30 @@
 </div>
 
 <script src="vendor/jspdf.umd.min.js"></script>
-<script src="js/promise-utils.js?v=b250d43143"></script>
-<script src="js/image-utils.js?v=b250d43143"></script>
-<script src="js/page-scroll.js?v=b250d43143"></script>
-<script src="js/choice-prompt.js?v=b250d43143"></script>
-<script src="js/pointer-drag.js?v=b250d43143"></script>
-<script src="js/persisted-flag.js?v=b250d43143"></script>
-<script src="js/capture-quality.js?v=b250d43143"></script>
-<script src="js/scan-quality.js?v=b250d43143"></script>
-<script src="js/detect.js?v=b250d43143"></script>
-<script src="js/scan-render.js?v=b250d43143"></script>
-<script src="js/frame-sharpness.js?v=b250d43143"></script>
-<script src="js/camera.js?v=b250d43143"></script>
-<script src="js/photo-store.js?v=b250d43143"></script>
-<script src="js/capture-outline.js?v=b250d43143"></script>
-<script src="js/capture-ui.js?v=b250d43143"></script>
-<script src="js/editor.js?v=b250d43143"></script>
-<script src="js/share-note.js?v=b250d43143"></script>
-<script src="js/page-list-view.js?v=b250d43143"></script>
-<script src="js/export.js?v=b250d43143"></script>
-<script src="js/store.js?v=b250d43143"></script>
-<script src="js/job-queue.js?v=b250d43143"></script>
-<script src="js/app-chrome.js?v=b250d43143"></script>
-<script src="js/source-cache.js?v=b250d43143"></script>
-<script src="js/render-tracker.js?v=b250d43143"></script>
-<script src="js/app.js?v=b250d43143"></script>
+<script src="js/promise-utils.js?v=1a031cf888"></script>
+<script src="js/image-utils.js?v=1a031cf888"></script>
+<script src="js/page-scroll.js?v=1a031cf888"></script>
+<script src="js/choice-prompt.js?v=1a031cf888"></script>
+<script src="js/pointer-drag.js?v=1a031cf888"></script>
+<script src="js/persisted-flag.js?v=1a031cf888"></script>
+<script src="js/capture-quality.js?v=1a031cf888"></script>
+<script src="js/scan-quality.js?v=1a031cf888"></script>
+<script src="js/detect.js?v=1a031cf888"></script>
+<script src="js/scan-render.js?v=1a031cf888"></script>
+<script src="js/frame-sharpness.js?v=1a031cf888"></script>
+<script src="js/camera.js?v=1a031cf888"></script>
+<script src="js/photo-store.js?v=1a031cf888"></script>
+<script src="js/capture-outline.js?v=1a031cf888"></script>
+<script src="js/capture-ui.js?v=1a031cf888"></script>
+<script src="js/editor.js?v=1a031cf888"></script>
+<script src="js/share-note.js?v=1a031cf888"></script>
+<script src="js/page-list-view.js?v=1a031cf888"></script>
+<script src="js/export.js?v=1a031cf888"></script>
+<script src="js/store.js?v=1a031cf888"></script>
+<script src="js/job-queue.js?v=1a031cf888"></script>
+<script src="js/app-chrome.js?v=1a031cf888"></script>
+<script src="js/source-cache.js?v=1a031cf888"></script>
+<script src="js/render-tracker.js?v=1a031cf888"></script>
+<script src="js/app.js?v=1a031cf888"></script>
 </body>
 </html>

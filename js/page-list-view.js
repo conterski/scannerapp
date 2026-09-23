@@ -35,6 +35,7 @@
    *                        onDeleteSelected, onClearAll, onClearAllTabs, onSelectModeChanged } */
   function init(listHandlers) {
     handlers = listHandlers;
+    wireSettingsSheet();
     $("selectBtn").addEventListener("click", enterSelectMode);
     $("cancelSelectBtn").addEventListener("click", exitSelectMode);
     $("deleteSelectedBtn").addEventListener("click", () => handlers.onDeleteSelected());
@@ -45,6 +46,25 @@
     // Rotating the phone changes what fits, and so whether the jumps are worth
     // offering. Passive: this listener never blocks the resize.
     window.addEventListener("resize", updateScrollAnchors, { passive: true });
+  }
+
+  /** The settings sheet is this view's own chrome — the toggles inside it
+   *  wire themselves — so opening and closing it lives here rather than in a
+   *  module of its own. */
+  function wireSettingsSheet() {
+    const sheet = $("settingsSheet");
+    // Bound only while the sheet is open, so Escape belongs to whatever is on
+    // screen the rest of the time.
+    const onKeyDown = (event) => { if (event.key === "Escape") close(); };
+    const close = () => {
+      sheet.hidden = true;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+    $("settingsBtn").addEventListener("click", () => {
+      sheet.hidden = false;
+      document.addEventListener("keydown", onKeyDown);
+    });
+    $("settingsDoneBtn").addEventListener("click", close);
   }
 
   function render(pages) {
@@ -88,6 +108,7 @@
   function setListChromeVisible(visible) {
     isListShowing = visible;
     $("listToolbar").hidden = !visible;
+    $("settingsBtn").hidden = !visible;
     $("tabStrip").hidden = !visible;
     updateScrollAnchors();
   }
@@ -108,10 +129,10 @@
     $("pdfBtn").disabled = !hasPages;
     $("photosBtn").disabled = !hasPages;
     $("listToolbar").hidden = !hasPages || isSelectModeActive;
+    $("settingsBtn").hidden = isSelectModeActive; // the one action an empty tab still has
     $("actionBar").hidden = isSelectModeActive;
     $("exportHint").hidden = isSelectModeActive;
-    ShareNote.setVisible(hasPages && !isSelectModeActive); // nothing to send ahead of, otherwise
-    for (const toggle of document.querySelectorAll(".compact-toggle")) toggle.hidden = isSelectModeActive;
+    ShareNote.setVisible(hasPages && !isSelectModeActive); // nothing to send after, otherwise
     $("selectBar").hidden = !isSelectModeActive;
     if (isSelectModeActive) updateSelectBar();
   }

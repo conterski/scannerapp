@@ -49,6 +49,7 @@
 
     return new Promise((resolve) => {
       let encodeChain = Promise.resolve(); // serialised: shots keep tap order
+      let pendingShots = 0;                // tapped, not yet in the store
       let flashTimer = 0;
       let accepting = true;                // false once the session is closing
       // The camera LED, held on for the whole session. Not to be confused with
@@ -67,12 +68,17 @@
         return `${width}×${height}${frameRate ? ` · ${Math.round(frameRate)} fps` : ""}${Math.max(width, height) > kept ? ` → ${kept}` : ""}`;
       }
 
+      /** Shots taken, counting the ones still being encoded: a tap is a
+       *  photo the moment it is made, and waiting for the encode — which
+       *  queues behind every earlier tap — would leave a burst looking as
+       *  though nothing had happened. A shot that fails to encode gives its
+       *  count back. */
       function renderCount() {
-        const n = store.count();
+        const taken = AppChrome.plural(store.count() + pendingShots, "photo");
         // The count lives in the pill only: a label that grows with it would
         // widen the Done button and push the shutter off centre.
-        els.shotCount.textContent = AppChrome.plural(n, "photo");
-        els.galleryCount.textContent = AppChrome.plural(n, "photo");
+        els.shotCount.textContent = taken;
+        els.galleryCount.textContent = taken;
       }
 
       function renderStrip() {
@@ -131,6 +137,8 @@
       function shoot() {
         if (!accepting) return;
         flash();
+        pendingShots++;
+        renderCount(); // before any camera work: the tap has to read as taken
         const region = outline.region();
         const viewfinder = outline.corners();
         const frame = camera.focusOn(region)
@@ -140,14 +148,17 @@
           .then((canvas) => {
             if (!canvas) return; // the stream had no frame yet
             return CameraStream.captureJpeg(canvas)
-              .then((blob) => {
-                store.add(blob, viewfinder);
-                renderCount();
-                renderStrip();
-              })
+              .then((blob) => { store.add(blob, viewfinder); })
               .finally(() => ImageUtils.releaseCanvas(canvas));
           })
-          .catch((err) => console.error("Capture failed:", err));
+          .catch((err) => console.error("Capture failed:", err))
+          // Whether it landed or failed, this shot is no longer pending: the
+          // store now speaks for it, or nothing does.
+          .finally(() => {
+            pendingShots--;
+            renderCount();
+            renderStrip();
+          });
       }
 
       // Reviewing never ends the session — the stream keeps running behind

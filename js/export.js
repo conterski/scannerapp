@@ -14,7 +14,13 @@
   const DOWNLOAD_STAGGER_MS = 350;
   const OBJECT_URL_LIFETIME_MS = 30000;
 
-  const FILENAME_INDEX_DIGITS = 2;
+  // Page order has to survive the hand-off: a receiving app may lay the files
+  // out by name or by date, and identical timestamps leave it to sort ties
+  // however it likes — which is how a three-photo share can arrive shuffled.
+  // Numbering every file and dating them a second apart, both ascending, makes
+  // every reading of the set agree with the page list on screen.
+  const FILENAME_MIN_INDEX_DIGITS = 2;
+  const FILENAME_DATE_STEP_MS = 1000;
 
   // ---------------------------------------------------------------
   // Public exports
@@ -96,10 +102,15 @@
 
   function toNumberedImageFiles(scanBlobs) {
     const sessionTimestamp = timestamp();
+    // Wide enough for the last page, so page 100 can never sort before 99.
+    const digits = Math.max(FILENAME_MIN_INDEX_DIGITS, String(scanBlobs.length).length);
+    const firstModified = Date.now();
     return scanBlobs.map((blob, index) => {
-      const pageNumber = String(index + 1).padStart(FILENAME_INDEX_DIGITS, "0");
-      return new File([blob], `scan-${sessionTimestamp}-${pageNumber}.jpg`,
-        { type: "image/jpeg" });
+      const pageNumber = String(index + 1).padStart(digits, "0");
+      return new File([blob], `scan-${sessionTimestamp}-${pageNumber}.jpg`, {
+        type: "image/jpeg",
+        lastModified: firstModified + index * FILENAME_DATE_STEP_MS,
+      });
     });
   }
 

@@ -15,6 +15,9 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   twice the size of the setting off; turn it off to keep files smaller. It
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
+- **Settings** — the ⚙ button in the header holds the toggles below (High
+  detail capture, Compact scans, and the message box); ☑ selects pages and the
+  bins clear the tab or every tab.
 - **Tabs** — small numbered tabs above the pages, each its own set of scans
   with its own export; **+** opens the next. Keep batches of receipts apart
   without exporting and clearing in between. An emptied tab disappears when

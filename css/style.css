@@ -36,8 +36,9 @@ html, body {
   backdrop-filter: blur(10px);
   z-index: 10;
 }
-.app-header h1 { font-size: 20px; font-weight: 700; }
-.status { font-size: 12px; color: var(--text-dim); }
+.app-logo { flex: 0 0 auto; border-radius: 7px; }
+/* Its own row, and only while there is a message: the header is one row at rest. */
+.status { flex-basis: 100%; font-size: 12px; color: var(--text-dim); }
 
 .view { padding: 8px 16px calc(24px + env(safe-area-inset-bottom)); max-width: 720px; margin: 0 auto; }
 /* The list scrolls clear of its fixed action bar; the editor has no bar. */
@@ -116,14 +117,13 @@ html, body {
 .action-tab:not(:disabled):active { background: var(--surface-2); }
 .action-tab:disabled { opacity: 0.4; cursor: default; }
 
-/* Compact scans storage toggle */
+/* A settings row: the checkbox, its name and what it does. */
 .compact-toggle {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 12px;
   padding: 12px 14px;
-  background: var(--surface);
+  background: var(--surface-2);
   border-radius: var(--radius);
   cursor: pointer;
   user-select: none;
@@ -144,10 +144,48 @@ html, body {
 .btn-danger:not(:disabled):active { background: #dc2626; }
 .btn-danger-ghost { background: var(--surface-2); color: var(--danger); }
 
-.list-toolbar { display: flex; gap: 8px; margin-left: auto; }
+/* Settings and the toolbar travel together at the right end of the row,
+   settings leftmost, whether or not the toolbar has anything to show. */
+#settingsBtn { margin-left: auto; }
+.list-toolbar { display: flex; gap: 6px; }
+
+/* Header actions: square, icon-only, thumb-sized. */
+.icon-btn {
+  appearance: none;
+  border: none;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--surface-2);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 0.06s ease, background 0.15s ease;
+}
+.icon-btn:active { transform: scale(0.94); }
+.icon-btn--danger { color: var(--danger); }
+/* Tells the two bins apart without a second glyph. */
+.icon-btn--all { flex-direction: column; font-size: 15px; gap: 1px; }
+.icon-btn--all::after { content: "all"; font-size: 8px; font-weight: 700; letter-spacing: 0.3px; }
+
 /* The tabs: one page set each, the one on screen in the primary colour. In
-   the header, so they stay put under it while the list scrolls. */
-.tab-strip { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+   the header, so they stay put under it while the list scrolls; they share
+   the row with the actions and scroll sideways once there are many. */
+.tab-strip {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab-strip .btn { flex: 0 0 auto; }
 .select-bar { display: flex; gap: 10px; margin-top: 14px; }
 .select-bar .btn { flex: 1; }
 

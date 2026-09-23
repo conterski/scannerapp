@@ -135,43 +135,45 @@
     });
   }
 
-  /** Sharpness of the grabbed `frame` over `region`, given in video pixels.
-   *  Read from the grab, not the video: the video may already be showing the
-   *  next frame by the time it is read again. */
-  function sharpnessOf(frame, video, region) {
-    const scale = frame.width / ImageUtils.sourceDimensions(video).width;
-    return FrameSharpness.measure(frame, {
-      x: region.x * scale, y: region.y * scale, width: region.width * scale, height: region.height * scale,
-    });
+  /** Sharpness of the video's current frame over `region`, in video pixels.
+   *  Reads the video rather than a grab of it: the measure only needs 384px
+   *  (FrameSharpness scales the region down), so scoring this way costs a
+   *  fraction of a full-resolution grab. Safe as long as the caller grabs in
+   *  the same task — a video element cannot advance a frame mid-task, and it
+   *  is only a later read, after an await, that would see a different one. */
+  function sharpnessOf(video, region) {
+    return FrameSharpness.measure(video, region);
   }
 
   /**
-   * The sharpest of the next FRAMES_PER_SHOT frames, as grabFrame returns
-   * them, or null while the stream has no frame. The first is taken
-   * synchronously, so a tap still captures what the user saw; the rest follow
-   * on the video's own frame callbacks. A frame that loses is released at
-   * once — each is a full-resolution one.
+   * The sharpest of the next FRAMES_PER_SHOT frames, or null while the stream
+   * has no frame. The first is taken synchronously, so a tap still captures
+   * what the user saw; the rest follow on the video's own frame callbacks.
+   *
+   * Every frame is scored, but only one that beats the best so far is grabbed
+   * — a grab is a full-resolution draw and a score is a 384px one, so paying
+   * for the grab only on a winner is what keeps the preview moving under a
+   * burst of taps. The loser it replaces is released at once rather than left
+   * to the collector.
+   *
    * @param region  { x, y, width, height } in video pixels to score, or null
    *                for the middle of the frame
    */
   async function grabSharpest(video, region) {
-    let best = grabFrame(video);
-    if (!best) return null;
     // A degenerate box — an outline collapsed to a line — is no region at all.
     const scored = region && region.width >= 1 && region.height >= 1 ? region : centralRegion(video);
-    let bestSharpness = sharpnessOf(best, video, scored);
+    let bestSharpness = sharpnessOf(video, scored);
+    let best = grabFrame(video);
+    if (!best) return null;
     for (let taken = 1; taken < FRAMES_PER_SHOT; taken++) {
       await nextVideoFrame(video);
+      const sharpness = sharpnessOf(video, scored);
+      if (sharpness <= bestSharpness) continue; // this frame costs nothing more
       const frame = grabFrame(video);
       if (!frame) break; // the stream ended under us; the best so far stands
-      const sharpness = sharpnessOf(frame, video, scored);
-      if (sharpness > bestSharpness) {
-        ImageUtils.releaseCanvas(best);
-        best = frame;
-        bestSharpness = sharpness;
-      } else {
-        ImageUtils.releaseCanvas(frame);
-      }
+      ImageUtils.releaseCanvas(best);
+      best = frame;
+      bestSharpness = sharpness;
     }
     return best;
   }
