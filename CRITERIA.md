@@ -81,7 +81,15 @@ scene against the truth — ZERO_CUT_RATE first, then side / corner error, exces
 margin, IoU and the confidence calibration; `robustness()` runs the variant
 suite; `priorCompare()` and `outlineJitter()` cover the camera path. To correct
 a provisional entry: fix the crop in the app's editor, then `exportTruth(name)`
-prints the entry to paste over it with `provisional: false`.
+prints the entry to paste over it with `provisional: false`. `npm run
+grade:testdata` runs the same functions headless.
+
+Alongside the real set, the automated suite (`npm run test:e2e`) grades the
+detector by the same rules on 24 synthetic scenes whose corners are exact —
+backgrounds, tilts, print, light, glare, occluders, framing — against a
+recorded baseline: no scene may become cut and the mean IoU may not fall.
+Rule 6 is measured there too: every scene's scan must be within 1.5% of the
+sheet's true proportions.
 
 Scene hypotheses (pad / page / fold / hand / stack) were measured on
 2026-09-15 as a label derived from the score's evidence — the share of a side's

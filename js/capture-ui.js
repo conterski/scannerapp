@@ -65,7 +65,7 @@
       // ----- rendering -----
 
       /** The frame the camera delivers, and the size the profile keeps of it
-       *  when that is smaller: "3840×2160 · 60 fps → 2850". Shown so a
+       *  when that is smaller: "3024×4032 · 30 fps → 2850". Shown so a
        *  phone that answers a size request with a smaller frame can be seen
        *  to, rather than guessed at. */
       function describeFrame({ width, height, frameRate }) {
