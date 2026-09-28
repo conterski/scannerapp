@@ -58,7 +58,8 @@
       let lastView = null; // the outline's latest reading, for a tap to hand the auto shutter
 
       // Here, beside the handlers they call, which are declared in this scope.
-      const outline = CaptureOutline.create(els.captureOutline, els.captureVideo, { onUpdate: readFrame });
+      const outline = CaptureOutline.create(els.captureOutline, els.captureVideo,
+        { onUpdate: readFrame, onLost: frameReadingEnded });
       const guidance = CaptureGuidance.createPresenter(renderHint);
       const autoShutter = AutoShutter.create({ onFire: shoot, onChange: renderArming });
 
@@ -199,18 +200,22 @@
         if (AutoShutter.isEnabled()) autoShutter.update(view, hint, now);
       }
 
-      /** The outline has stopped reading frames: nothing to advise on, and
-       *  nothing for the auto shutter to wait on. */
-      function restFrameReading() {
-        outline.stop();
+      /** No more frames are being read — the outline was stopped, or lost
+       *  its worker: nothing to advise on, and no hold to keep. */
+      function frameReadingEnded() {
         lastView = null;
         guidance.clear();
-        autoShutter.reset();
+        autoShutter.standDown();
+      }
+
+      function restFrameReading() {
+        outline.stop();
+        frameReadingEnded();
       }
 
       function toggleAuto() {
         AutoShutter.setEnabled(!AutoShutter.isEnabled());
-        autoShutter.reset();
+        autoShutter.standDown();
         renderAuto();
       }
 

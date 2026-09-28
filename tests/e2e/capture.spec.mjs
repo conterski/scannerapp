@@ -43,6 +43,16 @@ test("a phone whose 4:3 frames are small is switched to its larger 16:9 frame, o
   expect(await page.evaluate(() => window.cameraLog.applied.length)).toBe(1);
 });
 
+test("a phone that keeps its small 4:3 frame when asked to switch is not waited on", async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => { window.cameraLog = FakeCamera.install({ scene: "plain-wood-flat", formats: [[1440, 1920]] }); });
+  const clicked = Date.now();
+  await page.locator("#cameraBtn").click();
+  await expect(page.locator("#shutterBtn")).toBeEnabled({ timeout: 60_000 });
+  expect(Date.now() - clicked).toBeLessThan(1500); // the resize deadline is 2 s
+  await expect(page.locator("#frameInfo")).toHaveText("1440×1920 · 30 fps");
+});
+
 test("the outline sits on the page as the letterboxed preview shows it", async ({ page }) => {
   await openApp(page);
   await openCamera(page);
@@ -92,7 +102,12 @@ test("auto capture takes a steady page once, and not again while it stays", asyn
   await expect(page.locator("#shotCount")).toHaveText("1 photo", { timeout: 30_000 });
   await page.waitForTimeout(3000);
   await expect(page.locator("#shotCount")).toHaveText("1 photo");
-  await page.screenshot({ path: test.info().outputPath("capture-screen.png") });
+  // A look at the shots and back, the page still under the camera: not taken again.
+  await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
+  await page.locator("#shotStrip").click();
+  await page.locator("#galleryCloseBtn").click();
+  await page.waitForTimeout(3000);
+  await expect(page.locator("#shotCount")).toHaveText("1 photo");
 });
 
 test("a tap on the shutter becomes a cropped page", async ({ page }) => {

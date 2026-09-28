@@ -29,6 +29,7 @@
 const ASSET_VERSION = self.location.search;
 
 importScripts(...[
+  "worker/opencv-variant.js",
   "worker/geometry.js",
   "worker/pixel-probes.js",
   "worker/candidates.js",
@@ -130,15 +131,8 @@ function ensureInit() {
 // stamping it with the app's version would refetch it on every deploy.
 const OPENCV_BUILD = "opencv-4.13.0-6e9b7a9e";
 
-/** WebAssembly SIMD (Safari 16.4 and later): a module using a SIMD
- *  instruction validates only where the engine has them. */
-function supportsSimd() {
-  return WebAssembly.validate(new Uint8Array([
-    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
-}
-
 async function loadOpenCV() {
-  const dir = `../vendor/${OPENCV_BUILD}/${supportsSimd() ? "simd" : "scalar"}/`;
+  const dir = `../vendor/${OPENCV_BUILD}/${openCvVariant()}/`;
   // The loader reads its settings from a global Module, and would otherwise
   // look for its WebAssembly beside this worker rather than beside itself.
   self.Module = { locateFile: (file) => dir + file };

@@ -97,6 +97,13 @@
     return pageShort * pageShort * PAGE_ASPECT;
   }
 
+  /** Whether `settings` describe a `width` x `height` frame, either way up —
+   *  a phone may report its frame in the sensor's orientation. */
+  function isSameSize(settings, width, height) {
+    return Math.max(settings.width, settings.height) === Math.max(width, height) &&
+      Math.min(settings.width, settings.height) === Math.min(width, height);
+  }
+
   /** Resolves once the video's frames are no longer `width` x `height`, or
    *  at the deadline. */
   function whenResized(video, width, height) {
@@ -309,8 +316,11 @@
       const { videoWidth: width, videoHeight: height } = video;
       const fallbackWorth = pagePixels(fallbackVideo.width.ideal, fallbackVideo.height.ideal, maxEdge);
       if (!track || pagePixels(width, height, maxEdge) >= fallbackWorth) return Promise.resolve();
+      // Listening before asking: the first frame of the new size can land
+      // before the request is even reported done.
+      const resized = whenResized(video, width, height);
       return track.applyConstraints(fallbackVideo)
-        .then(() => whenResized(video, width, height))
+        .then(() => (isSameSize(currentSettings(track), width, height) ? undefined : resized))
         .catch((error) => console.warn("The camera wouldn't switch to its 16:9 frame:", error));
     }
 

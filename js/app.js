@@ -19,6 +19,10 @@
   // A camera shot whose crop reaches this close to the photo's edge (a share
   // of each dimension) has the page running out of the picture: something
   // may be missing, however sure the detector is of the edges it did see.
+  // Tighter than the viewfinder's "Move back" (CaptureGuidance): that one is
+  // advice, read off a rough quick look, and wants room to spare; this one
+  // reads the full detection, whose corners are clamped to the photo's edge
+  // exactly where the page ran off it.
   const CUT_OFF_MARGIN = 0.005;
 
   // Some pickers report no MIME type at all, so an extension is the fallback.
@@ -783,6 +787,7 @@
   async function regenerateOutput(page, sourceCanvas) {
     const isCurrent = renders.claim(page.id);
     const source = sourceCanvas || (await sources.get(page));
+    if (!isCurrent()) return; // superseded while the photo was decoding: no render to pay for
     const profile = ScanQuality.currentProfile();
     const blob = await ScanRenderer.renderScanJpeg(source, page.corners, {
       quarterTurns: page.quarterTurns, maxDim: profile.maxDim, quality: profile.quality,

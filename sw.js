@@ -8,6 +8,11 @@
  * (OpenCV, jsPDF) are held under a hash of vendor/ instead, so a deploy that
  * leaves them alone does not download 3 MB again.
  *
+ * Every URL held is specific to its version — js/ and css/ carry the app's
+ * stamp, the top-level engines the vendor stamp, and OpenCV sits in a folder
+ * named by its build — so while an old version still serves the page of a
+ * newer one, no file of the old can answer for the new.
+ *
  * The page is fetched from the network first, so a new deploy shows up at
  * once when online; the cache answers when the network doesn't within
  * NAVIGATION_TIMEOUT_MS. Everything else precached is answered from the
@@ -19,26 +24,79 @@
  * files change without the stamp moving, and a cache would serve stale ones.
  */
 "use strict";
+/* global openCvVariant */
 
 // <stamp> Written by scripts/stamp.sh at deploy; do not edit by hand.
-const VERSION = "unstamped";
-const VENDOR_VERSION = "unstamped";
-const PRECACHE = [];
+const VERSION = "5245349e8f";
+const VENDOR_VERSION = "30a1b3a46c";
+const PRECACHE = [
+  "css/style.css?v=5245349e8f",
+  "icon-180.png",
+  "icon-512.png",
+  "index.html",
+  "js/app-chrome.js?v=5245349e8f",
+  "js/app.js?v=5245349e8f",
+  "js/auto-shutter.js?v=5245349e8f",
+  "js/camera.js?v=5245349e8f",
+  "js/capture-guidance.js?v=5245349e8f",
+  "js/capture-outline.js?v=5245349e8f",
+  "js/capture-quality.js?v=5245349e8f",
+  "js/capture-rotation.js?v=5245349e8f",
+  "js/capture-ui.js?v=5245349e8f",
+  "js/choice-prompt.js?v=5245349e8f",
+  "js/detect.js?v=5245349e8f",
+  "js/editor.js?v=5245349e8f",
+  "js/export.js?v=5245349e8f",
+  "js/frame-sharpness.js?v=5245349e8f",
+  "js/image-utils.js?v=5245349e8f",
+  "js/job-queue.js?v=5245349e8f",
+  "js/page-list-view.js?v=5245349e8f",
+  "js/page-number.js?v=5245349e8f",
+  "js/page-proportions.js?v=5245349e8f",
+  "js/page-scroll.js?v=5245349e8f",
+  "js/persisted-flag.js?v=5245349e8f",
+  "js/photo-store.js?v=5245349e8f",
+  "js/pointer-drag.js?v=5245349e8f",
+  "js/promise-utils.js?v=5245349e8f",
+  "js/render-tracker.js?v=5245349e8f",
+  "js/scan-quality.js?v=5245349e8f",
+  "js/scan-render.js?v=5245349e8f",
+  "js/scan-worker.js?v=5245349e8f",
+  "js/share-note.js?v=5245349e8f",
+  "js/source-cache.js?v=5245349e8f",
+  "js/store.js?v=5245349e8f",
+  "js/worker/candidates.js?v=5245349e8f",
+  "js/worker/edge-fusion.js?v=5245349e8f",
+  "js/worker/frame.js?v=5245349e8f",
+  "js/worker/geometry.js?v=5245349e8f",
+  "js/worker/grid-evidence.js?v=5245349e8f",
+  "js/worker/line-candidates.js?v=5245349e8f",
+  "js/worker/opencv-variant.js?v=5245349e8f",
+  "js/worker/pixel-probes.js?v=5245349e8f",
+  "js/worker/quad-refine.js?v=5245349e8f",
+  "js/worker/quad-score.js?v=5245349e8f",
+  "js/worker/quad-search.js?v=5245349e8f",
+  "js/worker/side-refit.js?v=5245349e8f",
+  "js/worker/side-verify.js?v=5245349e8f",
+  "manifest.json",
+  "vendor/jspdf.umd.min.js?v=30a1b3a46c",
+  "vendor/opencv-4.13.0-6e9b7a9e/scalar/opencv.js",
+  "vendor/opencv-4.13.0-6e9b7a9e/scalar/opencv_js.wasm",
+  "vendor/opencv-4.13.0-6e9b7a9e/simd/opencv.js",
+  "vendor/opencv-4.13.0-6e9b7a9e/simd/opencv_js.wasm",
+];
 // </stamp>
+
+// Which OpenCV build this device loads, decided as the scan worker decides it.
+importScripts(`js/worker/opencv-variant.js?v=${VERSION}`);
 
 const APP_CACHE = `scannerapp-app-${VERSION}`;
 const VENDOR_CACHE = `scannerapp-vendor-${VENDOR_VERSION}`;
 const OWN_CACHES = /^scannerapp-/;
 const NAVIGATION_TIMEOUT_MS = 3000;
 
-/** WebAssembly SIMD, checked the way the scan worker checks it, so only the
- *  OpenCV variant this device will load is held. */
-function supportsSimd() {
-  return WebAssembly.validate(new Uint8Array([
-    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
-}
-
-const UNUSED_VARIANT = supportsSimd() ? "/scalar/" : "/simd/";
+// Only the OpenCV variant this device will load is held.
+const UNUSED_VARIANT = openCvVariant() === "simd" ? "/scalar/" : "/simd/";
 const isVendor = (path) => path.startsWith("vendor/");
 
 /** Adds whichever of `paths` the cache does not hold yet. */

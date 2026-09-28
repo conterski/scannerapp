@@ -86,13 +86,36 @@ test("the auto shutter re-arms when the page goes or moves, and fires for the ne
   const { machine, events } = shutter();
   machine.update(view(), null, 0);
   machine.update(view(), null, 800);
-  machine.update(null, null, 1000); // the page is taken away
-  machine.update(view(), null, 1500); // the next is laid down
-  machine.update(view(), null, 2300);
+  machine.update(null, null, 1000); // the page is taken away…
+  machine.update(null, null, 1700); // …and stays away
+  machine.update(view(), null, 1800); // the next is laid down
+  machine.update(view(), null, 2600);
   assert.equal(events.fired, 2);
-  machine.update(view({ x0: 0.02, x1: 0.72 }), null, 2500); // moved by 0.13 of the width
-  machine.update(view({ x0: 0.02, x1: 0.72 }), null, 3300);
+  machine.update(view({ x0: 0.02, x1: 0.72 }), null, 2800); // moved by 0.13 of the width
+  machine.update(view({ x0: 0.02, x1: 0.72 }), null, 3600);
   assert.equal(events.fired, 3);
+});
+
+test("a moment without the outline is not the page gone: it is not taken again", () => {
+  const { machine, events } = shutter();
+  machine.update(view(), null, 0);
+  machine.update(view(), null, 800);
+  machine.update(null, null, 1000); // a focus sweep, a shadow: the outline drops out…
+  machine.update(null, null, 1300);
+  for (let t = 1400; t < 4000; t += 120) machine.update(view(), null, t); // …and the same page is back
+  assert.equal(events.fired, 1);
+});
+
+test("standing down drops a hold, but not the memory of the last shot", () => {
+  const { machine, events } = shutter();
+  machine.update(view(), null, 0); // holding
+  machine.standDown();
+  assert.deepEqual(events.states, ["steadying", "searching"]);
+  machine.update(view(), null, 100);
+  machine.update(view(), null, 900); // shot
+  machine.standDown(); // the gallery opened, or the switch was touched
+  for (let t = 1000; t < 4000; t += 120) machine.update(view(), null, t);
+  assert.equal(events.fired, 1);
 });
 
 test("the auto shutter holds back for an unsteady outline or a blocking hint, and restarts its count", () => {

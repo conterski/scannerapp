@@ -78,13 +78,15 @@
   /**
    * @param svg      the overlay <svg>, laid over the video with the same box
    * @param video    the <video> the frames come from
-   * @param options  { onUpdate } — told after every frame the detector reads:
-   *                 the outline as drawn (see corners()) with the page's
-   *                 light and the frame's size — { quad, stability, light,
-   *                 frame } — or null while no outline is shown
+   * @param options  { onUpdate, onLost } — onUpdate is told after every frame
+   *                 the detector reads: the outline as drawn (see corners())
+   *                 with the page's light and the frame's size — { quad,
+   *                 stability, light, frame } — or null while no outline is
+   *                 shown; onLost, that the loop has stopped by itself (its
+   *                 worker failed), so no more updates are coming
    */
   function create(svg, video, options) {
-    const onUpdate = (options && options.onUpdate) || null;
+    const { onUpdate = null, onLost = null } = options || {};
     // The svg is shared across capture sessions; this session's polygon is
     // its only child. Appending instead would leave every earlier session's
     // polygon in place, still holding its last points, to reappear together
@@ -162,6 +164,7 @@
         // session carry on without it.
         console.warn("Live outline stopped:", error);
         stop();
+        if (onLost) onLost();
       } finally {
         isInFlight = false;
       }

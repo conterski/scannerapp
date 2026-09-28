@@ -8,6 +8,9 @@
  * States: "searching" (no page ready), "steadying" (ready, holding), and
  * "waiting" (fired, until the page changes). A tap on the real shutter counts
  * as a shot too, so the auto shutter never takes the page just taken by hand.
+ * "Gone" means gone for GONE_MS, not one missed frame: the outline drops out
+ * for a moment on a focus sweep or a hand's shadow, and a page that is still
+ * there must not be taken again when it comes back.
  *
  * Off by default: a shutter that fires on its own is a change of habit, and
  * the switch is on the capture screen for whoever wants it.
@@ -26,6 +29,10 @@
   // A corner moving this far — a share of the frame's short side — from where
   // the last shot saw it means another page, or this one moved on purpose.
   const REARM_SHIFT = 0.1;
+  // How long no page may be seen before the last one counts as gone. The
+  // outline hides after three missed frames (~360 ms); taking a page away and
+  // laying the next takes longer than both together.
+  const GONE_MS = 600;
 
   const flag = PersistedFlag.create({
     storageKey: "scannerapp:autoCapture",
@@ -40,7 +47,8 @@
   function create({ onFire, onChange }) {
     let state = "searching";
     let steadySince = 0;
-    let lastShot = null; // the view the last shot was taken of
+    let lastShot = null;   // the view the last shot was taken of
+    let unseenSince = null; // while waiting: when the page was last lost from view
 
     function become(next) {
       if (next === state) return;
@@ -48,8 +56,13 @@
       if (onChange) onChange(state);
     }
 
-    function hasMovedOn(view) {
-      if (!view || !view.quad) return true;
+    /** Whether the page last shot has been taken away or moved. */
+    function hasMovedOn(view, now) {
+      if (!view || !view.quad) {
+        if (unseenSince === null) unseenSince = now;
+        return now - unseenSince >= GONE_MS;
+      }
+      unseenSince = null;
       const { width, height } = view.frame;
       const limit = REARM_SHIFT * Math.min(width, height);
       return ImageUtils.CORNER_KEYS.some((key) =>
@@ -59,6 +72,7 @@
     /** A shot was taken of `view` (the outline at the time, or null). */
     function noteShot(view) {
       lastShot = view && view.quad ? view : null;
+      unseenSince = null;
       become(lastShot ? "waiting" : "searching");
     }
 
@@ -70,7 +84,7 @@
      */
     function update(view, hint, now) {
       if (state === "waiting") {
-        if (!hasMovedOn(view)) return;
+        if (!hasMovedOn(view, now)) return;
         become("searching");
       }
       const ready = view && view.quad && view.stability >= MIN_STABILITY && !(hint && hint.blocksAuto);
@@ -81,13 +95,14 @@
       onFire();
     }
 
-    /** Back to searching, forgetting the last shot: the frames stopped. */
-    function reset() {
-      lastShot = null;
-      become("searching");
+    /** The frames have stopped, or the switch was touched: a hold under way
+     *  is dropped, and the ring with it. The last shot is remembered, so the
+     *  page it took is not taken again when the frames come back. */
+    function standDown() {
+      if (state === "steadying") become("searching");
     }
 
-    return { update, noteShot, reset };
+    return { update, noteShot, standDown };
   }
 
   window.AutoShutter = {
