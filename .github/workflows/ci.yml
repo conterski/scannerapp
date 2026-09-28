@@ -21,6 +21,12 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run test:e2e
+      # The build for browsers without WebAssembly SIMD, which Chromium always
+      # has: the detector must answer the same on it.
+      - run: npx playwright test detector
+        env:
+          OPENCV_VARIANT: scalar
+          STRICT_BASELINE: 1
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

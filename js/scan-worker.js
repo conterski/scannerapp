@@ -121,26 +121,27 @@ function ensureInit() {
   return initPromise;
 }
 
+// The OpenCV the worker runs: only the functions the detector and the warp
+// call, with its WebAssembly in a file of its own beside the loader, built in
+// two variants by scripts/build-opencv.sh — which also writes this name.
+// Served unstamped on purpose: the name changes whenever the build does, and
+// stamping it with the app's version would refetch it on every deploy.
+const OPENCV_BUILD = "opencv-4.13.0-6e9b7a9e";
+
+/** WebAssembly SIMD (Safari 16.4 and later): a module using a SIMD
+ *  instruction validates only where the engine has them. */
+function supportsSimd() {
+  return WebAssembly.validate(new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
+}
+
 async function loadOpenCV() {
-  // Deliberately unstamped: opencv.js never changes, and busting it would
-  // cost an ~11 MB refetch on every deploy.
-  importScripts("../vendor/opencv.js");
-  let module = self.cv;
-  // Old Emscripten MODULARIZE builds expose a `.then` shim that resolves with
-  // the module itself — `await cv` loops forever on that thenable. Resolve our
-  // own promise with undefined and stash the module manually.
-  if (module && typeof module.then === "function" && !module.Mat) {
-    await new Promise((resolve) => {
-      module.then((loaded) => {
-        if (loaded && loaded.Mat) self.cv = loaded;
-        resolve();
-      });
-    });
-    module = self.cv;
-  }
-  if (module && !module.Mat) {
-    await new Promise((resolve) => { module.onRuntimeInitialized = resolve; });
-  }
+  const dir = `../vendor/${OPENCV_BUILD}/${supportsSimd() ? "simd" : "scalar"}/`;
+  // The loader reads its settings from a global Module, and would otherwise
+  // look for its WebAssembly beside this worker rather than beside itself.
+  self.Module = { locateFile: (file) => dir + file };
+  importScripts(dir + "opencv.js");
+  self.cv = await self.cv; // the loader hands back a promise of the runtime
   if (!self.cv || !self.cv.Mat) throw new Error("OpenCV failed to initialize");
 }
 

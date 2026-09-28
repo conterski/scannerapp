@@ -458,7 +458,7 @@
   // hands back the shots in one go, so detection never runs between shots.
   // ---------------------------------------------------------------
 
-  /** Starts OpenCV's ~11 MB load the moment the user reaches for a photo, so
+  /** Starts OpenCV's load the moment the user reaches for a photo, so
    *  the batch doesn't wait on the compile after Done. Fire-and-forget: a
    *  failure here surfaces later, where it is already handled. */
   function preloadScannerEngine() {

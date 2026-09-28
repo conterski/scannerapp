@@ -59,7 +59,7 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
 
 **Tech**
 
-Static site, no build step. OpenCV.js (vendored, ~11 MB, lazy-loaded in a Web Worker) does document detection — the paper's outermost boundary is segmented (OTSU / Canny candidates) and a quadrilateral is fitted to its convex hull — plus the perspective warp; [jsPDF](https://github.com/parallax/jsPDF) assembles the PDF. Everything runs client-side.
+Static site, no build step. OpenCV.js does document detection — a ~3 MB WebAssembly build of just the functions the app calls (`scripts/build-opencv.sh`), with SIMD where the browser has it, lazy-loaded in two Web Workers — the paper's outermost boundary is segmented (OTSU / Canny candidates) and a quadrilateral is fitted to its convex hull — plus the perspective warp; [jsPDF](https://github.com/parallax/jsPDF) assembles the PDF. Everything runs client-side.
 
 **Run locally**
 

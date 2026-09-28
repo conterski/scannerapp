@@ -7,8 +7,18 @@
 //   STRICT_BASELINE=1 npx playwright test detector   also demand identical
 //                                                    corners (a rebuilt engine
 //                                                    must change nothing)
+//   OPENCV_VARIANT=scalar ...                        run the build for engines
+//                                                    without WebAssembly SIMD,
+//                                                    which Chromium always has
 import { test, expect } from "@playwright/test";
 import { readFile, writeFile } from "node:fs/promises";
+
+if (process.env.OPENCV_VARIANT === "scalar") {
+  test.beforeEach(async ({ context }) => {
+    await context.route(/\/simd\/opencv(\.js|_js\.wasm)$/, (route) =>
+      route.continue({ url: route.request().url().replace("/simd/", "/scalar/") }));
+  });
+}
 
 const BASELINE_PATH = new URL("../baseline/detector.json", import.meta.url);
 const MEAN_IOU_SLACK = 0.005;

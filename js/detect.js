@@ -1,6 +1,6 @@
-/* detect.js — document corner detection, the perspective warp and capture
- * denoising, all delegated to Web Workers (js/scan-worker.js) so the ~11 MB
- * OpenCV.js compile and every pixel operation stay off the main thread.
+/* detect.js — document corner detection and the perspective warp, both
+ * delegated to Web Workers (js/scan-worker.js) so the OpenCV.js compile and
+ * every pixel operation stay off the main thread.
  * There are two workers, split by cost — see createWorkerChannel.
  *
  * Exposes window.Detect.
@@ -59,7 +59,7 @@
    * One worker and everything belonging to it.
    *
    * There are two, because a batch was bound by a single worker running
-   * detection, the warp and the filter one after another. Measured over five
+   * detection, the warp and the denoise filter it then had one after another. Measured over five
    * pages: 1225ms of detection behind 2427ms of rendering, against a 3866ms
    * wall clock. Detection appeared to cost 3096ms inside that batch and
    * 1225ms alone — the difference was time spent queued, not working.
@@ -84,7 +84,7 @@
         const failure = new Error(event.message || "Scan worker failed");
         pending.forEach((call) => call.reject(failure));
         pending.clear();
-        // Drop the dead worker AND its ~11 MB OpenCV heap. Without terminate()
+        // Drop the dead worker AND its OpenCV heap. Without terminate()
         // that heap survives until GC, on the device least able to spare it.
         shutDown();
       };
@@ -124,8 +124,8 @@
   }
 
   // Detection runs at DETECTION_MAX_EDGE and never grows its worker's heap
-  // past the ~128 MB the module starts with; the warp and the filter are what
-  // take a worker to several hundred. Splitting them that way means the second
+  // past the ~128 MB the module starts with; the warp is what takes a worker
+  // to several hundred. Splitting them that way means the second
   // worker costs one base heap rather than a second peak.
   const detector = createWorkerChannel();
   const renderer = createWorkerChannel();
@@ -133,7 +133,7 @@
   // The detector only works while photos are being added, so its heap is given
   // back once it falls quiet. The delay is long on purpose: scanning comes in
   // bursts, and rebuilding between two batches would make the second pay for
-  // an ~11 MB compile. The renderer is never shut down — adjusting a crop
+  // a fresh OpenCV compile. The renderer is never shut down — adjusting a crop
   // needs it, and that is interactive.
   const DETECTOR_IDLE_SHUTDOWN_MS = 60000;
   let detectorIdleTimer = 0;
@@ -154,7 +154,7 @@
 
   /**
    * Readies the engine. Resolves on the detector, which is what runs first,
-   * and starts the renderer warming without waiting for it — compiling ~11 MB
+   * and starts the renderer warming without waiting for it — compiling OpenCV
    * twice before the first photo would cost more than the overlap saves. The
    * renderer then compiles alongside the first detection and is ready well
    * before the first warp asks for it.
