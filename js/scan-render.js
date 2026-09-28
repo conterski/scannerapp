@@ -34,7 +34,8 @@
   }
 
   /**
-   * Source canvas plus the page's edits → the final scan canvas.
+   * Source canvas plus the page's edits → the scan, as a canvas (the
+   * editor's preview).
    * @param options { quarterTurns, maxDim } — maxDim caps the output's
    *                longest side (Compact mode), omit it for full size
    */
@@ -46,5 +47,16 @@
       { maxDim: settings.maxDim });
   }
 
-  window.ScanRenderer = { renderScan, normalizeQuarterTurns };
+  /**
+   * The same, as the JPEG a page's scan is stored as.
+   * @param options { quarterTurns, maxDim, quality }
+   */
+  function renderScanJpeg(sourceCanvas, corners, options) {
+    return Detect.warpToJpeg(
+      sourceCanvas,
+      rotateCornerLabels(corners, options.quarterTurns || 0),
+      { maxDim: options.maxDim, quality: options.quality });
+  }
+
+  window.ScanRenderer = { renderScan, renderScanJpeg, normalizeQuarterTurns };
 })();

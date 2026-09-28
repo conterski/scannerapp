@@ -758,17 +758,10 @@
     const isCurrent = renders.claim(page.id);
     const source = sourceCanvas || (await sources.get(page));
     const profile = ScanQuality.currentProfile();
-    const scan = await ScanRenderer.renderScan(source, page.corners, {
-      quarterTurns: page.quarterTurns, maxDim: profile.maxDim,
+    const blob = await ScanRenderer.renderScanJpeg(source, page.corners, {
+      quarterTurns: page.quarterTurns, maxDim: profile.maxDim, quality: profile.quality,
     });
-    let blob;
-    try {
-      if (!isCurrent()) return; // superseded by a newer edit
-      blob = await ImageUtils.encodeCanvasToJpeg(scan, profile.quality);
-    } finally {
-      ImageUtils.releaseCanvas(scan); // the warp's output; the JPEG is what is kept
-    }
-    if (!isCurrent()) return;
+    if (!isCurrent()) return; // superseded by a newer edit
     releasePageURL(page);
     page.outputBlob = blob;
     page.outputURL = URL.createObjectURL(blob);

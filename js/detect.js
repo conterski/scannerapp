@@ -99,7 +99,8 @@
       });
     }
 
-    /** Loads OpenCV in this worker once; resolves when it is ready. */
+    /** Loads OpenCV in this worker once; resolves, when it is ready, with
+     *  what the worker said of itself ({ canEncodeJpeg }). */
     function ensureReady() {
       if (!ready) {
         const started = call("init");
@@ -392,6 +393,38 @@
     return canvasFromBuffer(response.buffer, dstW, dstH);
   }
 
+  /**
+   * The deskewed page as the JPEG a scan is stored as, `quality` 0..1. Where
+   * the renderer can encode (it said so at init), the photo goes to it as an
+   * ImageBitmap and comes back as the JPEG: no full-size read of the photo's
+   * pixels, no full-size write of the scan's, and no encode on this thread —
+   * which is the one the page responds to taps on. Elsewhere, the warp and
+   * then the encode here.
+   * @param options { maxDim, quality }
+   */
+  async function warpToJpeg(sourceCanvas, corners, options) {
+    const { maxDim, quality } = options;
+    const { canEncodeJpeg } = await renderer.ensureReady();
+    if (!canEncodeJpeg) {
+      const scan = await warpPerspective(sourceCanvas, corners, { maxDim });
+      try {
+        return await ImageUtils.encodeCanvasToJpeg(scan, quality);
+      } finally {
+        ImageUtils.releaseCanvas(scan);
+      }
+    }
+    const natural = outputSizeFor(corners, sourceCanvas);
+    const { width: dstW, height: dstH } = fitWithin(natural, maxDim);
+    const bitmap = await createImageBitmap(sourceCanvas);
+    const response = await renderer.call("warpJpeg", {
+      bitmap,
+      corners: pickCorners(corners),
+      warpW: natural.width, warpH: natural.height,
+      dstW, dstH, quality,
+    }, [bitmap]);
+    return response.blob;
+  }
+
   /** The deskewed page's size: the proportions its perspective says the
    *  paper has (PageProportions, snapped to a paper size when that close) at
    *  the pixel area of the average of each pair of opposite sides — the
@@ -458,7 +491,7 @@
   }
 
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewPage, warpPerspective,
+    ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewPage, warpPerspective, warpToJpeg,
     fullImageCorners, CONFIDENCE_HIGH, CONFIDENCE_LOW,
   };
 })();

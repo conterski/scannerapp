@@ -134,3 +134,24 @@ test("a scan capped by maxDim is shrunk whole, proportions kept", async ({ page 
   expect(Math.max(capped.width, capped.height)).toBe(600);
   expect(capped.width / capped.height).toBeCloseTo(full.width / full.height, 2);
 });
+
+test("a scan encoded in the worker is the scan the page would have encoded", async ({ page }) => {
+  await page.goto("/tests/e2e/harness.html");
+  const { sizes, meanDifference } = await page.evaluate(async () => {
+    const { canvas, truth } = SyntheticScenes.render(SyntheticScenes.SCENES.find((spec) => spec.name === "carbon-wood"));
+    const inWorker = await Detect.warpToJpeg(canvas, truth, { quality: 0.95 });
+    const onPage = await ImageUtils.encodeCanvasToJpeg(await Detect.warpPerspective(canvas, truth), 0.95);
+    const pixels = async (blob) => {
+      const decoded = await ImageUtils.decodeImageToCanvas(blob, Number.MAX_SAFE_INTEGER);
+      return { width: decoded.width, height: decoded.height, data: ImageUtils.imageDataOf(decoded).data };
+    };
+    const [a, b] = await Promise.all([pixels(inWorker), pixels(onPage)]);
+    let sum = 0;
+    for (let i = 0; i < a.data.length; i++) sum += Math.abs(a.data[i] - b.data[i]);
+    return { sizes: [[a.width, a.height], [b.width, b.height]], meanDifference: sum / a.data.length };
+  });
+  expect(sizes[0]).toEqual(sizes[1]);
+  // The same pixels through the same encoder: any colour or alpha handling
+  // on the way through the ImageBitmap would show here.
+  expect(meanDifference).toBeLessThan(0.5);
+});

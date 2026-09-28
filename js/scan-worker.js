@@ -3,12 +3,14 @@
  * drawn from.
  *
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
- *   init        → loads OpenCV
+ *   init        → loads OpenCV; {canEncodeJpeg}
  *   detect      {width, height, buffer, engine?, debug?, prior?, skip?} → {corners|null, confidence, refinement?}
  *   previewQuad {width, height, buffer}                          → {corners|null, light|null}
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
  *   warp        {width, height, buffer, corners, warpW, warpH, dstW, dstH} → {buffer}
+ *   warpJpeg    {bitmap, corners, warpW, warpH, dstW, dstH, quality} → {blob}
+ *               (only where init answered canEncodeJpeg)
  *
  * The detector lives in worker/, one shared global scope: geometry (pure
  * math), pixel-probes (what the pixels say), candidates (mask → scored
@@ -805,6 +807,38 @@ function warp({ width, height, buffer, corners, warpW, warpH, dstW, dstH }) {
   }
 }
 
+/** Whether this worker can make a JPEG itself — OffscreenCanvas with a 2D
+ *  context and convertToBlob (Safari 16.4+) — so a scan need never pass
+ *  through the page's thread as pixels. */
+function canEncodeJpeg() {
+  try {
+    return typeof OffscreenCanvas === "function" &&
+      typeof OffscreenCanvas.prototype.convertToBlob === "function" &&
+      !!new OffscreenCanvas(1, 1).getContext("2d");
+  } catch (error) {
+    return false;
+  }
+}
+
+/** The whole render of a stored scan here: the photo arrives as an
+ *  ImageBitmap, its pixels are read here, warped, and leave as the JPEG. */
+async function warpJpeg({ bitmap, corners, warpW, warpH, dstW, dstH, quality }) {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const { width, height, data } = context.getImageData(0, 0, canvas.width, canvas.height);
+  const scan = warp({ width, height, buffer: data.buffer, corners, warpW, warpH, dstW, dstH });
+  canvas.width = dstW; // resizing clears it: the photo's pixels go with it
+  canvas.height = dstH;
+  context.putImageData(new ImageData(new Uint8ClampedArray(scan), dstW, dstH), 0, 0);
+  try {
+    return await canvas.convertToBlob({ type: "image/jpeg", quality });
+  } finally {
+    canvas.width = canvas.height = 0; // the scan's pixels, freed now rather than at collection
+  }
+}
+
 // ------------------------------------------------------------------
 // Message dispatch
 // ------------------------------------------------------------------
@@ -827,7 +861,7 @@ function scoreGivenQuad({ width, height, buffer, corners }) {
  *  reply plus any buffers to hand over rather than copy. A Map rather than an
  *  object literal so an unknown type can never resolve to Object.prototype. */
 const HANDLERS = new Map([
-  ["init", () => ({ result: {} })],
+  ["init", () => ({ result: { canEncodeJpeg: canEncodeJpeg() } })],
   ["detect", (payload) => ({ result: detect(payload) })],
   ["verify", ({ strips, corners, width, height }) => ({ result: verifySides(strips, corners, { width, height }) })],
   ["scoreQuad", (payload) => ({ result: scoreGivenQuad(payload) })],
@@ -836,6 +870,7 @@ const HANDLERS = new Map([
     const buffer = warp(payload);
     return { result: { buffer }, transferables: [buffer] };
   }],
+  ["warpJpeg", async (payload) => ({ result: { blob: await warpJpeg(payload) } })],
 ]);
 
 async function handleMessage({ id, type, ...payload }) {
@@ -845,7 +880,7 @@ async function handleMessage({ id, type, ...payload }) {
     return;
   }
   await ensureInit();
-  const { result, transferables } = handler(payload);
+  const { result, transferables } = await handler(payload);
   self.postMessage({ id, ok: true, ...result }, transferables || []);
 }
 

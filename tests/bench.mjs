@@ -5,13 +5,18 @@
 //   npm run bench
 //
 // engineReadyMs    page load to OpenCV ready in both workers
-// detectMs         median detection per synthetic scene (1500x2000)
-// batchMs          ten library photos, picked to all listed and rendered
-// longTaskMs       main-thread time lost to tasks over 50 ms during the batch
+// detectMs         median detection per synthetic scene, at the size a
+//                  high-detail 4:3 photo is kept (2138x2850)
+// batchMs          ten such photos, picked to all listed and rendered
+// blockedMs        main-thread time during the batch lost to stretches of
+//                  over 50 ms in which a 10 ms timer could not run — what
+//                  a user would feel as the page freezing
+// longestBlockMs   the longest of those stretches
 import { chromium } from "@playwright/test";
 import { startStaticServer } from "./helpers/static-server.mjs";
 
 const PORT = 8125;
+const PHOTO_FRAME = [2138, 2850];
 const BATCH = ["plain-wood-flat", "plain-wood-tilt", "plain-dark-tilt", "form-wood", "receipt-dark",
   "carbon-wood", "blue-desk", "lamp-falloff", "a5-landscape", "strong-yaw"];
 
@@ -19,12 +24,6 @@ const server = await startStaticServer(new URL("../", import.meta.url).pathname,
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage();
-  await page.addInitScript(() => {
-    window.longTaskMs = 0;
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) window.longTaskMs += entry.duration;
-    }).observe({ entryTypes: ["longtask"] });
-  });
   await page.goto(`http://localhost:${PORT}/index.html`);
   await page.addScriptTag({ url: "dev/quad-tools.js" });
   await page.addScriptTag({ url: "tests/fixtures/synthetic-scenes.js" });
@@ -39,10 +38,10 @@ try {
     return Math.round(performance.now() - started);
   });
 
-  const { detectMs, files } = await page.evaluate(async (names) => {
+  const { detectMs, files } = await page.evaluate(async ({ names, frame }) => {
     const times = [], files = [];
     for (const name of names) {
-      const { canvas } = SyntheticScenes.render(SyntheticScenes.SCENES.find((spec) => spec.name === name));
+      const { canvas } = SyntheticScenes.render({ ...SyntheticScenes.SCENES.find((spec) => spec.name === name), frame });
       const started = performance.now();
       await Detect.detectCorners(canvas);
       times.push(performance.now() - started);
@@ -51,17 +50,24 @@ try {
     window.benchFiles = files;
     times.sort((a, b) => a - b);
     return { detectMs: Math.round(times[times.length >> 1]), files: files.length };
-  }, BATCH);
+  }, { names: BATCH, frame: PHOTO_FRAME });
 
-  const { batchMs, longTaskMs } = await page.evaluate(async () => {
-    window.longTaskMs = 0;
+  const { batchMs, blockedMs, longestBlockMs } = await page.evaluate(async () => {
+    const TICK_MS = 10, BLOCK_MS = 50;
+    let last = performance.now(), blockedMs = 0, longestBlockMs = 0;
+    const meter = setInterval(() => {
+      const now = performance.now(), gap = now - last;
+      last = now;
+      if (gap > BLOCK_MS) { blockedMs += gap - TICK_MS; longestBlockMs = Math.max(longestBlockMs, gap); }
+    }, TICK_MS);
     const started = performance.now();
     await Scanner.addPhotos(window.benchFiles.map((file) => ({ file, viewfinderCorners: null })), 0);
     while (Scanner.pages.some((p) => !p.outputBlob)) await new Promise((resolve) => setTimeout(resolve, 20));
-    return { batchMs: Math.round(performance.now() - started), longTaskMs: Math.round(window.longTaskMs) };
+    clearInterval(meter);
+    return { batchMs: Math.round(performance.now() - started), blockedMs: Math.round(blockedMs), longestBlockMs: Math.round(longestBlockMs) };
   });
 
-  console.log(JSON.stringify({ engineReadyMs, detectMs, photos: files, batchMs, longTaskMs }));
+  console.log(JSON.stringify({ engineReadyMs, detectMs, photos: files, batchMs, blockedMs, longestBlockMs }));
 } finally {
   await browser.close();
   server.close();
