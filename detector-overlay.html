@@ -68,6 +68,7 @@
 <script src="js/image-utils.js"></script>
 <script src="js/detect.js"></script>
 <script src="js/capture-outline.js"></script>
+<script src="dev/quad-tools.js"></script>
 <script>
 (function () {
   "use strict";
@@ -77,7 +78,7 @@
     "samp1.jpeg","samp2.jpeg","samp3.jpeg","samp4.jpeg","samp5.jpeg","samp6.jpeg"];
   const SIDE_NAMES = ["top", "right", "bottom", "left"];
   const SIDE_LETTERS = "TRBL";
-  const { CORNER_KEYS: KEYS, mapCorners, scaleCorners, quadArea } = ImageUtils;
+  const { CORNER_KEYS: KEYS, mapCorners, scaleCorners } = ImageUtils;
   const KIND_COLOUR = { step: "#3b82f6", shadowStep: "#a78bfa", seam: "#22c55e", line: "#f59e0b", none: "rgba(255,255,255,.35)" };
   const COLOUR = { legacy: "#ef4444", crop: "#3b82f6", truth: "#22c55e", accepted: "rgba(253,224,71,.9)", refused: "rgba(249,115,22,.9)" };
   const DASH = { legacy: [8, 6], truth: [2, 4] };
@@ -124,30 +125,7 @@
     return { quad: mapCorners(marks, ([x, y]) => ({ x: x / 100 * canvas.width, y: y / 100 * canvas.height })), provisional: !!marks.provisional };
   }
 
-  const SIDE_CORNERS = [["tl", "tr"], ["tr", "br"], ["br", "bl"], ["bl", "tl"]]; // by side type
-  const CUT_TOLERANCE_PERCENT = 2; // of the short side, inside the truth: rule 1's blank-margin allowance
-
-  /** How a crop sits against the truth. Side distances are signed along the
-   *  truth's outward normals, in % of the short side (positive = outside). */
-  function gradeQuad(crop, truth, bounds) {
-    const shortSide = Math.min(bounds.width, bounds.height);
-    const centre = { x: mean(KEYS.map((k) => truth[k].x)), y: mean(KEYS.map((k) => truth[k].y)) };
-    const sides = SIDE_CORNERS.map(([a, b]) => {
-      const length = Math.hypot(truth[b].x - truth[a].x, truth[b].y - truth[a].y) || 1;
-      let nx = -(truth[b].y - truth[a].y) / length, ny = (truth[b].x - truth[a].x) / length;
-      if (nx * (centre.x - truth[a].x) + ny * (centre.y - truth[a].y) > 0) { nx = -nx; ny = -ny; }
-      const out = (p) => ((p.x - truth[a].x) * nx + (p.y - truth[a].y) * ny) / shortSide * 100;
-      return +((out(crop[a]) + out(crop[b])) / 2).toFixed(2);
-    });
-    const corners = KEYS.map((k) => Math.hypot(crop[k].x - truth[k].x, crop[k].y - truth[k].y));
-    return {
-      sides, cut: sides.some((d) => d < -CUT_TOLERANCE_PERCENT),
-      sideError: +Math.max(...sides.map(Math.abs)).toFixed(2),
-      excess: +mean(sides.map((d) => Math.max(0, d))).toFixed(2),
-      cornerError: +(Math.max(...corners) / Math.hypot(bounds.width, bounds.height) * 100).toFixed(2),
-      iou: +iou(crop, truth).toFixed(3),
-    };
-  }
+  const { gradeQuad, canonical, maxShiftPercent, homography } = QuadTools;
 
   const stored = (key) => JSON.parse(localStorage.getItem(key) || "{}");
   const baselineKey = (engine) => `${engine}Baseline`;
@@ -159,60 +137,6 @@
     return base ? scaleCorners(base.corners, 1 / base.scale) : null;
   }
   const legacyQuad = (name) => baselineQuad("legacy", name);
-
-  const quadPolygon = (quad) => KEYS.map((k) => quad[k]);
-
-  /** The quad's corners relabelled tl/tr/br/bl by position — a rotated or
-   *  mirrored quad carries its labels round with it. */
-  function canonical(quad) {
-    const points = quadPolygon(quad);
-    const by = (score) => points.reduce((best, p) => (score(p) < score(best) ? p : best));
-    return { tl: by((p) => p.x + p.y), tr: by((p) => p.y - p.x), br: by((p) => -p.x - p.y), bl: by((p) => p.x - p.y) };
-  }
-
-  /** Sutherland–Hodgman clip of convex `subject` by convex `clipper`, in
-   *  either winding: "inside" is the side the clipper's own centroid is on. */
-  function clipPolygon(subject, clipper) {
-    const centroid = { x: clipper.reduce((s, p) => s + p.x, 0) / clipper.length, y: clipper.reduce((s, p) => s + p.y, 0) / clipper.length };
-    let output = subject;
-    for (let i = 0; i < clipper.length && output.length; i++) {
-      const a = clipper[i], b = clipper[(i + 1) % clipper.length];
-      const input = output;
-      output = [];
-      const cross = (p) => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
-      const sign = Math.sign(cross(centroid)) || 1;
-      const inside = (p) => cross(p) * sign >= 0;
-      const meet = (p, q) => {
-        const d = (p.x - q.x) * (a.y - b.y) - (p.y - q.y) * (a.x - b.x);
-        if (d === 0) return q; // p–q runs along the clip edge (two equal quads): it is all inside
-        const t = ((p.x - a.x) * (a.y - b.y) - (p.y - a.y) * (a.x - b.x)) / d;
-        return { x: p.x + t * (q.x - p.x), y: p.y + t * (q.y - p.y) };
-      };
-      for (let j = 0; j < input.length; j++) {
-        const p = input[j], q = input[(j + 1) % input.length];
-        if (inside(q)) { if (!inside(p)) output.push(meet(p, q)); output.push(q); }
-        else if (inside(p)) output.push(meet(p, q));
-      }
-    }
-    return output;
-  }
-
-  function polygonArea(poly) {
-    return Math.abs(poly.reduce((sum, p, i) => sum + p.x * poly[(i + 1) % poly.length].y - poly[(i + 1) % poly.length].x * p.y, 0)) / 2;
-  }
-
-  /** Intersection over union of two quads. */
-  function iou(a, b) {
-    const clipped = clipPolygon(quadPolygon(a), quadPolygon(b));
-    const shared = clipped.length ? polygonArea(clipped) : 0;
-    const union = quadArea(a) + quadArea(b) - shared;
-    return union > 0 ? shared / union : 0;
-  }
-
-  /** The largest corner displacement between two quads, as a percentage of `diagonal`. */
-  function maxShiftPercent(a, b, diagonal) {
-    return Math.max(...KEYS.map((k) => Math.hypot(a[k].x - b[k].x, a[k].y - b[k].y))) / diagonal * 100;
-  }
 
   const round = (value, digits = 2) => (value === null || value === undefined ? "-" : (+value).toFixed(digits));
   const median = (values) => { const sorted = values.slice().sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
@@ -599,30 +523,6 @@
   const gain = (rk, gk, bk) => (r, g, b) => [r * rk, g * gk, b * bk];
   const gamma = (exponent) => (r, g, b) => [r, g, b].map((v) => 255 * Math.pow(v / 255, exponent));
   const gaussian = () => { let u = 0, v = 0; while (!u) u = Math.random(); v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
-
-  /** The homography taking four source points to four destination points,
-   *  as a function on points — for the perspective variant's map. */
-  function homography(from, to) {
-    const rows = [], rhs = [];
-    for (let i = 0; i < 4; i++) {
-      const { x, y } = from[i], { x: u, y: v } = to[i];
-      rows.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); rhs.push(u);
-      rows.push([0, 0, 0, x, y, 1, -v * x, -v * y]); rhs.push(v);
-    }
-    for (let c = 0; c < 8; c++) { // Gaussian elimination with partial pivoting
-      let pivot = c;
-      for (let r = c + 1; r < 8; r++) if (Math.abs(rows[r][c]) > Math.abs(rows[pivot][c])) pivot = r;
-      [rows[c], rows[pivot]] = [rows[pivot], rows[c]]; [rhs[c], rhs[pivot]] = [rhs[pivot], rhs[c]];
-      for (let r = 0; r < 8; r++) {
-        if (r === c) continue;
-        const f = rows[r][c] / rows[c][c];
-        for (let k = c; k < 8; k++) rows[r][k] -= f * rows[c][k];
-        rhs[r] -= f * rhs[c];
-      }
-    }
-    const h = rhs.map((value, i) => value / rows[i][i]);
-    return (p) => { const w = h[6] * p.x + h[7] * p.y + 1; return { x: (h[0] * p.x + h[1] * p.y + h[2]) / w, y: (h[3] * p.x + h[4] * p.y + h[5]) / w }; };
-  }
 
   // Global changes a phone makes between two shots, then the local ones a
   // room makes: a window on one side, a lamp overhead, a hand in the frame.

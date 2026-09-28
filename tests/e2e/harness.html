@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!-- The detector's modules without the app around them, for the Playwright
+     specs. The base puts every URL at the site root, as the app page has
+     them: detect.js starts its worker by a URL relative to the page. -->
+<base href="../../">
+<title>Detector harness</title>
+</head>
+<body>
+<script src="js/promise-utils.js"></script>
+<script src="js/image-utils.js"></script>
+<script src="js/detect.js"></script>
+<script src="dev/quad-tools.js"></script>
+<script src="tests/fixtures/synthetic-scenes.js"></script>
+</body>
+</html>

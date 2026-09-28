@@ -206,7 +206,7 @@ function shouldAttemptSplit(solidity, ownScore) {
  * @param context { width, height, out, maskName }
  */
 function candidateFromPoints(points, context) {
-  const { width, height, out, maskName } = context;
+  const { out, maskName } = context;
   if (points.length < MIN_POINTS_FOR_HULL) return null;
   const flat = [];
   for (const point of points) { flat.push(point.x, point.y); }
@@ -461,7 +461,7 @@ function candidateFromContour(contour, contourArea, context) {
 /** Collects scored quad candidates from every sizable outer contour of a mask.
  *  @param context { width, height, out, maskName, gray } */
 function candidatesFromMask(bin, context) {
-  const { width, height, out, maskName } = context;
+  const { width, height, out } = context;
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
   try {

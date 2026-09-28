@@ -3,3 +3,7 @@ Thumbs.db
 .DS_Store
 testdata/
 __pycache__/
+node_modules/
+test-results/
+playwright-report/
+.opencv-build/

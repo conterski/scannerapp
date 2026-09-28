@@ -1,0 +1,18 @@
+{
+  "name": "scannerapp",
+  "private": true,
+  "description": "Development tooling only: the app itself is a static site with no build step.",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "node --test \"tests/unit/*.test.mjs\"",
+    "test:e2e": "playwright test",
+    "bench": "node tests/bench.mjs",
+    "grade:testdata": "node scripts/grade-testdata.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.56.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0"
+  }
+}

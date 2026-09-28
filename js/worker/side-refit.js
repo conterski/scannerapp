@@ -83,7 +83,7 @@ function refitSides(frame, quad) {
  *  passed. */
 function refitSide(frame, quad, type, palette) {
   const scale = frame.scale;
-  const located = locateEdges(frame, quad, type, scale);
+  const located = locateEdges(frame, quad, type);
   const fit = consensusLine(located, REFIT.inlierTolerance * scale);
   const outcome = { consensus: fit ? fit.consensus : 0, inward: 0, refused: null, located, line: fit && fit.line };
   const refuse = (rule) => ({ ...outcome, refused: rule });
@@ -133,7 +133,7 @@ function beyondTheStretch(frame, quad, type, inliers, palette, scale) {
  * point sits on the edge and not merely near it.
  * @returns an array of REFIT.samples entries, each a point or null
  */
-function locateEdges(frame, quad, type, scale) {
+function locateEdges(frame, quad, type) {
   const side = sideOf(quad, type);
   const normal = outwardNormal(quad, side);
   const reach = Math.round(REFIT.reachOfShortSide * frame.shortSide);
