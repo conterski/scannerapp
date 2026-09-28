@@ -17,11 +17,13 @@ test("the scans export as one PDF, a page each, in order", async ({ page }) => {
   expect(file.suggestedFilename()).toMatch(/^scan-\d{8}-\d{4}\.pdf$/);
   const sizes = pdfPageSizes(await readFile(await file.path()));
   expect(sizes).toHaveLength(2);
-  // Page 1 is the A4 sheet and page 2 the receipt: order kept, and each page
-  // shaped like its scan.
-  const [sheet, receipt] = sizes.map(({ width, height }) => width / height);
-  expect(sheet).toBeGreaterThan(0.6);
-  expect(receipt).toBeLessThan(0.5);
+  // Page 1 is the A4 sheet, photographed tilted: its perspective read, it
+  // snaps to A4 and the PDF page is A4 to the point. Page 2 is the receipt,
+  // no paper size: its own shape, long edge at A4's.
+  const [sheet, receipt] = sizes;
+  expect(sheet).toEqual({ width: 595.28, height: 841.89 });
+  expect(receipt.height).toBeCloseTo(842, 0);
+  expect(receipt.width / receipt.height).toBeCloseTo(80 / 210, 1);
 });
 
 test("the scans export as images numbered in page order", async ({ page }) => {

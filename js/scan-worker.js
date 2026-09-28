@@ -8,7 +8,7 @@
  *   previewQuad {width, height, buffer}                          → {corners|null}
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
- *   warp        {width, height, buffer, corners, dstW, dstH}     → {buffer}
+ *   warp        {width, height, buffer, corners, warpW, warpH, dstW, dstH} → {buffer}
  *
  * The detector lives in worker/, one shared global scope: geometry (pure
  * math), pixel-probes (what the pixels say), candidates (mask → scored
@@ -747,23 +747,31 @@ function previewQuad({ width, height, buffer }) {
 // warp
 // ------------------------------------------------------------------
 
-function warp({ width, height, buffer, corners, dstW, dstH }) {
+/** The page warped flat at warpW x warpH, then — when the output is to be
+ *  smaller — shrunk to dstW x dstH by area averaging, which weighs every
+ *  source pixel rather than skipping some the way a smaller bilinear warp
+ *  would. Both are resampling only: no pixel value is filtered. */
+function warp({ width, height, buffer, corners, warpW, warpH, dstW, dstH }) {
   const { tl, tr, br, bl } = corners;
-  let src = null, srcTri = null, dstTri = null, transform = null, dst = null;
+  let src = null, srcTri = null, dstTri = null, transform = null, warped = null, dst = null;
   try {
     src = cv.matFromImageData(toImageData(width, height, buffer));
     srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
       [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
     dstTri = cv.matFromArray(4, 1, cv.CV_32FC2,
-      [0, 0, dstW, 0, dstW, dstH, 0, dstH]);
+      [0, 0, warpW, 0, warpW, warpH, 0, warpH]);
     transform = cv.getPerspectiveTransform(srcTri, dstTri);
-    dst = new cv.Mat();
-    // Bilinear resampling only — the geometry never filters pixel values.
-    cv.warpPerspective(src, dst, transform, new cv.Size(dstW, dstH),
+    warped = new cv.Mat();
+    cv.warpPerspective(src, warped, transform, new cv.Size(warpW, warpH),
       cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+    if (warpW === dstW && warpH === dstH) return new Uint8ClampedArray(warped.data).buffer;
+    releaseMats(src);
+    src = null; // the source is the largest Mat here: let it go before the resize allocates
+    dst = new cv.Mat();
+    cv.resize(warped, dst, new cv.Size(dstW, dstH), 0, 0, cv.INTER_AREA);
     return new Uint8ClampedArray(dst.data).buffer;
   } finally {
-    releaseMats(src, srcTri, dstTri, transform, dst);
+    releaseMats(src, srcTri, dstTri, transform, warped, dst);
   }
 }
 

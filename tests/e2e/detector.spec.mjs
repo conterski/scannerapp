@@ -93,3 +93,34 @@ test("the detector holds its baseline on the synthetic scenes", async ({ page })
   expect(run.summary.meanIoU).toBeGreaterThanOrEqual(baseline.summary.meanIoU - MEAN_IOU_SLACK);
   if (process.env.STRICT_BASELINE) expect(notIdentical, "corners that changed").toEqual([]);
 });
+
+test("the warp gives every scene its true proportions", async ({ page }) => {
+  await page.goto("/tests/e2e/harness.html");
+  const errors = await page.evaluate(async () => {
+    const errors = {};
+    for (const spec of SyntheticScenes.SCENES) {
+      const { canvas, truth, aspect } = SyntheticScenes.render(spec);
+      const scan = await Detect.warpPerspective(canvas, truth);
+      errors[spec.name] = +Math.abs(scan.width / scan.height / aspect - 1).toFixed(4);
+      ImageUtils.releaseCanvas(scan);
+      ImageUtils.releaseCanvas(canvas);
+    }
+    return errors;
+  });
+  const off = Object.entries(errors).filter(([, error]) => error > 0.015);
+  expect(off, "scenes whose scan is more than 1.5% off the sheet's proportions").toEqual([]);
+});
+
+test("a scan capped by maxDim is shrunk whole, proportions kept", async ({ page }) => {
+  await page.goto("/tests/e2e/harness.html");
+  const { full, capped } = await page.evaluate(async () => {
+    const { canvas, truth } = SyntheticScenes.render(SyntheticScenes.SCENES.find((spec) => spec.name === "form-wood"));
+    const size = (scan) => { const { width, height } = scan; ImageUtils.releaseCanvas(scan); return { width, height }; };
+    return {
+      full: size(await Detect.warpPerspective(canvas, truth)),
+      capped: size(await Detect.warpPerspective(canvas, truth, { maxDim: 600 })),
+    };
+  });
+  expect(Math.max(capped.width, capped.height)).toBe(600);
+  expect(capped.width / capped.height).toBeCloseTo(full.width / full.height, 2);
+});

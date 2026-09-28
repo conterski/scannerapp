@@ -366,42 +366,64 @@
   /**
    * Perspective-warps `sourceCanvas` using corners {tl,tr,br,bl} (source px)
    * into a new canvas holding the deskewed document. A geometric transform
-   * only — pixel values are untouched apart from bilinear resampling.
-   * @param options { maxDim } — caps the output's longest side (OpenCV
-   *                downsamples straight into the smaller target, which is
-   *                what Compact mode uses).
+   * only — pixel values are untouched apart from resampling: bilinear in the
+   * warp, and an area average where the page is then shrunk to fit `maxDim`.
+   * @param options { maxDim } — caps the output's longest side (what Compact
+   *                mode uses). The page is warped at its own size first and
+   *                shrunk after: a bilinear warp straight into a smaller
+   *                target skips source pixels, and fine print aliases.
    */
   async function warpPerspective(sourceCanvas, corners, options) {
     const { maxDim } = options || {};
     await renderer.ensureReady();
-    const { width: dstW, height: dstH } = outputSizeFor(corners, maxDim);
+    const natural = outputSizeFor(corners, sourceCanvas);
+    const { width: dstW, height: dstH } = fitWithin(natural, maxDim);
     const imageData = imageDataOf(sourceCanvas);
     const response = await renderer.call("warp", {
       width: imageData.width,
       height: imageData.height,
       buffer: imageData.data.buffer,
       corners: pickCorners(corners),
+      warpW: natural.width, warpH: natural.height,
       dstW, dstH,
     }, [imageData.data.buffer]);
 
     return canvasFromBuffer(response.buffer, dstW, dstH);
   }
 
-  /** The deskewed page keeps the average length of each pair of opposite
-   *  sides, so its proportions stay close to the real paper. */
-  function outputSizeFor(corners, maxDim) {
+  /** The deskewed page's size: the proportions its perspective says the
+   *  paper has (PageProportions, snapped to a paper size when that close) at
+   *  the pixel area of the average of each pair of opposite sides — the
+   *  measure the page used to be sized by, so the file stays the size it was.
+   *  Where the corners cannot say, those averages as they are. */
+  function outputSizeFor(corners, frameSize) {
     const { tl, tr, br, bl } = corners;
-    let width = Math.max(MIN_WARP_DIMENSION,
-      Math.round((distance(tl, tr) + distance(bl, br)) / 2));
-    let height = Math.max(MIN_WARP_DIMENSION,
-      Math.round((distance(tl, bl) + distance(tr, br)) / 2));
-    const longestSide = Math.max(width, height);
-    if (maxDim && longestSide > maxDim) {
-      const shrink = maxDim / longestSide;
-      width = Math.max(MIN_WARP_DIMENSION, Math.round(width * shrink));
-      height = Math.max(MIN_WARP_DIMENSION, Math.round(height * shrink));
-    }
-    return { width, height };
+    const across = (distance(tl, tr) + distance(bl, br)) / 2;
+    const down = (distance(tl, bl) + distance(tr, br)) / 2;
+    const aspect = pageAspect(corners, frameSize, across, down);
+    const width = aspect ? Math.sqrt(across * down * aspect) : across;
+    const height = aspect ? Math.sqrt(across * down / aspect) : down;
+    return {
+      width: Math.max(MIN_WARP_DIMENSION, Math.round(width)),
+      height: Math.max(MIN_WARP_DIMENSION, Math.round(height)),
+    };
+  }
+
+  function pageAspect(corners, frameSize, across, down) {
+    if (!(across > 0 && down > 0)) return null;
+    const measured = PageProportions.aspectOf(corners, frameSize);
+    return measured === null ? null : PageProportions.snapToPaper(measured);
+  }
+
+  /** `size` shrunk, proportions kept, until its longest side fits `maxDim`. */
+  function fitWithin(size, maxDim) {
+    const longestSide = Math.max(size.width, size.height);
+    if (!maxDim || longestSide <= maxDim) return size;
+    const shrink = maxDim / longestSide;
+    return {
+      width: Math.max(MIN_WARP_DIMENSION, Math.round(size.width * shrink)),
+      height: Math.max(MIN_WARP_DIMENSION, Math.round(size.height * shrink)),
+    };
   }
 
   // ---------------------------------------------------------------

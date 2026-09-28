@@ -6,8 +6,9 @@
 (function () {
   "use strict";
 
-  // Each PDF page matches its image's aspect ratio, with the longest side
-  // normalized to A4's long edge in points.
+  // A page whose scan is a paper size (PageProportions snaps it) is that
+  // paper in the PDF, so it prints at its real size; any other shape keeps its
+  // proportions with the longest side at A4's long edge, in points.
   const A4_LONG_EDGE_PT = 842;
 
   // Safari drops downloads fired back-to-back, so the fallback paces them.
@@ -118,27 +119,25 @@
   // PDF assembly
   // ---------------------------------------------------------------
 
+  /** The JPEGs go in as bytes: jsPDF embeds a JPEG as it is and reads its
+   *  size from the header, so no page is decoded or turned into base64 — a
+   *  third more memory — on the way. */
   async function buildPdf(scanBlobs) {
     const { jsPDF } = window.jspdf;
-    let pdf = null;
+    const pdf = new jsPDF({ unit: "pt", compress: true });
     for (const blob of scanBlobs) {
-      const dataURL = await blobToDataURL(blob);
-      const page = await pageSizeFor(dataURL);
-      const orientation = page.height >= page.width ? "p" : "l";
-      if (pdf) {
-        pdf.addPage([page.width, page.height], orientation);
-      } else {
-        pdf = new jsPDF({
-          unit: "pt", format: [page.width, page.height], orientation, compress: true,
-        });
-      }
-      pdf.addImage(dataURL, "JPEG", 0, 0, page.width, page.height);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const size = pageSizeFor(pdf.getImageProperties(bytes));
+      pdf.addPage([size.width, size.height], size.height >= size.width ? "p" : "l");
+      pdf.addImage(bytes, "JPEG", 0, 0, size.width, size.height);
     }
+    pdf.deletePage(1); // the blank page a jsPDF document opens with
     return pdf.output("blob");
   }
 
-  async function pageSizeFor(dataURL) {
-    const { width, height } = await imageDimensions(dataURL);
+  function pageSizeFor({ width, height }) {
+    const paper = PageProportions.paperFor(width, height);
+    if (paper) return paper.points;
     const scale = A4_LONG_EDGE_PT / Math.max(width, height);
     return { width: width * scale, height: height * scale };
   }
@@ -146,24 +145,6 @@
   // ---------------------------------------------------------------
   // Small helpers
   // ---------------------------------------------------------------
-
-  function blobToDataURL(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  function imageDimensions(dataURL) {
-    return new Promise((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
-      image.onerror = () => reject(new Error("Bad image"));
-      image.src = dataURL;
-    });
-  }
 
   function timestamp() {
     const now = new Date();

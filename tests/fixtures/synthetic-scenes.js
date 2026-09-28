@@ -9,6 +9,8 @@
  * SyntheticScenes.render(spec) → { canvas, truth: {tl,tr,br,bl}, aspect } —
  * truth labelled by position, as the detector labels a crop, and aspect the
  * sheet's true width over height along those labels.
+ * SyntheticScenes.projectSheet(spec, frame) → the corners alone, for tests
+ * of the geometry that need no pixels.
  * SyntheticScenes.SCENES — the detector suite: one spec per situation the
  * app meets (backgrounds, tilts, print, light, occluders, framing).
  *
@@ -119,12 +121,13 @@
 
   /** The sheet's corners in the photo, for a sheet 1 unit tall at the given
    *  pose, sized to cover `fill` of the frame and moved by `offset` (shares of
-   *  the frame). */
+   *  the frame), seen through a lens of `focal` times the long edge. */
   function projectSheet(spec, frame) {
     const aspect = PAPER_ASPECTS[spec.paper];
+    const focalOfLongEdge = spec.focal || FOCAL_OF_LONG_EDGE;
     const R = rotation(spec.pitch || 0, spec.yaw || 0, spec.roll || 0);
     const local = { tl: [-aspect / 2, -0.5], tr: [aspect / 2, -0.5], br: [aspect / 2, 0.5], bl: [-aspect / 2, 0.5] };
-    const focal = FOCAL_OF_LONG_EDGE * Math.max(frame.width, frame.height);
+    const focal = focalOfLongEdge * Math.max(frame.width, frame.height);
     const [offsetX, offsetY] = spec.offset || [0, 0];
     const place = (distance) => {
       const shift = [offsetX * frame.width * distance / focal, offsetY * frame.height * distance / focal];
@@ -316,5 +319,5 @@
     { name: "glare-on-page", paper: "a4", background: "wood", pitch: 10, fill: 0.5, glare: { x: 0.55, y: 0.4, radius: 0.12 } },
   ].map((spec, index) => ({ seed: 1000 + index, ...spec }));
 
-  window.SyntheticScenes = { render, SCENES, PAPER_ASPECTS };
+  window.SyntheticScenes = { render, projectSheet, SCENES, PAPER_ASPECTS };
 })();
