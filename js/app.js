@@ -105,6 +105,31 @@
     ShareNote.init({ onChange: () => { if (pages.length) persistTab(); } });
     await restoreSavedSession(); // repopulate pages before the first paint
     renderPageList();
+    registerOfflineCopy();
+  }
+
+  /** The service worker (sw.js) that keeps the app usable offline — on a
+   *  deployed copy only. Served from this machine, the files change under
+   *  the same stamp while they are being worked on, and a cache would hand
+   *  back the old ones. */
+  function registerOfflineCopy() {
+    const isThisMachine = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+    if (isThisMachine || !("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("sw.js")
+      .catch((error) => console.warn("Offline copy unavailable:", error));
+  }
+
+  /** Asks, once, for the scans to be kept even when the device is short of
+   *  space — and in Safari, which otherwise clears a site's storage after
+   *  seven days without a visit. The browser decides and says nothing;
+   *  either way the app carries on as it was. */
+  let isPersistenceAsked = false;
+  function askToKeepScans() {
+    if (isPersistenceAsked || !(navigator.storage && navigator.storage.persist)) return;
+    isPersistenceAsked = true;
+    navigator.storage.persisted()
+      .then((isKept) => isKept || navigator.storage.persist())
+      .catch((error) => console.warn("Couldn't ask for the scans to be kept:", error));
   }
 
   function wirePhotoInputs() {
@@ -258,6 +283,7 @@
       const wasAppended = position === pages.length;
       const tally = await addPhotoBatch(items, position, busy);
       persistTab();
+      askToKeepScans(); // there is now something worth keeping
       if (!wasAppended) reportInsertPosition(position);
       // Last, so it replaces the placement note: an uncropped page is the more
       // useful thing to know about.

@@ -63,6 +63,10 @@ export default [
     },
   },
   {
+    files: ["sw.js"],
+    languageOptions: { sourceType: "script", globals: globals.serviceworker },
+  },
+  {
     files: ["**/*.mjs"],
     languageOptions: {
       sourceType: "module",

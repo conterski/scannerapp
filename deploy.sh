@@ -14,21 +14,23 @@ URL="https://conterski.github.io/scannerapp/"
 # after a deploy a browser can pair a fresh index.html with a stale app.js.
 # Stamping every js/ and css/ URL with a hash of those trees makes each
 # index.html ask for exactly the bundle it was built against, so only
-# self-consistent versions can be served.
+# self-consistent versions can be served. The service worker's offline copy
+# is keyed the same way, and its engines by a hash of vendor/
+# (scripts/stamp.sh writes both into index.html and sw.js).
 #
-# The hash comes from HEAD's trees, not the working copy: it must describe what
-# is actually being deployed, and it must not change when this script rewrites
-# index.html a moment later.
+# The hashes come from HEAD's trees, not the working copy: they must describe
+# what is actually being deployed, and must not change when this script
+# rewrites index.html and sw.js a moment later.
 stamp=$(git rev-parse "HEAD:js" "HEAD:css" | git hash-object --stdin | cut -c1-10)
-sed -i -E "s#(src=\"js/[A-Za-z0-9_-]+\.js)(\?v=[^\"]*)?\"#\1?v=$stamp\"#g" index.html
-sed -i -E "s#(href=\"css/[A-Za-z0-9_-]+\.css)(\?v=[^\"]*)?\"#\1?v=$stamp\"#g" index.html
+vendor_stamp=$(git rev-parse "HEAD:vendor" | cut -c1-10)
+"$(dirname "$0")/scripts/stamp.sh" "$stamp" "$vendor_stamp"
 
 # Folded into the commit being deployed, so history stays one commit per
-# change. Only ever reached when the stamp actually moved, which means js/ or
-# css/ changed, which means this commit is new and not yet on the remote.
+# change. Only ever reached when a stamp actually moved, which means js/, css/
+# or vendor/ changed, which means this commit is new and not yet on the remote.
 amended=0
-if ! git diff --quiet -- index.html; then
-  git add index.html
+if ! git diff --quiet -- index.html sw.js; then
+  git add index.html sw.js
   git commit --amend --no-edit
   amended=1
 fi
