@@ -4,12 +4,15 @@
  * page whose corners are known.
  *
  * FakeCamera.install({ scene, formats }) — `scene` names a
- * SyntheticScenes spec; `formats` the frame sizes the "device" offers,
+ * SyntheticScenes spec, or is a spec itself; `formats` the frame sizes the
+ * "device" offers,
  * [width, height] in the orientation the page receives them. The format
- * nearest the request's ideal aspect ratio, then its ideal width, is the one
+ * nearest the request's ideal aspect ratio, then its ideal size, is the one
  * delivered — and applyConstraints picks again, as a phone would. A frame is
  * repainted every 33 ms with a pixel of jitter, so frames keep arriving and
  * no two are identical. The scene is cropped to each format, never stretched.
+ * The state returned records every request and reconfiguration, and
+ * `truthInFrame()` gives the page's true corners in the frames being sent.
  *
  * Needs SyntheticScenes. Exposes window.FakeCamera.
  */
@@ -24,23 +27,23 @@
     return typeof value === "object" ? value.ideal ?? value.exact ?? value.max : value;
   }
 
-  /** The offered format a browser would settle on for `video` constraints:
-   *  closest aspect first (the long side over the short side, whichever
-   *  way up), then closest width. */
+  /** The offered format a phone settles on for `video` constraints: the
+   *  closest aspect first (long side over short, whichever way up), and of
+   *  those the closest long side — so a phone whose 4:3 formats are all small
+   *  still hands over a small 4:3 frame, which is the case the app has to
+   *  catch. */
   function chooseFormat(formats, video) {
     const wantWidth = ideal(video && video.width), wantHeight = ideal(video && video.height);
     const wantAspect = ideal(video && video.aspectRatio) ||
-      (wantWidth && wantHeight ? Math.max(wantWidth, wantHeight) / Math.min(wantWidth, wantHeight) : undefined);
-    const longSide = Math.max(wantWidth || 0, wantHeight || 0);
-    const aspectOf = ([w, h]) => Math.max(w, h) / Math.min(w, h);
-    const cost = (format) =>
-      (wantAspect ? Math.abs(aspectOf(format) - wantAspect) / wantAspect : 0) +
-      (longSide ? Math.abs(Math.max(...format) - longSide) / longSide : 0);
-    return formats.reduce((best, format) => (cost(format) < cost(best) ? format : best));
+      (wantWidth && wantHeight ? Math.max(wantWidth, wantHeight) / Math.min(wantWidth, wantHeight) : 1);
+    const wantLong = Math.max(wantWidth || 0, wantHeight || 0);
+    const aspectCost = ([w, h]) => Math.round(Math.abs(Math.max(w, h) / Math.min(w, h) - wantAspect) * 100);
+    const sizeCost = (format) => Math.abs(Math.max(...format) - wantLong);
+    return formats.slice().sort((a, b) => aspectCost(a) - aspectCost(b) || sizeCost(a) - sizeCost(b))[0];
   }
 
   function install({ scene, formats }) {
-    const spec = SyntheticScenes.SCENES.find((candidate) => candidate.name === scene);
+    const spec = typeof scene === "object" ? { seed: 1, ...scene } : SyntheticScenes.SCENES.find((candidate) => candidate.name === scene);
     if (!spec) throw new Error(`No synthetic scene named ${scene}`);
     const rendered = SyntheticScenes.render(spec);
     const state = { requests: [], applied: [] };
@@ -64,6 +67,13 @@
       };
       paint();
       const timer = setInterval(paint, FRAME_INTERVAL_MS);
+      // Where the page's true corners are in the frames being sent.
+      state.truthInFrame = () => {
+        const source = rendered.canvas;
+        const scale = Math.max(canvas.width / source.width, canvas.height / source.height);
+        const dx = (canvas.width - source.width * scale) / 2, dy = (canvas.height - source.height * scale) / 2;
+        return ImageUtils.mapCorners(rendered.truth, (p) => ({ x: p.x * scale + dx, y: p.y * scale + dy }));
+      };
       const stream = canvas.captureStream(30);
       const track = stream.getVideoTracks()[0];
       const stop = track.stop.bind(track);

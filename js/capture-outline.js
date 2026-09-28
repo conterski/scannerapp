@@ -19,7 +19,8 @@
  * A shot reads two things back from it at the tap: `corners()`, the quad
  * itself with how steadily it held, and `region()`, the box it occupies,
  * where the frames a tap compares are judged for sharpness — on the document
- * rather than on the desk around it.
+ * rather than on the desk around it. Between taps, `onUpdate` hands every
+ * reading to the capture screen's hints and auto shutter.
  *
  * Exposes window.CaptureOutline. `create()` is a factory: one instance per
  * capture session, owning its loop and its polygon.
@@ -52,11 +53,11 @@
 
   /**
    * Maps a point in the video's own pixels to the overlay's pixels. The video
-   * is drawn with `object-fit: cover`: scaled by the larger of the two ratios
-   * and centred, so the overflow on one axis is cropped equally at both ends.
+   * is drawn with `object-fit: contain`: scaled by the smaller of the two
+   * ratios and centred, so the bars on one axis are equal at both ends.
    */
-  function coverTransform(videoSize, boxSize) {
-    const scale = Math.max(boxSize.width / videoSize.width, boxSize.height / videoSize.height);
+  function containTransform(videoSize, boxSize) {
+    const scale = Math.min(boxSize.width / videoSize.width, boxSize.height / videoSize.height);
     return {
       scale,
       offsetX: (boxSize.width - videoSize.width * scale) / 2,
@@ -75,10 +76,15 @@
   }
 
   /**
-   * @param svg    the overlay <svg>, laid over the video with the same box
-   * @param video  the <video> the frames come from
+   * @param svg      the overlay <svg>, laid over the video with the same box
+   * @param video    the <video> the frames come from
+   * @param options  { onUpdate } — told after every frame the detector reads:
+   *                 the outline as drawn (see corners()) with the page's
+   *                 light and the frame's size — { quad, stability, light,
+   *                 frame } — or null while no outline is shown
    */
-  function create(svg, video) {
+  function create(svg, video, options) {
+    const onUpdate = (options && options.onUpdate) || null;
     // The svg is shared across capture sessions; this session's polygon is
     // its only child. Appending instead would leave every earlier session's
     // polygon in place, still holding its last points, to reappear together
@@ -105,7 +111,7 @@
       // hidden svg measures 0x0, which is exactly the state the first draw
       // starts from.
       const box = { width: video.clientWidth, height: video.clientHeight };
-      const { scale, offsetX, offsetY } = coverTransform(videoSize, box);
+      const { scale, offsetX, offsetY } = containTransform(videoSize, box);
       svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
       polygon.setAttribute("points", CORNER_KEYS
         .map((key) => `${corners[key].x * scale + offsetX},${corners[key].y * scale + offsetY}`)
@@ -145,8 +151,11 @@
       const requestGeneration = generation;
       isInFlight = true;
       try {
-        const corners = await Detect.previewCorners(video);
-        if (requestGeneration === generation) showResult(corners);
+        const page = await Detect.previewPage(video);
+        if (requestGeneration === generation) {
+          showResult(page && page.corners);
+          report(page);
+        }
       } catch (error) {
         // A dead worker would otherwise be rebuilt on every tick — an outline
         // is not worth a recompile storm. Stop, say so once, and let the
@@ -156,6 +165,12 @@
       } finally {
         isInFlight = false;
       }
+    }
+
+    function report(page) {
+      if (!onUpdate) return;
+      const outline = corners();
+      onUpdate(outline && { ...outline, light: page && page.light, frame: ImageUtils.sourceDimensions(video) });
     }
 
     function tick(now) {

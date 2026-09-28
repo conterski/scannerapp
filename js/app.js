@@ -10,11 +10,16 @@
   "use strict";
 
   // Bounds decoded photos so iOS Safari doesn't run out of canvas memory with
-  // many 12 MP originals: 2850px is 4.6 MP, 18 MB a canvas, and the source
-  // cache holds three. Standard-quality scans are capped at the same size,
+  // many 12 MP originals: 2850px is 6.1 MP for a 4:3 photo, 24 MB a canvas,
+  // and the source cache holds three. Standard-quality scans are capped at the same size,
   // which makes the output cap a no-op unless Compact is on, and high-detail
   // capture keeps this many pixels — the three move together.
   const DECODE_MAX_EDGE = 2850;
+
+  // A camera shot whose crop reaches this close to the photo's edge (a share
+  // of each dimension) has the page running out of the picture: something
+  // may be missing, however sure the detector is of the edges it did see.
+  const CUT_OFF_MARGIN = 0.005;
 
   // Some pickers report no MIME type at all, so an extension is the fallback.
   // A type that IS present and isn't an image must still lose.
@@ -76,6 +81,7 @@
     ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
     CaptureRotation.loadPersistedSetting();
+    AutoShutter.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
     PageNumber.loadPersistedSetting();
     $("highDetailCheck").checked = CaptureQuality.isEnabled();
@@ -211,13 +217,15 @@
   }
 
   /**
-   * @param items    [{ file, viewfinderCorners, stability, quarterTurns }] —
-   *                 the outline shown when a camera shot was taken, as
-   *                 fractions of the frame, and how steadily it held: the
-   *                 prior the detector weighs that page's crop against; null
-   *                 leaves the crop to the detector alone. `quarterTurns` is
-   *                 how the camera screen was set to save that shot; a photo
-   *                 from the library brings its own orientation and has none.
+   * @param items    [{ file, viewfinderCorners, stability, quarterTurns,
+   *                 fromCamera }] — the outline shown when a camera shot was
+   *                 taken, as fractions of the frame, and how steadily it
+   *                 held: the prior the detector weighs that page's crop
+   *                 against; null leaves the crop to the detector alone.
+   *                 `quarterTurns` is how the camera screen was set to save
+   *                 that shot; a photo from the library brings its own
+   *                 orientation and has none. `fromCamera` marks the in-page
+   *                 camera's shots, whose frame is the whole of what was seen.
    * @param insertAt where the new pages go, as an index into `pages`. Omit it
    *                 to ask the user — the picker, rapid capture and the
    *                 single-shot fallback all come through here, so asking once
@@ -352,13 +360,16 @@
   /** The detector runs on the saved photo; a camera shot's outline, the crop
    *  the user framed against, goes along as the prior the detector must beat
    *  clearly to depart from. */
-  async function registerPage({ file, viewfinderCorners, stability, quarterTurns }, decoded, index, tally) {
+  async function registerPage({ file, viewfinderCorners, stability, quarterTurns, fromCamera }, decoded, index, tally) {
     try {
       if (decoded instanceof Error) throw decoded;
       const outline = viewfinderCorners && cornersAtSize(viewfinderCorners, decoded);
       const detected = await detectCornersTallying(decoded, tally, outline && { prior: { quad: outline, stability } });
       const page = createPage(await blobToStore(file, decoded), detected.corners, outline, quarterTurns);
-      page.needsCheck = detected.confidence.overall < Detect.CONFIDENCE_HIGH; // the card asks for a look
+      // The card asks for a look. A library photo reaching its own edge is
+      // most often a scan or a crop already, so only a camera shot counts.
+      page.needsCheck = detected.confidence.overall < Detect.CONFIDENCE_HIGH ||
+        (fromCamera && ImageUtils.touchesFrameEdge(detected.corners, decoded, CUT_OFF_MARGIN));
       if (page.needsCheck) tally.needsCheck++;
       // splice at pages.length is a push, so appending needs no special case.
       pages.splice(index, 0, page);

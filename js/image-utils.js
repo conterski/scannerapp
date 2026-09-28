@@ -36,6 +36,16 @@
     return Math.abs(doubleArea) / 2;
   }
 
+  /** Whether any corner lies within `margin` — a share of each dimension —
+   *  of the edge of a frame of `size`: a page running out of the picture. */
+  function touchesFrameEdge(corners, size, margin) {
+    return CORNER_KEYS.some((key) => {
+      const { x, y } = corners[key];
+      return x <= margin * size.width || x >= (1 - margin) * size.width ||
+        y <= margin * size.height || y >= (1 - margin) * size.height;
+    });
+  }
+
   /** Intrinsic size of anything drawable: <img>, <video>, canvas, ImageBitmap. */
   function sourceDimensions(source) {
     return {
@@ -145,7 +155,7 @@
   }
 
   window.ImageUtils = {
-    CORNER_KEYS, clamp, mapCorners, scaleCorners, quadArea,
+    CORNER_KEYS, clamp, mapCorners, scaleCorners, quadArea, touchesFrameEdge,
     sourceDimensions, createScaledCanvas, decodeImageToCanvas, encodeCanvasToJpeg,
     imageDataOf, createScratchCanvas, thumbnailImage, releaseCanvas,
   };

@@ -185,7 +185,8 @@
   async function previewQuadFor(name, engine) {
     const source = previewSized(await canvasFor(name));
     try {
-      return { corners: await Detect.previewCorners(source, { engine }), width: source.width, height: source.height };
+      const preview = await Detect.previewPage(source, { engine });
+      return { corners: preview && preview.corners, width: source.width, height: source.height };
     } finally {
       ImageUtils.releaseCanvas(source);
     }
@@ -620,7 +621,7 @@
 
   /** The live outline's quad under the same variants, at the preview's own size. */
   window.previewRobustness = function (engine = "refined") {
-    return variantSuite((canvas) => Detect.previewCorners(canvas, { engine }), previewSized);
+    return variantSuite(async (canvas) => { const preview = await Detect.previewPage(canvas, { engine }); return preview && preview.corners; }, previewSized);
   };
 
   // ---------------------------------------------------------------

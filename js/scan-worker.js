@@ -5,7 +5,7 @@
  * Protocol: postMessage({id, type, ...}) → postMessage({id, ok, ...})
  *   init        → loads OpenCV
  *   detect      {width, height, buffer, engine?, debug?, prior?, skip?} → {corners|null, confidence, refinement?}
- *   previewQuad {width, height, buffer}                          → {corners|null}
+ *   previewQuad {width, height, buffer}                          → {corners|null, light|null}
  *   verify      {strips, corners, width, height}                 → {corners, sides}  (side-verify.js)
  *   scoreQuad   {width, height, buffer, corners}                 → {score, frame}   (overlay page only)
  *   warp        {width, height, buffer, corners, warpW, warpH, dstW, dstH} → {buffer}
@@ -722,7 +722,10 @@ function detectByLegacy({ width, height, buffer, wantSegments, chooseBest, skip 
  * refinement, snap or net. Runs at a quarter of detection's pixels and one or
  * two masks instead of five, so it can keep up with a camera feed; the price
  * is that it misses scenes the full detector catches. It only ever draws an
- * outline. The crop still comes from `detect` on the captured photo.
+ * outline and advises; the crop still comes from `detect` on the captured
+ * photo.
+ * @returns { corners, light } — `light` how the page is lit (pageLight), for
+ *          the capture screen's hints; both null when no page is found
  */
 function previewQuad({ width, height, buffer }) {
   const pipeline = createPipeline(width, height);
@@ -737,10 +740,36 @@ function previewQuad({ width, height, buffer }) {
       addThresholdCandidates(pipeline, cv.THRESH_BINARY_INV + cv.THRESH_OTSU, "otsu-inv");
     }
     const best = selectBestCandidate(pipeline.candidates);
-    return { corners: best ? best.corners : null };
+    return best ? { corners: best.corners, light: pageLight(pipeline.gray, best.corners) } : { corners: null, light: null };
   } finally {
     releasePipeline(pipeline);
   }
+}
+
+// The page's light is read over the middle of the quad's box — inset by this
+// share on every side, so the desk showing at a tilted page's corners stays
+// out — from the blurred gray the masks were made from.
+const LIGHT_INSET = 0.15;
+// A gray this high is the sensor saturated: glare, or paper burnt out.
+const CLIPPED_GRAY = 250;
+
+/** How the page is lit: { mean } gray 0–255, and { clipped } the share of it
+ *  saturated. */
+function pageLight(gray, corners) {
+  const box = bboxOf(corners);
+  const insetX = (box.x1 - box.x0) * LIGHT_INSET, insetY = (box.y1 - box.y0) * LIGHT_INSET;
+  const x0 = Math.max(0, Math.round(box.x0 + insetX)), x1 = Math.min(gray.cols, Math.round(box.x1 - insetX));
+  const y0 = Math.max(0, Math.round(box.y0 + insetY)), y1 = Math.min(gray.rows, Math.round(box.y1 - insetY));
+  const data = gray.data;
+  let sum = 0, clipped = 0, count = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let i = y * gray.cols + x0, end = y * gray.cols + x1; i < end; i++) {
+      sum += data[i];
+      if (data[i] >= CLIPPED_GRAY) clipped++;
+      count++;
+    }
+  }
+  return count ? { mean: sum / count, clipped: clipped / count } : null;
 }
 
 // ------------------------------------------------------------------

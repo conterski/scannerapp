@@ -16,7 +16,8 @@
 
   const IDS = [
     "captureView", "captureVideo", "captureOutline", "captureFlash", "captureControls",
-    "shotCount", "frameInfo", "shotStrip", "shutterBtn", "captureDoneBtn", "torchBtn", "rotateBtn",
+    "shotCount", "frameInfo", "captureHint", "shotStrip", "shutterBtn", "captureDoneBtn",
+    "torchBtn", "rotateBtn", "autoBtn",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
   ];
@@ -44,7 +45,6 @@
     const onFallback = (opts && opts.onFallback) || null;
     const els = collectElements();
     const camera = CameraStream.create();
-    const outline = CaptureOutline.create(els.captureOutline, els.captureVideo);
     const binder = createBinder();
 
     return new Promise((resolve) => {
@@ -55,6 +55,12 @@
       // The camera LED, held on for the whole session. Not to be confused with
       // els.captureFlash, which is the white screen blink on each shutter tap.
       let isTorchOn = false;
+      let lastView = null; // the outline's latest reading, for a tap to hand the auto shutter
+
+      // Here, beside the handlers they call, which are declared in this scope.
+      const outline = CaptureOutline.create(els.captureOutline, els.captureVideo, { onUpdate: readFrame });
+      const guidance = CaptureGuidance.createPresenter(renderHint);
+      const autoShutter = AutoShutter.create({ onFire: shoot, onChange: renderArming });
 
       // ----- rendering -----
 
@@ -112,6 +118,23 @@
         flashTimer = setTimeout(() => { els.captureFlash.hidden = true; }, FLASH_MS);
       }
 
+      function renderHint(hint) {
+        els.captureHint.textContent = hint ? hint.text : "";
+        els.captureHint.hidden = !hint;
+      }
+
+      /** The shutter's ring fills while the auto shutter holds a page ready. */
+      function renderArming(state) {
+        els.shutterBtn.classList.toggle("is-arming", state === "steadying");
+      }
+
+      function renderAuto() {
+        const isOn = AutoShutter.isEnabled();
+        els.autoBtn.classList.toggle("is-on", isOn);
+        els.autoBtn.setAttribute("aria-pressed", String(isOn));
+        els.autoBtn.title = isOn ? "Taking a photo when the page holds still — tap to stop" : "Take a photo when the page holds still";
+      }
+
       function showError(message) {
         els.captureErrorText.textContent = message;
         els.captureControls.hidden = true;
@@ -136,6 +159,7 @@
        *  collector — each waiting frame is a full-resolution one. */
       function shoot() {
         if (!accepting) return;
+        autoShutter.noteShot(lastView); // this page is taken: the auto shutter waits for the next
         flash();
         pendingShots++;
         renderCount(); // before any camera work: the tap has to read as taken
@@ -165,11 +189,36 @@
           });
       }
 
+      /** Every frame the outline reads: the hint over the viewfinder, and the
+       *  auto shutter's cue. */
+      function readFrame(view) {
+        lastView = view;
+        const now = performance.now();
+        const hint = CaptureGuidance.hintFor(view, { available: !els.torchBtn.hidden, on: isTorchOn });
+        guidance.update(hint, now);
+        if (AutoShutter.isEnabled()) autoShutter.update(view, hint, now);
+      }
+
+      /** The outline has stopped reading frames: nothing to advise on, and
+       *  nothing for the auto shutter to wait on. */
+      function restFrameReading() {
+        outline.stop();
+        lastView = null;
+        guidance.clear();
+        autoShutter.reset();
+      }
+
+      function toggleAuto() {
+        AutoShutter.setEnabled(!AutoShutter.isEnabled());
+        autoShutter.reset();
+        renderAuto();
+      }
+
       // Reviewing never ends the session — the stream keeps running behind
       // the gallery, so closing it is an instant return to the live preview.
       // The outline rests while the gallery covers it: nothing to draw on.
       function openGallery() {
-        outline.stop();
+        restFrameReading();
         renderGallery();
         els.captureControls.hidden = true; // shutter/counter belong to the preview
         els.galleryView.hidden = false;
@@ -191,7 +240,7 @@
       function finish() {
         if (!accepting) return;
         accepting = false;
-        outline.stop(); // the session is ending; nothing more to frame
+        restFrameReading(); // the session is ending; nothing more to frame
         els.shutterBtn.disabled = true;
         els.captureDoneBtn.disabled = true;
         encodeChain.then(() => {
@@ -210,13 +259,16 @@
         els.captureDoneBtn.disabled = false;
         els.torchBtn.hidden = true;
         els.frameInfo.textContent = ""; // set once the camera says what it delivers
+        renderHint(null);
+        renderArming("searching");
         renderTorch();
         renderRotation();
+        renderAuto();
       }
 
       function teardown() {
         binder.offAll();
-        outline.stop();
+        restFrameReading();
         clearTimeout(flashTimer);
         isTorchOn = false;
         camera.stop(els.captureVideo); // also puts the light out
@@ -235,6 +287,7 @@
         wireGalleryControls();
         wireFallbackControls();
         binder.on(els.torchBtn, "click", toggleTorch);
+        binder.on(els.autoBtn, "click", toggleAuto);
         binder.on(els.rotateBtn, "click", () => { CaptureRotation.cycle(); renderRotation(); });
       }
 
@@ -301,6 +354,8 @@
       // which on iOS shows as the list sliding under the viewfinder.
       PageScroll.freeze();
       resetChrome();
+      // The ring round the shutter fills over the auto shutter's own hold.
+      els.shutterBtn.style.setProperty("--auto-hold", `${AutoShutter.HOLD_MS}ms`);
       els.shutterBtn.disabled = true; // enabled once frames are flowing
       renderCount();
       renderStrip();

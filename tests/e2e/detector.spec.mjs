@@ -38,11 +38,11 @@ async function runSuite(page) {
       const started = performance.now();
       const detected = await Detect.detectCorners(canvas);
       times.push(performance.now() - started);
-      const preview = await Detect.previewCorners(canvas);
+      const preview = await Detect.previewPage(canvas);
       const grade = QuadTools.gradeQuad(detected.corners, truth, canvas);
       scenes[spec.name] = {
         corners: round(detected.corners),
-        preview: round(preview),
+        preview: round(preview && preview.corners),
         confidence: detected.confidence.overall,
         cut: grade.cut, iou: grade.iou, sideError: grade.sideError, excess: grade.excess,
       };

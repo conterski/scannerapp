@@ -53,13 +53,14 @@
     /** Hands the session's photos to the app as named files, each paired
      *  with its viewfinder outline. The files own their bytes, so the store
      *  may be disposed straight afterwards.
-     *  @returns [{ file, viewfinderCorners, stability, quarterTurns }] */
+     *  @returns [{ file, viewfinderCorners, stability, quarterTurns, fromCamera }] */
     function toShots() {
       return shots.map((s, i) => ({
         file: toFile(s.blob, `${FILE_PREFIX}${i + 1}.jpg`),
         viewfinderCorners: s.viewfinderCorners,
         stability: s.stability,
         quarterTurns: s.quarterTurns,
+        fromCamera: true,
       }));
     }
 

@@ -46,6 +46,16 @@
   // no completion, so this is the budget a shot waits, not a measurement.
   const FOCUS_SETTLE_MS = 300;
 
+  // What a frame is worth here: the pixels an A4 page (long side over short,
+  // √2) gets when it fills the frame, once the frame is capped at the kept
+  // size.
+  const PAGE_ASPECT = Math.SQRT2;
+
+  // How long a stream asked for another frame size is given to deliver one.
+  // A browser that keeps the size it had never says so; this is when the
+  // session stops waiting and carries on with it.
+  const RESIZE_TIMEOUT_MS = 2000;
+
   const MESSAGES = {
     insecure: "The camera needs a secure (HTTPS) connection.",
     unsupported: "This browser can’t open the camera inside the page.",
@@ -78,6 +88,24 @@
     const err = new Error(isSecure() ? MESSAGES.unsupported : MESSAGES.insecure);
     err.unsupported = true;
     return err;
+  }
+
+  function pagePixels(width, height, maxEdge) {
+    const scale = Math.min(1, maxEdge / Math.max(width, height));
+    const long = Math.max(width, height) * scale, short = Math.min(width, height) * scale;
+    const pageShort = Math.min(short, long / PAGE_ASPECT);
+    return pageShort * pageShort * PAGE_ASPECT;
+  }
+
+  /** Resolves once the video's frames are no longer `width` x `height`, or
+   *  at the deadline. */
+  function whenResized(video, width, height) {
+    return new Promise((resolve) => {
+      const done = () => { clearTimeout(deadline); video.removeEventListener("resize", onResize); resolve(); };
+      const onResize = () => { if (video.videoWidth !== width || video.videoHeight !== height) done(); };
+      const deadline = setTimeout(done, RESIZE_TIMEOUT_MS);
+      video.addEventListener("resize", onResize);
+    });
   }
 
   /** Resolves once the video reports real dimensions — before that,
@@ -270,6 +298,22 @@
         .then(() => PromiseUtils.delay(FOCUS_SETTLE_MS));
     }
 
+    /** The profile asks for a 4:3 frame; a phone that hands one over too
+     *  small to beat its 16:9 frame — some offer 4:3 only at a video-call
+     *  size — is asked again for the 16:9 frame. Once per start, and nothing
+     *  remembered: each session asks the phone afresh. A refusal leaves the
+     *  frame it has. */
+    function preferLargerPage(video) {
+      const track = videoTrack();
+      const { maxEdge, fallbackVideo } = CaptureQuality.currentProfile();
+      const { videoWidth: width, videoHeight: height } = video;
+      const fallbackWorth = pagePixels(fallbackVideo.width.ideal, fallbackVideo.height.ideal, maxEdge);
+      if (!track || pagePixels(width, height, maxEdge) >= fallbackWorth) return Promise.resolve();
+      return track.applyConstraints(fallbackVideo)
+        .then(() => whenResized(video, width, height))
+        .catch((error) => console.warn("The camera wouldn't switch to its 16:9 frame:", error));
+    }
+
     /** Switches the camera light. Rejects if the device refuses, so the caller
      *  can put its control back rather than showing a state that isn't real. */
     function setTorch(on) {
@@ -300,6 +344,7 @@
         // A start that fails must not leave the camera running behind the
         // error panel.
         return whenSized(video)
+          .then(() => preferLargerPage(video))
           .then(keepFocusing)
           .catch((error) => { stop(video); throw error; });
       });

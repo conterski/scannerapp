@@ -177,10 +177,12 @@
       <span id="shotCount" class="shot-count">0 photos</span>
       <span id="frameInfo" class="frame-info"></span>
       <div class="capture-tools">
+        <button id="autoBtn" class="torch-btn auto-btn" type="button" aria-pressed="false">AUTO</button>
         <button id="rotateBtn" class="torch-btn" type="button" title="Photos saved as the camera sees them" aria-label="Photos saved as the camera sees them"><span class="rotate-glyph">&#10227;</span></button>
         <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
       </div>
     </div>
+    <p id="captureHint" class="capture-hint" aria-live="polite" hidden></p>
     <div class="capture-bottom">
       <button id="shotStrip" class="shot-strip capture-side capture-side-left" type="button" title="Review photos" hidden></button>
       <button id="shutterBtn" class="shutter" type="button" title="Take photo"></button>
@@ -223,6 +225,8 @@
 <script src="js/camera.js?v=7bacf9a2c8"></script>
 <script src="js/photo-store.js?v=7bacf9a2c8"></script>
 <script src="js/capture-outline.js?v=7bacf9a2c8"></script>
+<script src="js/capture-guidance.js?v=7bacf9a2c8"></script>
+<script src="js/auto-shutter.js?v=7bacf9a2c8"></script>
 <script src="js/capture-ui.js?v=7bacf9a2c8"></script>
 <script src="js/editor.js?v=7bacf9a2c8"></script>
 <script src="js/share-note.js?v=7bacf9a2c8"></script>

@@ -295,14 +295,15 @@
 
   /**
    * Where the document appears to be, for the live viewfinder outline — not
-   * where it will be cropped. Runs on the detector, which is idle while the
-   * camera is open; each call also re-arms its idle shutdown, which is what
-   * keeps it warm for the whole session.
+   * where it will be cropped — and how it is lit. Runs on the detector, which
+   * is idle while the camera is open; each call also re-arms its idle
+   * shutdown, which is what keeps it warm for the whole session.
    * @param frameSource  anything drawable with a size: the <video> element
-   * @returns corners {tl,tr,br,bl} in the frame's own pixels, or null when
-   *          nothing plausible is in view
+   * @returns { corners, light } — corners {tl,tr,br,bl} in the frame's own
+   *          pixels, light { mean, clipped } over the page (see the worker's
+   *          pageLight) — or null when nothing plausible is in view
    */
-  async function previewCorners(frameSource, options) {
+  async function previewPage(frameSource, options) {
     const bounds = ImageUtils.sourceDimensions(frameSource);
     if (!bounds.width || !bounds.height) return null;
     await detector.ensureReady();
@@ -315,7 +316,7 @@
     }, [imageData.data.buffer]);
     if (!response.corners) return null;
     const corners = toFullResolutionCorners(response.corners, scale, bounds);
-    return isPlausibleDocumentQuad(corners, bounds) ? corners : null;
+    return isPlausibleDocumentQuad(corners, bounds) ? { corners, light: response.light } : null;
   }
 
   // Which detector answers. "refined" is the legacy pipeline's crop
@@ -457,7 +458,7 @@
   }
 
   window.Detect = {
-    ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewCorners, warpPerspective,
+    ensureOpenCV, detectCorners, detectDebug, scoreQuad, previewPage, warpPerspective,
     fullImageCorners, CONFIDENCE_HIGH, CONFIDENCE_LOW,
   };
 })();
