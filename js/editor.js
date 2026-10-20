@@ -1,7 +1,9 @@
-/* editor.js — the crop editor UI: the staged photo, its four corner handles
- * and four edge handles, the magnifier loupe, rotation controls and the live
- * preview. The warp itself lives in ScanRenderer; this file only decides which
- * corners to warp with. Exposes window.Editor.
+/* editor.js — the crop editor UI. A page opens on its cropped result alone;
+ * Edit swaps that for the whole photo with its four corner handles, four
+ * edge handles and magnifier loupe, and Apply swaps back to the result of
+ * the new crop. Rotation turns the result. The warp itself lives in
+ * ScanRenderer; this file only decides which corners to warp with. Exposes
+ * window.Editor.
  */
 (function () {
   "use strict";
@@ -17,8 +19,11 @@
   const STAGE_MIN_HEIGHT = 120;
   const MAX_DEVICE_PIXEL_RATIO = 2; // beyond this the crispness isn't worth the memory
 
-  const PREVIEW_MAX_EDGE = 500;
-  const PREVIEW_DEBOUNCE_MS = 120;
+  // The cropped result is drawn from the photo scaled to this, enough for the
+  // widest stage at the pixel ratio it is drawn at, and far less than the
+  // photo itself: it is re-rendered on every rotation and every return from
+  // Edit.
+  const RESULT_MAX_EDGE = STAGE_MAX_WIDTH * MAX_DEVICE_PIXEL_RATIO;
 
   const LOUPE_ZOOM = 3;
   const LOUPE_BACKGROUND = "#0d0f13";
@@ -44,11 +49,12 @@
   const $ = (id) => document.getElementById(id);
 
   const elements = {};
-  let session = null; // { source, corners, quarterTurns, scale, resolve, openId }
-  let previewTimer = null;
-  let isPreviewRendering = false;
-  let isPreviewStale = false;
-  let lastOpenId = 0; // bumped each open() so a stale preview never paints
+  // { source, corners, quarterTurns, mode, scale, resolve, openId }; mode is
+  // "cropped" (the result alone) or "edit" (the whole photo and its handles)
+  let session = null;
+  let isResultRendering = false;
+  let isResultStale = false;
+  let lastOpenId = 0; // bumped each open() so a stale result never paints
 
   // ---------------------------------------------------------------
   // Lifecycle
@@ -80,6 +86,7 @@
         corners: cloneCorners(settings.corners),
         viewfinderCorners: settings.viewfinderCorners ? cloneCorners(settings.viewfinderCorners) : null,
         quarterTurns: settings.quarterTurns || 0,
+        mode: "cropped",
         scale: 1,
         resolve,
         openId: ++lastOpenId,
@@ -93,9 +100,19 @@
       // document and would open it part way down. app.js has already stashed
       // it, so starting from the top here costs nothing on the way back.
       window.scrollTo(0, 0);
-      layoutStage();
-      renderPreviewNow();
+      // Cleared so the page before never shows while this one renders.
+      elements.result.width = elements.result.height = 0;
+      setMode("cropped");
     });
+  }
+
+  /** Switches between the cropped result and the whole photo. The controls
+   *  below the stage differ between them, so the stage is laid out again. */
+  function setMode(mode) {
+    session.mode = mode;
+    elements.view.dataset.mode = mode;
+    layoutStage();
+    if (mode === "cropped") renderResult();
   }
 
   function close(shouldApply, navDelta) {
@@ -103,7 +120,6 @@
     // close() used to throw on session.resolve and leave the editing loop
     // hanging — which now also strands the list's saved scroll position.
     if (!session) return;
-    clearTimeout(previewTimer);
     // When navigating to an adjacent page the app immediately re-opens the
     // editor, so don't flip back to the list — that flashes it between pages.
     if (!(shouldApply && navDelta)) {
@@ -133,7 +149,7 @@
     elements.overlay = $("quadOverlay");
     elements.loupe = $("loupe");
     elements.loupeCanvas = $("loupeCanvas");
-    elements.preview = $("previewCanvas");
+    elements.result = $("resultCanvas");
     elements.cornerHandles = {};
     elements.edgeHandles = {};
   }
@@ -154,6 +170,8 @@
   function wireControls() {
     $("rotLeftBtn").addEventListener("click", () => rotateBy(-1));
     $("rotRightBtn").addEventListener("click", () => rotateBy(+1));
+    $("editCropBtn").addEventListener("click", () => setMode("edit"));
+    $("applyCropBtn").addEventListener("click", () => setMode("cropped"));
     $("fullCropBtn").addEventListener("click", resetCornersToFullImage);
     $("redetectBtn").addEventListener("click", redetectCorners);
     $("cancelEditBtn").addEventListener("click", () => close(false));
@@ -162,15 +180,18 @@
     $("editNextBtn").addEventListener("click", () => close(true, +1));
   }
 
+  function isEditing() {
+    return Boolean(session) && session.mode === "edit";
+  }
+
   function rotateBy(quarterTurnDelta) {
     session.quarterTurns = ScanRenderer.normalizeQuarterTurns(session.quarterTurns + quarterTurnDelta);
-    schedulePreview();
+    renderResult();
   }
 
   function resetCornersToFullImage() {
     session.corners = Detect.fullImageCorners(session.source.width, session.source.height);
     positionHandles();
-    schedulePreview();
   }
 
   /** Auto: the automatic crop. For a camera shot that is the crop the
@@ -178,12 +199,11 @@
    *  detector's; for anything else, the detector on the stored photo —
    *  slow enough that the editor can be closed or moved to another page
    *  before it lands, so the result is applied only to the session that
-   *  asked for it, the same guard renderPreview uses. */
+   *  asked for it, the same guard renderResult uses. */
   async function redetectCorners() {
     if (session.viewfinderCorners) {
       session.corners = cloneCorners(session.viewfinderCorners); // the handles move these; the original stays
       positionHandles();
-      schedulePreview();
       return;
     }
     const openId = session.openId;
@@ -192,7 +212,6 @@
       if (!session || session.openId !== openId) return;
       session.corners = corners;
       positionHandles();
-      schedulePreview();
     } catch (error) {
       console.warn("Re-detection failed:", error);
     }
@@ -202,7 +221,9 @@
   // Stage layout and overlay
   // ---------------------------------------------------------------
 
-  /** Fits the source image into the viewport and draws it. */
+  /** Fits the stage into the room the viewport leaves: the whole photo when
+   *  editing, and, for the cropped result — whose shape is not known until it
+   *  has been rendered — that whole room, with the result centred in it. */
   function layoutStage() {
     const source = session.source;
     const availableWidth = Math.min(window.innerWidth - STAGE_HORIZONTAL_MARGIN, STAGE_MAX_WIDTH);
@@ -210,6 +231,11 @@
     // and paddings below. The page sits at scroll 0 whenever this runs.
     const chromeHeight = elements.view.getBoundingClientRect().top + elements.view.scrollHeight - elements.stage.offsetHeight;
     const availableHeight = Math.max(STAGE_MIN_HEIGHT, Math.floor(window.innerHeight - chromeHeight));
+    if (session.mode === "cropped") {
+      elements.stage.style.width = availableWidth + "px";
+      elements.stage.style.height = availableHeight + "px";
+      return;
+    }
     const scale = Math.min(availableWidth / source.width, availableHeight / source.height, 1);
     session.scale = scale;
 
@@ -278,7 +304,7 @@
       updateLoupe(point.x, point.y);
     };
     PointerDrag.startPointerDrag(target, {
-      canStart: () => Boolean(session),
+      canStart: () => isEditing(),
       onDragStart: (event) => { key = cornerAt(event); beginHandleDrag(elements.cornerHandles[key]); moveCorner(event); },
       onDragMove: moveCorner,
       onDragEnd: () => endHandleDrag(elements.cornerHandles[key]),
@@ -308,7 +334,6 @@
   function endHandleDrag(handle) {
     handle.classList.remove("active");
     elements.loupe.hidden = true;
-    schedulePreview();
   }
 
   // ---------------------------------------------------------------
@@ -332,7 +357,7 @@
     };
 
     PointerDrag.startPointerDrag(handle, {
-      canStart: () => Boolean(session),
+      canStart: () => isEditing(),
       onDragStart: (event) => {
         beginHandleDrag(handle);
         pointerOrigin = { x: event.clientX, y: event.clientY };
@@ -406,54 +431,43 @@
   }
 
   // ---------------------------------------------------------------
-  // Live preview
+  // The cropped result
   // ---------------------------------------------------------------
 
-  function schedulePreview() {
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(renderPreview, PREVIEW_DEBOUNCE_MS);
-  }
-
-  /** Used on open and page nav, where the debounce would read as lag. */
-  function renderPreviewNow() {
-    clearTimeout(previewTimer);
-    renderPreview();
-  }
-
-  async function renderPreview() {
+  /** Draws the page as the current corners and rotation would scan it. */
+  async function renderResult() {
     if (!session) return;
-    if (isPreviewRendering) { isPreviewStale = true; return; }
-    isPreviewRendering = true;
+    if (isResultRendering) { isResultStale = true; return; }
+    isResultRendering = true;
     const openId = session.openId;
     try {
-      const scan = await renderPreviewScan();
-      if (session && session.openId === openId) paintPreview(scan);
+      const scan = await renderResultScan();
+      if (session && session.openId === openId) paintResult(scan);
       else ImageUtils.releaseCanvas(scan);
     } catch (error) {
-      console.warn("Preview failed:", error);
+      console.warn("Result failed:", error);
     } finally {
-      isPreviewRendering = false;
-      if (isPreviewStale) {
-        isPreviewStale = false;
-        if (session) schedulePreview();
+      isResultRendering = false;
+      if (isResultStale) {
+        isResultStale = false;
+        if (session) renderResult();
       }
     }
   }
 
-  function renderPreviewScan() {
-    const { canvas, scale } = ImageUtils.createScaledCanvas(session.source, PREVIEW_MAX_EDGE);
+  function renderResultScan() {
+    const { canvas, scale } = ImageUtils.createScaledCanvas(session.source, RESULT_MAX_EDGE);
     // Released on settle rather than straight away: the warp reads the canvas
-    // after awaiting the worker, and a preview runs on every drag and rotation.
+    // after awaiting the worker, and a result is re-rendered on every rotation.
     return ScanRenderer.renderScan(canvas, scaleCorners(session.corners, scale), { quarterTurns: session.quarterTurns })
       .finally(() => ImageUtils.releaseCanvas(canvas));
   }
 
-  /** Copies the scan onto the preview canvas and releases it: one arrives
-   *  per drag step and per rotation. */
-  function paintPreview(scan) {
-    elements.preview.width = scan.width;
-    elements.preview.height = scan.height;
-    elements.preview.getContext("2d").drawImage(scan, 0, 0);
+  /** Copies the scan onto the result canvas and releases it. */
+  function paintResult(scan) {
+    elements.result.width = scan.width;
+    elements.result.height = scan.height;
+    elements.result.getContext("2d").drawImage(scan, 0, 0);
     ImageUtils.releaseCanvas(scan);
   }
 

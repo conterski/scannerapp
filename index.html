@@ -69,31 +69,34 @@
 </main>
 
 <!-- ============ EDITOR VIEW ============ -->
-<section id="editorView" class="view" hidden>
+<section id="editorView" class="view" data-mode="cropped" hidden>
   <div class="editor-stage" id="editorStage">
-    <canvas id="editorCanvas"></canvas>
-    <div class="corner-handle" data-corner="tl"></div>
-    <div class="corner-handle" data-corner="tr"></div>
-    <div class="corner-handle" data-corner="br"></div>
-    <div class="corner-handle" data-corner="bl"></div>
-    <div class="edge-handle" data-edge="top"></div>
-    <div class="edge-handle" data-edge="bottom"></div>
-    <div class="edge-handle" data-edge="left"></div>
-    <div class="edge-handle" data-edge="right"></div>
-    <svg id="quadOverlay" class="quad-overlay"></svg>
-    <div id="loupe" class="loupe" hidden><canvas id="loupeCanvas" width="120" height="120"></canvas></div>
+    <!-- Two views of one page: the crop alone (data-mode="cropped"), and the
+         whole photo with its handles (data-mode="edit"). -->
+    <canvas id="resultCanvas" class="cropped-only"></canvas>
+    <canvas id="editorCanvas" class="edit-only"></canvas>
+    <div class="corner-handle edit-only" data-corner="tl"></div>
+    <div class="corner-handle edit-only" data-corner="tr"></div>
+    <div class="corner-handle edit-only" data-corner="br"></div>
+    <div class="corner-handle edit-only" data-corner="bl"></div>
+    <div class="edge-handle edit-only" data-edge="top"></div>
+    <div class="edge-handle edit-only" data-edge="bottom"></div>
+    <div class="edge-handle edit-only" data-edge="left"></div>
+    <div class="edge-handle edit-only" data-edge="right"></div>
+    <svg id="quadOverlay" class="quad-overlay edit-only"></svg>
+    <div id="loupe" class="loupe edit-only" hidden><canvas id="loupeCanvas" width="120" height="120"></canvas></div>
   </div>
 
   <div class="editor-controls">
-    <div class="control-row">
+    <div class="control-row cropped-only">
       <button id="rotLeftBtn" class="btn btn-small" title="Rotate left">&#8634; 90&deg;</button>
       <button id="rotRightBtn" class="btn btn-small" title="Rotate right">&#8635; 90&deg;</button>
+      <button id="editCropBtn" class="btn btn-small btn-primary" title="Show the whole photo and move the crop">Edit</button>
+    </div>
+    <div class="control-row edit-only">
       <button id="fullCropBtn" class="btn btn-small" title="Reset corners to full image">Full</button>
       <button id="redetectBtn" class="btn btn-small" title="Back to the automatic crop">Auto</button>
-    </div>
-    <div class="preview-row">
-      <span class="preview-label">Preview</span>
-      <canvas id="previewCanvas"></canvas>
+      <button id="applyCropBtn" class="btn btn-small btn-primary" title="Show the cropped result">Apply</button>
     </div>
     <div class="control-row">
       <button id="editPrevBtn" class="btn btn-small btn-nav" title="Previous page">&#9664;</button>
