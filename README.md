@@ -31,10 +31,10 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   mid-session; the choice is remembered. A phone whose browser lists no
   ultra-wide lens doesn't get MACRO or 0.5×. A black frame is never saved:
   the shot waits for a real picture, and says so if it can't get one.
-- **Crop editor, result first** — a page opens on its cropped result alone, at
-  full size. **Edit** shows the actual photo with the crop's corner and edge
-  handles (and **Full** / **Auto**); **Apply** returns to the result of the new
-  crop. Rotation turns the result.
+- **Crop editor** — a page opens on the actual photo with the crop's corner
+  and edge handles (and **Full** / **Auto**). **Apply** shows the cropped
+  result alone, at full size, where it can be turned; **Edit** goes back to
+  the photo.
 - **Advice over the viewfinder** — one line when something stands between the
   frame and a good scan: the page running off the edge, too small, glare,
   too dark (pointing at the light when the phone has one), a steep angle, or

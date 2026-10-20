@@ -1,6 +1,5 @@
-// The crop editor: a page opens on its cropped result alone, Edit shows the
-// whole photo with the crop's handles, and Apply returns to the result of the
-// new crop.
+// The crop editor: a page opens on the whole photo with the crop's handles,
+// Apply shows the cropped result alone, and Edit goes back to the photo.
 import { test, expect } from "@playwright/test";
 import { openApp, sceneJpeg, addPhotos, expectPages } from "./app-helpers.mjs";
 
@@ -12,34 +11,46 @@ async function openEditor(page) {
   await expectPages(page, 1);
   await page.locator(".page-thumb-wrap").first().click();
   await expect(page.locator("#editorView")).toBeVisible();
+}
+
+/** The cropped result, once it has been drawn. */
+async function showResult(page) {
+  await page.locator("#applyCropBtn").click();
   await expect.poll(async () => (await resultSize(page))[0], { timeout: 30_000 }).toBeGreaterThan(0);
 }
 
-test("a page opens on its cropped result alone, with no preview strip", async ({ page }) => {
+test("a page opens on the actual photo with its handles, and no preview strip", async ({ page }) => {
   await openEditor(page);
+  await expect(page.locator("#editorCanvas")).toBeVisible();
+  await expect(page.locator(".corner-handle")).toHaveCount(4);
+  await expect(page.locator(".corner-handle").first()).toBeVisible();
+  await expect(page.locator("#quadOverlay")).toBeVisible();
+  await expect(page.locator("#resultCanvas")).toBeHidden();
+  await expect(page.locator(".preview-row")).toHaveCount(0);
+  await expect(page.locator("#applyCropBtn")).toBeVisible();
+  await expect(page.locator("#editCropBtn")).toBeHidden();
+});
+
+test("Apply shows only the cropped area, and Edit brings the photo back", async ({ page }) => {
+  await openEditor(page);
+  await showResult(page);
   await expect(page.locator("#resultCanvas")).toBeVisible();
   await expect(page.locator("#editorCanvas")).toBeHidden();
   await expect(page.locator(".corner-handle").first()).toBeHidden();
-  await expect(page.locator("#quadOverlay")).toBeHidden();
-  await expect(page.locator(".preview-row")).toHaveCount(0);
-  await expect(page.locator("#editCropBtn")).toBeVisible();
-  await expect(page.locator("#fullCropBtn")).toBeHidden();
   // The result is a scan of a page, not of the photo: A4's shape, upright.
   const [width, height] = await resultSize(page);
   expect(width / height).toBeCloseTo(210 / 297, 1);
-});
-
-test("Edit shows the actual photo with its handles, and Apply returns to the new crop", async ({ page }) => {
-  await openEditor(page);
-  const before = await resultSize(page);
 
   await page.locator("#editCropBtn").click();
   await expect(page.locator("#editorCanvas")).toBeVisible();
   await expect(page.locator("#resultCanvas")).toBeHidden();
-  await expect(page.locator(".corner-handle")).toHaveCount(4);
-  await expect(page.locator(".corner-handle").first()).toBeVisible();
-  await expect(page.locator("#applyCropBtn")).toBeVisible();
-  await expect(page.locator("#editCropBtn")).toBeHidden();
+});
+
+test("a moved corner shows in the cropped result", async ({ page }) => {
+  await openEditor(page);
+  await showResult(page);
+  const before = await resultSize(page);
+  await page.locator("#editCropBtn").click();
 
   // Pull the top-left corner well into the page.
   const stage = await page.locator("#editorStage").boundingBox();
@@ -52,25 +63,24 @@ test("Edit shows the actual photo with its handles, and Apply returns to the new
 
   await page.locator("#applyCropBtn").click();
   await expect(page.locator("#resultCanvas")).toBeVisible();
-  await expect(page.locator("#editorCanvas")).toBeHidden();
   await expect.poll(() => resultSize(page), { timeout: 30_000 }).not.toEqual(before);
 });
 
 test("rotating in the cropped view turns the result", async ({ page }) => {
   await openEditor(page);
+  await showResult(page);
   const [width, height] = await resultSize(page);
   await page.locator("#rotRightBtn").click();
   await expect.poll(() => resultSize(page), { timeout: 30_000 }).toEqual([height, width]);
 });
 
-test("Cancel leaves the editor and the page as it was", async ({ page }) => {
+test("every page opens on the photo, even after the last one was left on the result", async ({ page }) => {
   await openEditor(page);
-  await page.locator("#editCropBtn").click();
+  await showResult(page);
   await page.locator("#cancelEditBtn").click();
   await expect(page.locator("#editorView")).toBeHidden();
   await expect(page.locator(".page-card")).toHaveCount(1);
-  // Opening it again starts on the cropped result, not where it was left.
   await page.locator(".page-thumb-wrap").first().click();
-  await expect(page.locator("#resultCanvas")).toBeVisible();
-  await expect(page.locator("#editorCanvas")).toBeHidden();
+  await expect(page.locator("#editorCanvas")).toBeVisible();
+  await expect(page.locator("#resultCanvas")).toBeHidden();
 });
