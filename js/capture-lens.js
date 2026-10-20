@@ -1,103 +1,131 @@
 /* capture-lens.js — which lens the in-page camera is on and how far it is
  * zoomed, in the terms of the phone's own Camera app.
  *
- * One setting carries both: the zoom step, 0.5×, 1×, 2× or 3×. 0.5× is the
- * ultra-wide lens, the one phones use for close-ups ("macro"); every other
- * step is the main lens, zoomed in for 2× and 3×. Nothing here switches
- * lens by itself — the lens is whatever the step says — which is the point:
- * a camera left to choose its own lens swaps it mid-session.
+ * Two settings carry both. The zoom step — 0.5×, 1×, 2× or 3× — is the
+ * Camera app's row: 0.5× is the ultra-wide lens in full, every other step
+ * the main lens, zoomed in for 2× and 3×. Macro is separate: the ultra-wide
+ * lens again, for how close it can focus, but cropped to its middle so the
+ * viewfinder looks like the standard 1× view and a page is framed as usual.
+ * Nothing here switches lens by itself — the lens is whatever these say —
+ * which is the point: a camera left to choose its own lens swaps it
+ * mid-session.
  *
  * Browsers expose each rear lens as a camera of its own, named by label
  * ("Back Ultra Wide Camera"), and iOS Safari has no zoom control to ask, so
- * zoom here is a centred crop of the frame (see viewFor).
+ * every zoom here is a centred crop of the frame (see viewFor).
  *
- * Exposes window.CaptureLens. The decisions are pure; only the step is
- * remembered, like the other capture settings.
+ * Exposes window.CaptureLens. The decisions are pure; only the step and
+ * macro are remembered, like the other capture settings.
  */
 (function () {
   "use strict";
 
   const STEPS = [0.5, 1, 2, 3];
-  const MACRO_STEP = STEPS[0];
-  const NORMAL_STEP = STEPS[1];
+  const WIDE_STEP = STEPS[0];
+  const MAIN_STEP = STEPS[1];
 
-  const MACRO = "macro";
-  const NORMAL = "normal";
+  // The lenses a phone offers, as they are named here.
+  const ULTRA_WIDE = "ultra-wide";
+  const MAIN = "main";
+
+  // How far Macro crops into the ultra-wide: it sees twice as wide as the
+  // main lens (0.5× against 1×), so the middle half of it is the main lens's
+  // field of view.
+  const MACRO_CROP = 1 / WIDE_STEP;
 
   const BACK_CAMERA = /back|rear|environment/i;
-  const ULTRA_WIDE = /ultra[\s-]?wide/i;
+  const ULTRA_WIDE_LABEL = /ultra[\s-]?wide/i;
   // iOS names the lenses it fuses into one switching camera, and the
   // telephoto on its own; none of them is the plain main lens.
   const NOT_THE_MAIN_LENS = /ultra[\s-]?wide|tele|dual|triple/i;
-  const MAIN_LENS = /^back camera$/i;
+  const MAIN_LABEL = /^back camera$/i;
 
-  const setting = PersistedFlag.createNumber({
+  const stepSetting = PersistedFlag.createNumber({
     storageKey: "scannerapp:captureZoomStep",
     label: "capture zoom",
-    defaultValue: STEPS.indexOf(NORMAL_STEP),
+    defaultValue: STEPS.indexOf(MAIN_STEP),
   });
+  const macroSetting = PersistedFlag.create({
+    storageKey: "scannerapp:captureMacro",
+    label: "macro lens",
+    defaultEnabled: false,
+  });
+
+  function loadPersistedSetting() {
+    stepSetting.load();
+    macroSetting.load();
+  }
 
   /** The step the camera is on, whatever was stored. */
   function step() {
-    return STEPS[setting.get()] || NORMAL_STEP;
+    return STEPS[stepSetting.get()] || MAIN_STEP;
   }
 
   /** Remembers `next`; a value that is not a step leaves the setting alone. */
   function setStep(next) {
     const index = STEPS.indexOf(next);
-    if (index >= 0) setting.set(index);
+    if (index >= 0) stepSetting.set(index);
   }
 
-  /** Where the Macro button goes from `zoomStep`: into the ultra-wide, or
-   *  back to the main lens at 1×. */
-  function macroToggleStep(zoomStep) {
-    return lensFor(zoomStep) === MACRO ? NORMAL_STEP : MACRO_STEP;
-  }
+  function isMacro() { return macroSetting.isEnabled(); }
+  function setMacro(on) { macroSetting.setEnabled(on); }
 
+  /** The lens a step asks for on its own. */
   function lensFor(zoomStep) {
-    return zoomStep < NORMAL_STEP ? MACRO : NORMAL;
+    return zoomStep < MAIN_STEP ? ULTRA_WIDE : MAIN;
   }
 
-  /** The crop-zoom a step asks of its lens: 0.5× and 1× are each lens's own
-   *  full view, and the steps above 1× zoom the main lens in. */
-  function digitalZoomFor(zoomStep) {
-    return Math.max(1, zoomStep);
+  /** The lens the camera should be on: Macro is the ultra-wide whatever the
+   *  step says. */
+  function currentLens() {
+    return isMacro() ? ULTRA_WIDE : lensFor(step());
+  }
+
+  /** The crop-zoom of a step and macro setting: 0.5× and 1× are each lens's
+   *  own full view, 2× and 3× zoom the main lens in, and Macro crops the
+   *  ultra-wide to look like 1×. */
+  function zoomFor(zoomStep, macro) {
+    return macro ? MACRO_CROP : Math.max(1, zoomStep);
+  }
+
+  function zoom() {
+    return zoomFor(step(), isMacro());
   }
 
   /** The part of the frame a zoom shows, centred, as fractions of it —
    *  { x, y, width, height } in 0..1. */
-  function viewFor(zoom) {
-    const share = 1 / Math.max(1, zoom);
+  function viewFor(zoomFactor) {
+    const share = 1 / Math.max(1, zoomFactor);
     return { x: (1 - share) / 2, y: (1 - share) / 2, width: share, height: share };
   }
 
   /** How far in from each edge of the viewfinder's box (`box`, CSS pixels) the
-   *  photo's part of the frame lies at `zoom`. The video is shown whole and
-   *  letterboxed, so magnifying it about the box's centre shows more of the
-   *  frame, top to bottom, than the photo keeps — the rest is hidden, so that
-   *  what is on screen is exactly what a shot keeps.
+   *  photo's part of the frame lies at `zoomFactor`. The video is shown whole
+   *  and letterboxed, so magnifying it about the box's centre shows more of
+   *  the frame, top to bottom, than the photo keeps — the rest is hidden, so
+   *  that what is on screen is exactly what a shot keeps.
    *  @param frame  { width, height } of the video's own pixels */
-  function clipFor(box, frame, zoom) {
+  function clipFor(box, frame, zoomFactor) {
     const scale = Math.min(box.width / frame.width, box.height / frame.height);
-    const x = (box.width - frame.width * scale / zoom) / 2;
-    const y = (box.height - frame.height * scale / zoom) / 2;
+    const x = (box.width - frame.width * scale / zoomFactor) / 2;
+    const y = (box.height - frame.height * scale / zoomFactor) / 2;
     return { top: y, right: x, bottom: y, left: x };
   }
 
   /** The camera for `lens` among what enumerateDevices() lists, or null when
-   *  the phone has none the page can tell apart — a macro button is then
+   *  the phone has none the page can tell apart — Macro and 0.5× are then
    *  hidden, and the main lens is left to the browser's own choice. */
   function pickDevice(devices, lens) {
     const matches = (pattern, exclude) => devices.find((device) =>
       device.kind === "videoinput" && BACK_CAMERA.test(device.label) &&
       pattern.test(device.label) && !(exclude && exclude.test(device.label)));
-    const found = lens === MACRO ? matches(ULTRA_WIDE) : matches(MAIN_LENS, NOT_THE_MAIN_LENS);
+    const found = lens === ULTRA_WIDE ? matches(ULTRA_WIDE_LABEL) : matches(MAIN_LABEL, NOT_THE_MAIN_LENS);
     return found ? found.deviceId : null;
   }
 
   window.CaptureLens = {
-    STEPS, MACRO, NORMAL,
-    loadPersistedSetting: setting.load,
-    step, setStep, macroToggleStep, lensFor, digitalZoomFor, viewFor, clipFor, pickDevice,
+    STEPS, ULTRA_WIDE, MAIN, MACRO_CROP,
+    loadPersistedSetting,
+    step, setStep, isMacro, setMacro, lensFor, currentLens, zoomFor, zoom, viewFor, clipFor, pickDevice,
   };
 })();

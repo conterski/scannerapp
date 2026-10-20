@@ -147,6 +147,16 @@ test("leaving the camera releases the stream", async ({ page }) => {
 
 const activeCamera = (page) => page.evaluate(() => window.cameraLog.activeDeviceId);
 
+/** The zoom the viewfinder is showing: how far it is magnified, and how far in from its box's edges the kept part lies. */
+async function zoomShown(page) {
+  const { zoom, clip } = await page.evaluate(() => {
+    const style = document.getElementById("captureView").style;
+    return { zoom: style.getPropertyValue("--capture-zoom"), clip: style.getPropertyValue("--capture-clip") };
+  });
+  const [vertical, horizontal] = clip.split(" ").map(parseFloat);
+  return { zoom, vertical, horizontal };
+}
+
 test("the main lens is pinned at the start, not left to the phone's fused camera", async ({ page }) => {
   await openApp(page);
   await openCamera(page, { cameras: IPHONE_CAMERAS });
@@ -157,29 +167,59 @@ test("the main lens is pinned at the start, not left to the phone's fused camera
   await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
 });
 
-test("0.5× opens the ultra-wide, and the Macro button and the chips agree both ways", async ({ page }) => {
+test("0.5× is the whole ultra-wide view, and the zoom row and the Macro button take turns", async ({ page }) => {
   await openApp(page);
   await openCamera(page, { cameras: IPHONE_CAMERAS });
 
   await page.locator('.zoom-chip[data-step="0.5"]').click();
   await expect.poll(() => activeCamera(page)).toBe("ultra");
   await expect(page.locator("#shutterBtn")).toBeEnabled();
-  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('.zoom-chip[data-step="0.5"]')).toHaveClass(/is-on/);
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
+  expect(await zoomShown(page)).toMatchObject({ zoom: "1" }); // nothing cropped
 
+  await page.locator('.zoom-chip[data-step="2"]').click();
+  await expect.poll(() => activeCamera(page)).toBe("main");
+  await expect(page.locator('.zoom-chip[data-step="2"]')).toHaveClass(/is-on/);
+});
+
+test("Macro is the ultra-wide cropped to its middle half, so the view looks like 1×", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+
+  await page.locator("#macroBtn").click();
+  await expect.poll(() => activeCamera(page)).toBe("ultra");
+  await expect(page.locator("#shutterBtn")).toBeEnabled();
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".zoom-chip.is-on")).toHaveCount(0); // macro is a view of its own
+  const shown = await zoomShown(page);
+  expect(shown.zoom).toBe("2");
+  expect(shown.vertical).toBeCloseTo(292, 1);
+  expect(shown.horizontal).toBeCloseTo(97.5, 1);
+
+  // What is kept is what is shown: the middle quarter of the ultra-wide's frame.
+  await page.locator("#shutterBtn").click();
+  await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
+  const size = await page.locator("#shotStrip img").evaluate((image) => [image.naturalWidth, image.naturalHeight]);
+  expect(size).toEqual([1512, 2016]);
+
+  // Off again: the zoom step it was on, on its own lens.
   await page.locator("#macroBtn").click();
   await expect.poll(() => activeCamera(page)).toBe("main");
   await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator('.zoom-chip[data-step="1"]')).toHaveClass(/is-on/);
 
-  await page.locator("#macroBtn").click();
+  // Macro from the ultra-wide at 0.5× needs no new camera, only the crop.
+  await page.locator('.zoom-chip[data-step="0.5"]').click();
   await expect.poll(() => activeCamera(page)).toBe("ultra");
-  await page.locator('.zoom-chip[data-step="2"]').click();
-  await expect.poll(() => activeCamera(page)).toBe("main");
-  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
+  const opened = await page.evaluate(() => window.cameraLog.requests.length);
+  await page.locator("#macroBtn").click();
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
+  expect(await page.evaluate(() => window.cameraLog.requests.length)).toBe(opened);
+  expect((await zoomShown(page)).zoom).toBe("2");
 });
 
-test("the lens is remembered for the next time the camera opens", async ({ page }) => {
+test("the lens choice is remembered for the next time the camera opens", async ({ page }) => {
   await openApp(page);
   await openCamera(page, { cameras: IPHONE_CAMERAS });
   await page.locator("#macroBtn").click();
@@ -188,7 +228,7 @@ test("the lens is remembered for the next time the camera opens", async ({ page 
   await expect(page.locator("#captureView")).toBeHidden();
   await openCamera(page, { cameras: IPHONE_CAMERAS });
   expect(await activeCamera(page)).toBe("ultra");
-  await expect(page.locator('.zoom-chip[data-step="0.5"]')).toHaveClass(/is-on/);
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
 });
 
 test("2× stays on the main lens, shows the middle of the frame, and keeps exactly that", async ({ page }) => {

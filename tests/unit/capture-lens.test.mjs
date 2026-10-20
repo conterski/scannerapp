@@ -18,24 +18,40 @@ const TRIPLE_LENS_PHONE = [
 ];
 const ONE_LENS_PHONE = [camera("Front Camera"), camera("Back Camera")];
 
-test("0.5× is the close-up lens and every other step the main one", () => {
+test("0.5× is the ultra-wide lens and every other step the main one", () => {
   assert.deepEqual([...CaptureLens.STEPS], [0.5, 1, 2, 3]);
-  assert.equal(CaptureLens.lensFor(0.5), "macro");
-  for (const step of [1, 2, 3]) assert.equal(CaptureLens.lensFor(step), "normal");
+  assert.equal(CaptureLens.lensFor(0.5), "ultra-wide");
+  for (const step of [1, 2, 3]) assert.equal(CaptureLens.lensFor(step), "main");
 });
 
 test("each lens is its own full view, and 2× and 3× crop the main lens in", () => {
-  assert.deepEqual([0.5, 1, 2, 3].map(CaptureLens.digitalZoomFor), [1, 1, 2, 3]);
+  assert.deepEqual([0.5, 1, 2, 3].map((step) => CaptureLens.zoomFor(step, false)), [1, 1, 2, 3]);
   assert.deepEqual({ ...CaptureLens.viewFor(1) }, { x: 0, y: 0, width: 1, height: 1 });
   const twice = CaptureLens.viewFor(2);
   assert.deepEqual({ ...twice }, { x: 0.25, y: 0.25, width: 0.5, height: 0.5 });
   assert.ok(Math.abs(CaptureLens.viewFor(3).width - 1 / 3) < 1e-9);
 });
 
-test("the Macro button goes to 0.5× from anywhere and back to 1× from there", () => {
-  assert.equal(CaptureLens.macroToggleStep(1), 0.5);
-  assert.equal(CaptureLens.macroToggleStep(3), 0.5);
-  assert.equal(CaptureLens.macroToggleStep(0.5), 1);
+test("macro is the ultra-wide cropped to its middle half, which looks like the main lens's 1×", () => {
+  assert.equal(CaptureLens.MACRO_CROP, 2);
+  // Whatever step is set, macro's crop is the same one.
+  for (const step of [0.5, 1, 2, 3]) assert.equal(CaptureLens.zoomFor(step, true), 2);
+  assert.deepEqual({ ...CaptureLens.viewFor(CaptureLens.MACRO_CROP) }, { x: 0.25, y: 0.25, width: 0.5, height: 0.5 });
+});
+
+test("macro puts the camera on the ultra-wide whatever the step, and off it again on the step's own lens", () => {
+  CaptureLens.setStep(2);
+  assert.equal(CaptureLens.currentLens(), "main");
+  assert.equal(CaptureLens.zoom(), 2);
+  CaptureLens.setMacro(true);
+  assert.equal(CaptureLens.currentLens(), "ultra-wide");
+  assert.equal(CaptureLens.zoom(), 2); // the crop macro makes: the middle half
+  CaptureLens.setMacro(false);
+  assert.equal(CaptureLens.currentLens(), "main");
+  CaptureLens.setStep(0.5);
+  assert.equal(CaptureLens.currentLens(), "ultra-wide");
+  assert.equal(CaptureLens.zoom(), 1); // 0.5× is the whole ultra-wide view
+  CaptureLens.setStep(1);
 });
 
 test("the step starts at 1× and only a real step is kept", () => {
@@ -48,23 +64,23 @@ test("the step starts at 1× and only a real step is kept", () => {
 });
 
 test("each lens is found by name among a phone's cameras", () => {
-  assert.equal(CaptureLens.pickDevice(TRIPLE_LENS_PHONE, "macro"), "Back Ultra Wide Camera");
+  assert.equal(CaptureLens.pickDevice(TRIPLE_LENS_PHONE, "ultra-wide"), "Back Ultra Wide Camera");
   // The fused cameras and the telephoto are not the main lens, whatever their order.
-  assert.equal(CaptureLens.pickDevice(TRIPLE_LENS_PHONE, "normal"), "Back Camera");
-  assert.equal(CaptureLens.pickDevice([...TRIPLE_LENS_PHONE].reverse(), "normal"), "Back Camera");
+  assert.equal(CaptureLens.pickDevice(TRIPLE_LENS_PHONE, "main"), "Back Camera");
+  assert.equal(CaptureLens.pickDevice([...TRIPLE_LENS_PHONE].reverse(), "main"), "Back Camera");
 });
 
-test("a lens the phone does not show is null, and a one-lens phone has no macro", () => {
-  assert.equal(CaptureLens.pickDevice(ONE_LENS_PHONE, "macro"), null);
-  assert.equal(CaptureLens.pickDevice(ONE_LENS_PHONE, "normal"), "Back Camera");
-  assert.equal(CaptureLens.pickDevice([camera("Back Triple Camera"), camera("Back Dual Camera")], "normal"), null);
-  assert.equal(CaptureLens.pickDevice([], "macro"), null);
+test("a lens the phone does not show is null, and a one-lens phone has no ultra-wide", () => {
+  assert.equal(CaptureLens.pickDevice(ONE_LENS_PHONE, "ultra-wide"), null);
+  assert.equal(CaptureLens.pickDevice(ONE_LENS_PHONE, "main"), "Back Camera");
+  assert.equal(CaptureLens.pickDevice([camera("Back Triple Camera"), camera("Back Dual Camera")], "main"), null);
+  assert.equal(CaptureLens.pickDevice([], "ultra-wide"), null);
   // Android's own names are not guessed at: the browser's pick stands.
-  assert.equal(CaptureLens.pickDevice([camera("camera2 0, facing back"), camera("camera2 2, facing back")], "normal"), null);
+  assert.equal(CaptureLens.pickDevice([camera("camera2 0, facing back"), camera("camera2 2, facing back")], "main"), null);
 });
 
 test("a front camera is never a lens, whatever it is called", () => {
-  assert.equal(CaptureLens.pickDevice([camera("Front Ultra Wide Camera")], "macro"), null);
+  assert.equal(CaptureLens.pickDevice([camera("Front Ultra Wide Camera")], "ultra-wide"), null);
 });
 
 test("the zoomed view keeps exactly the part of the letterboxed frame it shows", () => {
