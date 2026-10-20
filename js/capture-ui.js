@@ -13,11 +13,16 @@
 
   const FLASH_MS = 140;  // shutter flash — visual feedback only
   const STRIP_MAX = 4;   // thumbnails kept in the bottom strip
+  const NOTICE_MS = 3000; // how long a one-off message stays over the viewfinder
+  // Taps still waiting on their frames and encode. Each holds a full-size
+  // frame, and iOS Safari draws a canvas blank once a page's canvases pass
+  // its memory budget — a tap past this is ignored rather than shot black.
+  const MAX_PENDING_SHOTS = 3;
 
   const IDS = [
     "captureView", "captureVideo", "captureOutline", "captureFlash", "captureControls",
     "shotCount", "frameInfo", "captureHint", "shotStrip", "shutterBtn", "captureDoneBtn",
-    "torchBtn", "rotateBtn", "autoBtn",
+    "torchBtn", "rotateBtn", "autoBtn", "macroBtn", "zoomBar",
     "captureError", "captureErrorText", "captureFallbackBtn", "captureCancelBtn",
     "galleryView", "galleryGrid", "galleryCount", "galleryEmpty", "galleryCloseBtn",
   ];
@@ -56,10 +61,15 @@
       // els.captureFlash, which is the white screen blink on each shutter tap.
       let isTorchOn = false;
       let lastView = null; // the outline's latest reading, for a tap to hand the auto shutter
+      // True from opening until the camera is up, and again while a lens is
+      // being swapped: the shutter, AUTO and the zoom steps all wait.
+      let isLensBusy = true;
+      let noticeTimer = 0;
+      const zoomChips = [...els.zoomBar.querySelectorAll(".zoom-chip")];
 
       // Here, beside the handlers they call, which are declared in this scope.
       const outline = CaptureOutline.create(els.captureOutline, els.captureVideo,
-        { onUpdate: readFrame, onLost: frameReadingEnded });
+        { onUpdate: readFrame, onLost: frameReadingEnded, view: () => camera.view() });
       const guidance = CaptureGuidance.createPresenter(renderHint);
       const autoShutter = AutoShutter.create({ onFire: shoot, onChange: renderArming });
 
@@ -136,6 +146,45 @@
         els.autoBtn.title = isOn ? "Taking a photo when the page holds still — tap to stop" : "Take a photo when the page holds still";
       }
 
+      /** The lens and zoom as they stand: the Macro button and the zoom chips
+       *  light up together, since they are one setting. */
+      function renderLens() {
+        const zoomStep = CaptureLens.step();
+        const isMacro = CaptureLens.lensFor(zoomStep) === CaptureLens.MACRO;
+        els.macroBtn.classList.toggle("is-on", isMacro);
+        els.macroBtn.setAttribute("aria-pressed", String(isMacro));
+        els.macroBtn.title = isMacro ? "Close-up lens on — tap for the main lens" : "Use the close-up lens";
+        for (const chip of zoomChips) {
+          const isOn = Number(chip.dataset.step) === zoomStep;
+          chip.classList.toggle("is-on", isOn);
+          chip.setAttribute("aria-pressed", String(isOn));
+        }
+      }
+
+      /** Shows the zoom: the video magnified about its centre, and everything
+       *  of the frame the photo will not keep hidden (CaptureLens.clipFor). */
+      function renderZoomView() {
+        const zoom = CaptureLens.digitalZoomFor(CaptureLens.step());
+        const frame = ImageUtils.sourceDimensions(els.captureVideo);
+        const box = { width: els.captureVideo.clientWidth, height: els.captureVideo.clientHeight };
+        const clip = zoom > 1 && frame.width && box.width ? CaptureLens.clipFor(box, frame, zoom) : null;
+        els.captureView.style.setProperty("--capture-zoom", String(zoom));
+        els.captureView.style.setProperty("--capture-clip", clip ? `${clip.top}px ${clip.left}px` : "0px");
+      }
+
+      /** Hands the camera the step's zoom and shows it. */
+      function applyZoom() {
+        camera.setZoom(CaptureLens.digitalZoomFor(CaptureLens.step()));
+        renderZoomView();
+      }
+
+      /** A message over the viewfinder for a moment, in the hint's place. */
+      function notice(text) {
+        renderHint({ text });
+        clearTimeout(noticeTimer);
+        noticeTimer = setTimeout(() => renderHint(null), NOTICE_MS);
+      }
+
       function showError(message) {
         els.captureErrorText.textContent = message;
         els.captureControls.hidden = true;
@@ -170,12 +219,16 @@
         // finishes long after the tap, and a rotation made in between belongs
         // to the shots that follow it, not to this one.
         const quarterTurns = CaptureRotation.quarterTurns();
+        const view = camera.view(); // read here too: the zoom can change before the frames come
         const frame = camera.focusOn(region)
-          .then(() => CameraStream.grabSharpest(els.captureVideo, region));
+          .then(() => CameraStream.grabSharpest(els.captureVideo, region, view));
         encodeChain = encodeChain
           .then(() => frame)
           .then((canvas) => {
-            if (!canvas) return; // the stream had no frame yet
+            if (!canvas) { // no picture yet, or only blank ones: say so rather than lose the tap
+              notice("That shot came out blank — try again");
+              return;
+            }
             return CameraStream.captureJpeg(canvas)
               .then((blob) => { store.add(blob, viewfinder, quarterTurns); })
               .finally(() => ImageUtils.releaseCanvas(canvas));
@@ -258,6 +311,8 @@
       /** The viewfinder's chrome at rest: no error, no flash, the controls
        *  showing, the torch button hidden until the device admits it can. */
       function resetChrome() {
+        els.macroBtn.hidden = true;
+        for (const chip of zoomChips) chip.hidden = chip.dataset.step === String(CaptureLens.STEPS[0]);
         els.captureError.hidden = true;
         els.captureFlash.hidden = true;
         els.captureControls.hidden = false;
@@ -269,12 +324,16 @@
         renderTorch();
         renderRotation();
         renderAuto();
+        renderLens();
       }
 
       function teardown() {
         binder.offAll();
         restFrameReading();
         clearTimeout(flashTimer);
+        clearTimeout(noticeTimer);
+        els.captureView.style.removeProperty("--capture-zoom");
+        els.captureView.style.removeProperty("--capture-clip");
         isTorchOn = false;
         camera.stop(els.captureVideo); // also puts the light out
         store.dispose();
@@ -289,6 +348,7 @@
 
       function wire() {
         wireShutterControls();
+        wireLensControls();
         wireGalleryControls();
         wireFallbackControls();
         binder.on(els.torchBtn, "click", toggleTorch);
@@ -326,8 +386,85 @@
         });
       }
 
+      /** Puts the open camera on `lens`. The light is a setting of the track,
+       *  so a new camera is lit again if it was on. */
+      async function moveToLens(lens) {
+        await camera.selectLens(els.captureVideo, lens);
+        if (isTorchOn && camera.supportsTorch()) {
+          await camera.setTorch(true).catch((error) => console.warn("Couldn't relight the camera:", error));
+        }
+      }
+
+      /** What the camera says about itself once it is running, which a new
+       *  lens changes: its light, the frame it delivers, the zoomed view. */
+      function showCameraState() {
+        els.torchBtn.hidden = !camera.supportsTorch();
+        els.frameInfo.textContent = describeFrame(camera.frameSettings());
+        renderLens();
+        renderZoomView();
+      }
+
+      /** Swaps the lens to the one the step now names. Shots already tapped
+       *  finish first, so no grab is cut by the swap; the shutter, AUTO and the
+       *  outline rest meanwhile. A lens that will not open is put back. */
+      async function switchLens(previousStep) {
+        isLensBusy = true;
+        els.shutterBtn.disabled = true;
+        restFrameReading();
+        try {
+          await encodeChain;
+          await moveToLens(CaptureLens.lensFor(CaptureLens.step()));
+        } catch (error) {
+          if (!accepting) return;
+          console.warn("Couldn't switch lens:", error);
+          CaptureLens.setStep(previousStep);
+          applyZoom();
+          try {
+            await moveToLens(CaptureLens.lensFor(previousStep));
+            notice("That lens wouldn't open");
+          } catch (restoreError) {
+            console.warn("Couldn't go back to the lens before:", restoreError);
+            camera.stop(els.captureVideo);
+            showError(CameraStream.describeError(restoreError));
+            return;
+          }
+        } finally {
+          isLensBusy = false;
+        }
+        if (!accepting) return;
+        els.shutterBtn.disabled = false;
+        showCameraState();
+        outline.start();
+      }
+
+      /** A tap on a zoom step, or the Macro button's step. The frames being
+       *  read are of the old view, so the outline starts again; the lens is
+       *  swapped only when the step is on the other one. */
+      function chooseStep(next) {
+        const previous = CaptureLens.step();
+        if (isLensBusy || !accepting || next === previous) return;
+        CaptureLens.setStep(next);
+        applyZoom();
+        renderLens();
+        restFrameReading();
+        if (CaptureLens.lensFor(next) !== CaptureLens.lensFor(previous)) switchLens(previous);
+        else outline.start();
+      }
+
+      function wireLensControls() {
+        binder.on(els.macroBtn, "click", () => chooseStep(CaptureLens.macroToggleStep(CaptureLens.step())));
+        for (const chip of zoomChips) binder.on(chip, "click", () => chooseStep(Number(chip.dataset.step)));
+        // The view is clipped in pixels of the box, which a turn or resize
+        // moves, and of the frame, which a lens changes.
+        binder.on(window, "resize", renderZoomView);
+        binder.on(els.captureVideo, "resize", renderZoomView);
+      }
+
       function wireShutterControls() {
-        binder.on(els.shutterBtn, "click", shoot);
+        binder.on(els.shutterBtn, "click", () => {
+          if (pendingShots < MAX_PENDING_SHOTS) shoot();
+          else notice("Still saving the last photos…");
+        });
         binder.on(els.captureDoneBtn, "click", finish);
       }
 
@@ -368,12 +505,22 @@
       // Both handlers check `accepting`: the user can leave before the camera
       // finishes opening, and writing to the torn-down screen would leave the
       // error panel showing when the next session opens.
-      camera.start(els.captureVideo).then(
+      applyZoom();
+      camera.start(els.captureVideo, CaptureLens.lensFor(CaptureLens.step())).then(
         () => {
           if (!accepting) return;
+          isLensBusy = false;
+          // A step the phone cannot reach is not offered, and a remembered one
+          // falls back to the main lens, which start() has pinned.
+          const { hasMacro } = camera.lenses();
+          els.macroBtn.hidden = !hasMacro;
+          for (const chip of zoomChips) chip.hidden = !hasMacro && Number(chip.dataset.step) < 1;
+          if (!hasMacro && CaptureLens.lensFor(CaptureLens.step()) === CaptureLens.MACRO) {
+            CaptureLens.setStep(1);
+            applyZoom();
+          }
           els.shutterBtn.disabled = false;
-          els.torchBtn.hidden = !camera.supportsTorch();
-          els.frameInfo.textContent = describeFrame(camera.frameSettings());
+          showCameraState();
           outline.start(); // frames are flowing now
         },
         (err) => {

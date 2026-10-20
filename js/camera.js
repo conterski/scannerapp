@@ -1,6 +1,6 @@
-/* camera.js — the capture path: acquiring the rear-facing media stream,
- * playing it inline, turning a tap into the stored JPEG, and releasing the
- * device. It owns no photo storage and no UI beyond the <video> it is handed.
+/* camera.js — the capture path: acquiring the rear-facing media stream on the
+ * lens asked for, playing it inline, turning a tap into the stored JPEG, and
+ * releasing the device. It owns no photo storage and no UI beyond the <video> it is handed.
  *
  * Exposes window.CameraStream. `create()` is a factory: each capture session
  * gets its own controller, so no stream is held in module-level state.
@@ -13,10 +13,14 @@
   // Frames are reduced to the stored size at grab time rather than at export
   // time: a long session holds every shot in memory, and full-resolution
   // iPhone frames exhaust it fast.
-  function mediaConstraints() {
+  //
+  // With no `deviceId` the browser picks the rear camera, and on a phone with
+  // several lenses it may hand over a fused camera that switches lens on its
+  // own. A lens pinned by `deviceId` is the one lens, for the whole session.
+  function mediaConstraints(deviceId) {
     return {
       video: Object.assign(
-        { facingMode: "environment" }, // rear camera by default
+        deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" },
         CaptureQuality.currentProfile().video),
       audio: false,
     };
@@ -27,8 +31,8 @@
   const FIRST_FRAME_TIMEOUT_MS = 10000;
 
   // How many successive frames a tap compares, keeping the sharpest. The
-  // first is grabbed on the tap itself, which is when the press jolts the
-  // phone; seven span six frame intervals past it — 100ms at 60fps, 200ms
+  // first is grabbed as soon as the lens has been told to focus, which is
+  // when the press jolts the phone; seven span six frame intervals past it — 100ms at 60fps, 200ms
   // at 30fps — long enough for the hand to settle and for a lens to finish
   // focusing, too short for the scene to change.
   const FRAMES_PER_SHOT = 7;
@@ -36,6 +40,11 @@
   // The share of the frame scored for sharpness when the outline has nothing
   // to offer: the middle, which is where a document being framed is.
   const CENTRAL_REGION_SHARE = 0.6;
+
+  // How long a stream that has reported its size is given to show a first
+  // picture. It carries on at the deadline: the grab refuses an empty video
+  // itself, so this only keeps the shutter from waiting on a slow camera.
+  const FIRST_PICTURE_TIMEOUT_MS = 3000;
 
   // The longest a shot waits for the video's next frame. A frame arrives far
   // sooner from a running camera; the deadline is for a tab sent to the
@@ -137,24 +146,51 @@
     });
   }
 
+  /** Resolves once the video has presented a picture. Having a size
+   *  (whenSized) is not that: metadata arrives before the first decoded
+   *  frame, and a grab in between copies nothing — a black photo. */
+  function whenPictureShown(video) {
+    return new Promise((resolve) => {
+      const deadline = setTimeout(done, FIRST_PICTURE_TIMEOUT_MS);
+      function done() {
+        clearTimeout(deadline);
+        video.removeEventListener("loadeddata", done);
+        resolve();
+      }
+      if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(done);
+      else if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) done();
+      else video.addEventListener("loadeddata", done);
+    });
+  }
+
   // The resample for the photo that gets kept: area-quality, since the
   // downscale from the native frame is where fine print is won or lost.
   const KEPT_PHOTO_RESAMPLE = { smoothing: "high" };
 
-  /** Copies the current video frame into a canvas, capped at the profile's
-   *  size. Returns null while the stream has no frame yet. Synchronous, so a
-   *  tap captures the frame the user actually saw. */
-  function grabFrame(video) {
+  /** `view`, fractions of the frame, in the video's own pixels. */
+  function viewRect(video, view) {
     const { width, height } = ImageUtils.sourceDimensions(video);
-    if (!width || !height) return null;
-    const { maxEdge } = CaptureQuality.currentProfile();
-    return ImageUtils.createScaledCanvas(video, maxEdge, KEPT_PHOTO_RESAMPLE).canvas;
+    return { x: view.x * width, y: view.y * height, width: view.width * width, height: view.height * height };
   }
 
-  function centralRegion(video) {
+  /** Copies the part of the current video frame `view` shows into a canvas,
+   *  capped at the profile's size. Returns null while the stream has no
+   *  picture yet — a video that has not decoded a frame draws nothing, and an
+   *  empty canvas encodes as black. Synchronous, so a tap captures the frame
+   *  the user actually saw. */
+  function grabFrame(video, view) {
     const { width, height } = ImageUtils.sourceDimensions(video);
-    const regionWidth = width * CENTRAL_REGION_SHARE, regionHeight = height * CENTRAL_REGION_SHARE;
-    return { x: (width - regionWidth) / 2, y: (height - regionHeight) / 2,
+    if (!width || !height || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+    const { maxEdge } = CaptureQuality.currentProfile();
+    return ImageUtils.createScaledCanvas(video, maxEdge,
+      { ...KEPT_PHOTO_RESAMPLE, sourceRect: viewRect(video, view) }).canvas;
+  }
+
+  /** The middle of what `view` shows. */
+  function centralRegion(video, view) {
+    const shown = viewRect(video, view);
+    const regionWidth = shown.width * CENTRAL_REGION_SHARE, regionHeight = shown.height * CENTRAL_REGION_SHARE;
+    return { x: shown.x + (shown.width - regionWidth) / 2, y: shown.y + (shown.height - regionHeight) / 2,
              width: regionWidth, height: regionHeight };
   }
 
@@ -170,43 +206,45 @@
     });
   }
 
-  /** Sharpness of the video's current frame over `region`, in video pixels.
-   *  Reads the video rather than a grab of it: the measure only needs 384px
+  /** Sharpness of the video's current frame over `region`, in video pixels,
+   *  and whether that frame is blank. Reads the video rather than a grab of it: the measure only needs 384px
    *  (FrameSharpness scales the region down), so scoring this way costs a
    *  fraction of a full-resolution grab. Safe as long as the caller grabs in
    *  the same task — a video element cannot advance a frame mid-task, and it
    *  is only a later read, after an await, that would see a different one. */
-  function sharpnessOf(video, region) {
-    return FrameSharpness.measure(video, region);
+  function assessFrame(video, region) {
+    return FrameSharpness.assess(video, region);
   }
 
   /**
    * The sharpest of the next FRAMES_PER_SHOT frames, or null while the stream
-   * has no frame. The first is taken synchronously, so a tap still captures
-   * what the user saw; the rest follow on the video's own frame callbacks.
+   * has no picture — or only blank ones, as a camera has between lenses.
+   * The first is taken synchronously, so a tap still captures what the user
+   * saw; the rest follow on the video's own frame callbacks.
    *
    * Every frame is scored, but only one that beats the best so far is grabbed
    * — a grab is a full-resolution draw and a score is a 384px one, so paying
    * for the grab only on a winner is what keeps the preview moving under a
    * burst of taps. The loser it replaces is released at once rather than left
-   * to the collector.
+   * to the collector. A blank frame is never a winner, however few frames
+   * there are to choose from.
    *
    * @param region  { x, y, width, height } in video pixels to score, or null
-   *                for the middle of the frame
+   *                for the middle of what `view` shows
+   * @param view    the part of the frame to keep, as fractions of it
    */
-  async function grabSharpest(video, region) {
+  async function grabSharpest(video, region, view) {
     // A degenerate box — an outline collapsed to a line — is no region at all.
-    const scored = region && region.width >= 1 && region.height >= 1 ? region : centralRegion(video);
-    let bestSharpness = sharpnessOf(video, scored);
-    let best = grabFrame(video);
-    if (!best) return null;
-    for (let taken = 1; taken < FRAMES_PER_SHOT; taken++) {
-      await nextVideoFrame(video);
-      const sharpness = sharpnessOf(video, scored);
-      if (sharpness <= bestSharpness) continue; // this frame costs nothing more
-      const frame = grabFrame(video);
-      if (!frame) break; // the stream ended under us; the best so far stands
-      ImageUtils.releaseCanvas(best);
+    const scored = region && region.width >= 1 && region.height >= 1 ? region : centralRegion(video, view);
+    let best = null;
+    let bestSharpness = -Infinity;
+    for (let taken = 0; taken < FRAMES_PER_SHOT; taken++) {
+      if (taken > 0) await nextVideoFrame(video);
+      const { sharpness, isBlank } = assessFrame(video, scored);
+      if (isBlank || sharpness <= bestSharpness) continue; // this frame costs nothing more
+      const frame = grabFrame(video, view);
+      if (!frame) break; // no picture yet, or the stream ended under us; the best so far stands
+      if (best) ImageUtils.releaseCanvas(best);
       best = frame;
       bestSharpness = sharpness;
     }
@@ -226,6 +264,12 @@
     // prompt. The stream that arrives afterwards is held by nothing, so it has
     // to be released on arrival or the camera stays on for the life of the tab.
     let isStopped = false;
+    // The cameras each lens is: { macro, normal } device ids, null for a lens
+    // this phone does not show the page. Known once the camera is open, since
+    // browsers name cameras only after permission is given.
+    let lensDevices = { macro: null, normal: null };
+    // How far the frame is cropped in, 1 for the whole of it.
+    let zoom = 1;
 
     function videoTrack() {
       return stream ? stream.getVideoTracks()[0] || null : null;
@@ -332,18 +376,32 @@
       return track.applyConstraints({ advanced: [{ torch: on }] });
     }
 
-    /** Starts the stream and plays it in `video`. Must be called from a user
-     *  gesture: getUserMedia is invoked before the first await. */
-    function start(video) {
-      if (!isSupported()) return Promise.reject(unsupportedError());
-      isStopped = false;
-      return navigator.mediaDevices.getUserMedia(mediaConstraints()).then((s) => {
+    /** Whether the phone has an ultra-wide lens the page can pick. */
+    function lenses() {
+      return { hasMacro: lensDevices.macro !== null };
+    }
+
+    /** The part of the frame the photo keeps and the viewfinder shows, as
+     *  fractions of it. Re-read at every shot: the zoom can change between. */
+    function view() {
+      return CaptureLens.viewFor(zoom);
+    }
+
+    function setZoom(factor) {
+      zoom = factor;
+    }
+
+    /** Plays `constraints`' camera in `video`, replacing the one before, and
+     *  waits for a first picture. */
+    function openStream(video, constraints) {
+      return navigator.mediaDevices.getUserMedia(constraints).then((s) => {
         if (isStopped) {
           releaseTracks(s);
           const abandoned = new Error("The camera was released before it opened");
           abandoned.name = "AbortError";
           throw abandoned;
         }
+        if (stream) releaseTracks(stream);
         stream = s;
         video.srcObject = s;
         // iOS needs the inline attributes in the markup *and* an explicit
@@ -351,13 +409,55 @@
         // The autoplay attribute covers the case where this play() is refused,
         // so its rejection is deliberately ignored rather than surfaced.
         PromiseUtils.markRejectionHandled(video.play());
-        // A start that fails must not leave the camera running behind the
-        // error panel.
         return whenSized(video)
+          .then(() => whenPictureShown(video))
           .then(() => preferLargerPage(video))
-          .then(keepFocusing)
-          .catch((error) => { stop(video); throw error; });
+          .then(keepFocusing);
       });
+    }
+
+    /** Learns which camera is which lens. */
+    function discoverLenses() {
+      return navigator.mediaDevices.enumerateDevices()
+        .then((devices) => {
+          lensDevices = {
+            macro: CaptureLens.pickDevice(devices, CaptureLens.MACRO),
+            normal: CaptureLens.pickDevice(devices, CaptureLens.NORMAL),
+          };
+        })
+        // A phone that will not list its cameras keeps the one it opened.
+        .catch((error) => console.warn("Couldn't list the cameras:", error));
+    }
+
+    /** Moves to `lens`, a camera of its own: the open one is released first,
+     *  since a phone will not run two cameras at once. Resolves at once when
+     *  that lens is already running or the phone has no such lens. Rejects if
+     *  the lens will not open, leaving nothing running — the caller puts the
+     *  old one back or gives up. */
+    function selectLens(video, lens) {
+      const deviceId = lensDevices[lens];
+      const track = videoTrack();
+      if (!deviceId || (track && currentSettings(track).deviceId === deviceId)) return Promise.resolve();
+      if (stream) releaseTracks(stream);
+      stream = null;
+      video.srcObject = null;
+      return openStream(video, mediaConstraints(deviceId));
+    }
+
+    /** Starts the stream on `lens` and plays it in `video`. Must be called
+     *  from a user gesture: getUserMedia is invoked before the first await.
+     *  Opens the browser's choice of rear camera first, because lens names
+     *  arrive only with permission, then moves to the lens asked for. */
+    function start(video, lens) {
+      if (!isSupported()) return Promise.reject(unsupportedError());
+      isStopped = false;
+      // A start that fails must not leave the camera running behind the
+      // error panel.
+      return openStream(video, mediaConstraints(null))
+        .then(discoverLenses)
+        // A phone without an ultra-wide still gets its main lens pinned.
+        .then(() => selectLens(video, lens === CaptureLens.MACRO && !lensDevices.macro ? CaptureLens.NORMAL : lens))
+        .catch((error) => { stop(video); throw error; });
     }
 
     function releaseTracks(target) {
@@ -379,7 +479,7 @@
       if (video) video.srcObject = null;
     }
 
-    return { start, stop, supportsTorch, setTorch, focusOn, frameSettings };
+    return { start, stop, supportsTorch, setTorch, focusOn, frameSettings, lenses, selectLens, setZoom, view };
   }
 
   window.CameraStream = {

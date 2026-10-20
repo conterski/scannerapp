@@ -597,6 +597,13 @@ html, body {
   object-fit: contain;
   background: #000;
 }
+/* Zoom is a crop of the frame, magnified about its centre. The clip, set from
+   script, hides what the magnified frame shows beyond the part a shot keeps. */
+.capture-video,
+.capture-outline {
+  transform: scale(var(--capture-zoom, 1));
+  clip-path: inset(var(--capture-clip, 0px));
+}
 /* The live document outline. Same fill and stroke as the editor's quad, so
    the two read as the same thing: "this is the page". */
 .capture-outline {
@@ -612,6 +619,7 @@ html, body {
   stroke: var(--accent);
   stroke-width: 3;
   stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; /* the line keeps its width however far the view is zoomed */
 }
 .capture-flash {
   position: absolute;
@@ -713,6 +721,41 @@ html, body {
   line-height: 1.3;
   text-align: center;
 }
+
+/* The zoom steps, a pill above the shutter bar. */
+.zoom-bar {
+  align-self: center;
+  margin-top: auto;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(10, 12, 16, 0.6);
+  backdrop-filter: blur(10px);
+  border-radius: 999px;
+}
+.zoom-bar + .capture-bottom { margin-top: 0; }
+.zoom-chip {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #fff;
+  min-width: 40px;
+  height: 36px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  opacity: 0.75;
+}
+.zoom-chip[hidden] { display: none; }
+.zoom-chip.is-on {
+  background: #ffd66b;
+  color: #1a1d24;
+  opacity: 1;
+}
+.zoom-chip:disabled { opacity: 0.4; }
 
 /* The shutter is centred on the screen and the side controls float over it,
    so neither the thumbnail strip nor a growing "Done (N)" label can shift it. */

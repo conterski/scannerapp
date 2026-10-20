@@ -19,7 +19,12 @@
  * A shot reads two things back from it at the tap: `corners()`, the quad
  * itself with how steadily it held, and `region()`, the box it occupies,
  * where the frames a tap compares are judged for sharpness — on the document
- * rather than on the desk around it. Between taps, `onUpdate` hands every
+ * rather than on the desk around it.
+ *
+ * With the camera zoomed in, only the part of the frame the viewfinder shows
+ * is looked at, and everything handed on — the quad, the frame it is a share
+ * of — is of that part, since that is what the shot keeps. What is drawn and
+ * what `region()` returns stay in the video's own pixels. Between taps, `onUpdate` hands every
  * reading to the capture screen's hints and auto shutter.
  *
  * Exposes window.CaptureOutline. `create()` is a factory: one instance per
@@ -42,6 +47,7 @@
   const MISSES_BEFORE_HIDE = 3;
 
   const { CORNER_KEYS, clamp, mapCorners } = ImageUtils;
+  const WHOLE_FRAME = { x: 0, y: 0, width: 1, height: 1 };
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   /** Unlike an HTML element, an <svg> has no `hidden` property — assigning one
@@ -78,7 +84,9 @@
   /**
    * @param svg      the overlay <svg>, laid over the video with the same box
    * @param video    the <video> the frames come from
-   * @param options  { onUpdate, onLost } — onUpdate is told after every frame
+   * @param options  { onUpdate, onLost, view } — view returns the part of the
+   *                 frame in sight, as fractions of it (the whole by default);
+   *                 onUpdate is told after every frame
    *                 the detector reads: the outline as drawn (see corners())
    *                 with the page's light and the frame's size — { quad,
    *                 stability, light, frame } — or null while no outline is
@@ -86,7 +94,7 @@
    *                 worker failed), so no more updates are coming
    */
   function create(svg, video, options) {
-    const { onUpdate = null, onLost = null } = options || {};
+    const { onUpdate = null, onLost = null, view = () => WHOLE_FRAME } = options || {};
     // The svg is shared across capture sessions; this session's polygon is
     // its only child. Appending instead would leave every earlier session's
     // polygon in place, still holding its last points, to reappear together
@@ -129,7 +137,17 @@
       missedFrames = 0;
     }
 
-    function jumpLimit() { return JUMP_OF_FRAME * Math.min(video.videoWidth, video.videoHeight); }
+    /** The part of the video in sight, in the video's own pixels. */
+    function sightRect() {
+      const { width, height } = ImageUtils.sourceDimensions(video);
+      const sight = view();
+      return { x: sight.x * width, y: sight.y * height, width: sight.width * width, height: sight.height * height };
+    }
+
+    function jumpLimit() {
+      const sight = sightRect();
+      return JUMP_OF_FRAME * Math.min(sight.width, sight.height);
+    }
 
     function showResult(corners) {
       if (!corners) {
@@ -153,7 +171,7 @@
       const requestGeneration = generation;
       isInFlight = true;
       try {
-        const page = await Detect.previewPage(video);
+        const page = await Detect.previewPage(video, { sourceRect: sightRect() });
         if (requestGeneration === generation) {
           showResult(page && page.corners);
           report(page);
@@ -173,7 +191,8 @@
     function report(page) {
       if (!onUpdate) return;
       const outline = corners();
-      onUpdate(outline && { ...outline, light: page && page.light, frame: ImageUtils.sourceDimensions(video) });
+      const { width, height } = sightRect();
+      onUpdate(outline && { ...outline, light: page && page.light, frame: { width, height } });
     }
 
     function tick(now) {
@@ -210,8 +229,8 @@
       return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
     }
 
-    /** The outline as drawn, as fractions of the frame ({tl,tr,br,bl} in
-     *  0..1), with how steadily it held — 0..1, full when HISTORY frames
+    /** The outline as drawn, as fractions of the part of the frame in sight
+     *  ({tl,tr,br,bl} in 0..1), with how steadily it held — 0..1, full when HISTORY frames
      *  agree to the pixel, none when they spread as far as a jump — or null
      *  while none is shown. Fractions rather than video pixels: the shot is
      *  scaled at grab, capped at encode and decoded again before these are
@@ -219,11 +238,11 @@
      *  object, since `shown` moves every tick.
      *  @returns { quad, stability } | null */
     function corners() {
-      const { width, height } = ImageUtils.sourceDimensions(video);
-      if (!shown || !width || !height) return null;
+      const sight = sightRect();
+      if (!shown || !sight.width || !sight.height) return null;
       const spread = Math.max(...history.map((quad) => jumpBetween(quad, shown)));
       return {
-        quad: mapCorners(shown, (point) => ({ x: point.x / width, y: point.y / height })),
+        quad: mapCorners(shown, (point) => ({ x: (point.x - sight.x) / sight.width, y: (point.y - sight.y) / sight.height })),
         stability: clamp((1 - spread / jumpLimit()) * history.length / HISTORY, 0, 1),
       };
     }

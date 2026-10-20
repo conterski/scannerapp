@@ -21,6 +21,15 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   twice the size of the setting off; turn it off to keep files smaller. It
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
+- **Lens and zoom, never switched for you** — the camera screen has a
+  **0.5× / 1× / 2× / 3×** row and a **MACRO** button, linked as in the
+  phone's Camera app. 0.5× (or MACRO) is the ultra-wide lens, the one for
+  close-ups; 1× is the main lens; 2× and 3× are a centred crop of it, and the
+  viewfinder shows exactly the part a shot keeps. The page opens one lens by
+  name and keeps it, so the phone's own switching between lenses can't happen
+  mid-session; the last step is remembered. A phone whose browser lists no
+  ultra-wide lens doesn't get MACRO or 0.5×. A black frame is never saved:
+  the shot waits for a real picture, and says so if it can't get one.
 - **Advice over the viewfinder** — one line when something stands between the
   frame and a good scan: the page running off the edge, too small, glare,
   too dark (pointing at the light when the phone has one), a steep angle, or

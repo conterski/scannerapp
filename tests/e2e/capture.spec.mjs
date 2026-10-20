@@ -14,8 +14,18 @@ const SMALL_4_3 = [[1440, 1920], [2160, 3840]];
 // A page pushed off the right of the frame, for the cut-off cases.
 const RUNS_OFF = { paper: "a4", background: "dark", fill: 0.55, offset: [0.32, 0] };
 
-async function openCamera(page, { scene = "plain-wood-flat", formats = FULL_4_3 } = {}) {
-  await page.evaluate(({ scene, formats }) => { window.cameraLog = FakeCamera.install({ scene, formats }); }, { scene, formats });
+// An iPhone's cameras as the browser lists them: the fused camera a plain
+// request is answered by, the lenses, and the front one.
+const IPHONE_CAMERAS = [
+  { label: "Back Triple Camera", deviceId: "triple" },
+  { label: "Back Ultra Wide Camera", deviceId: "ultra" },
+  { label: "Back Camera", deviceId: "main" },
+  { label: "Front Camera", deviceId: "front" },
+];
+const ONE_LENS_CAMERAS = [{ label: "Back Camera", deviceId: "main" }, { label: "Front Camera", deviceId: "front" }];
+
+async function openCamera(page, { scene = "plain-wood-flat", formats = FULL_4_3, cameras = null } = {}) {
+  await page.evaluate(({ scene, formats, cameras }) => { window.cameraLog = FakeCamera.install({ scene, formats, cameras }); }, { scene, formats, cameras });
   await page.locator("#cameraBtn").click();
   await expect(page.locator("#shutterBtn")).toBeEnabled({ timeout: 60_000 });
 }
@@ -133,4 +143,147 @@ test("leaving the camera releases the stream", async ({ page }) => {
   await expect(page.locator("#captureView")).toBeHidden();
   expect(await page.evaluate(() => document.getElementById("captureVideo").srcObject)).toBeNull();
   await expect(page.locator(".page-card")).toHaveCount(0);
+});
+
+const activeCamera = (page) => page.evaluate(() => window.cameraLog.activeDeviceId);
+
+test("the main lens is pinned at the start, not left to the phone's fused camera", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  expect(await activeCamera(page)).toBe("main");
+  const requests = await page.evaluate(() => window.cameraLog.requests.map((request) => request.video.deviceId || null));
+  expect(requests).toEqual([null, { exact: "main" }]); // one open to learn the lenses, one pinned
+  await expect(page.locator('.zoom-chip[data-step="1"]')).toHaveClass(/is-on/);
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("0.5× opens the ultra-wide, and the Macro button and the chips agree both ways", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+
+  await page.locator('.zoom-chip[data-step="0.5"]').click();
+  await expect.poll(() => activeCamera(page)).toBe("ultra");
+  await expect(page.locator("#shutterBtn")).toBeEnabled();
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('.zoom-chip[data-step="0.5"]')).toHaveClass(/is-on/);
+
+  await page.locator("#macroBtn").click();
+  await expect.poll(() => activeCamera(page)).toBe("main");
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('.zoom-chip[data-step="1"]')).toHaveClass(/is-on/);
+
+  await page.locator("#macroBtn").click();
+  await expect.poll(() => activeCamera(page)).toBe("ultra");
+  await page.locator('.zoom-chip[data-step="2"]').click();
+  await expect.poll(() => activeCamera(page)).toBe("main");
+  await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("the lens is remembered for the next time the camera opens", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  await page.locator("#macroBtn").click();
+  await expect.poll(() => activeCamera(page)).toBe("ultra");
+  await page.locator("#captureDoneBtn").click();
+  await expect(page.locator("#captureView")).toBeHidden();
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  expect(await activeCamera(page)).toBe("ultra");
+  await expect(page.locator('.zoom-chip[data-step="0.5"]')).toHaveClass(/is-on/);
+});
+
+test("2× stays on the main lens, shows the middle of the frame, and keeps exactly that", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  const opened = await page.evaluate(() => window.cameraLog.requests.length);
+
+  await page.locator('.zoom-chip[data-step="2"]').click();
+  expect(await page.evaluate(() => window.cameraLog.requests.length)).toBe(opened); // a crop, not a new camera
+  const shown = await page.evaluate(() => {
+    const style = document.getElementById("captureView").style;
+    return { zoom: style.getPropertyValue("--capture-zoom"), clip: style.getPropertyValue("--capture-clip") };
+  });
+  expect(shown.zoom).toBe("2");
+  // A 3:4 frame letterboxed on 390×844: 390 wide, 520 tall, so the half of it kept is 97.5px in from the sides.
+  const [vertical, horizontal] = shown.clip.split(" ").map(parseFloat);
+  expect(vertical).toBeCloseTo(292, 1);
+  expect(horizontal).toBeCloseTo(97.5, 1);
+
+  await page.locator("#shutterBtn").click();
+  await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
+  const size = await page.locator("#shotStrip img").evaluate((image) => [image.naturalWidth, image.naturalHeight]);
+  expect(size).toEqual([1512, 2016]); // the middle quarter of the 3024×4032 frame
+});
+
+test("a phone without an ultra-wide offers neither Macro nor 0.5×", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: ONE_LENS_CAMERAS });
+  await expect(page.locator("#macroBtn")).toBeHidden();
+  await expect(page.locator('.zoom-chip[data-step="0.5"]')).toBeHidden();
+  await expect(page.locator('.zoom-chip[data-step="3"]')).toBeVisible();
+  expect(await activeCamera(page)).toBe("main");
+});
+
+test("a lens that will not open is put back, and the camera carries on", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  await page.evaluate(() => {
+    const open = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (constraints.video.deviceId && constraints.video.deviceId.exact === "ultra") {
+        throw Object.assign(new Error("busy"), { name: "NotReadableError" });
+      }
+      return open(constraints);
+    };
+  });
+  await page.locator('.zoom-chip[data-step="0.5"]').click();
+  await expect(page.locator("#captureHint")).toHaveText("That lens wouldn't open");
+  await expect(page.locator("#shutterBtn")).toBeEnabled();
+  await expect(page.locator('.zoom-chip[data-step="1"]')).toHaveClass(/is-on/);
+  expect(await activeCamera(page)).toBe("main");
+  await page.locator("#shutterBtn").click();
+  await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("a black frame is never saved as a shot", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page);
+  await page.evaluate(() => { window.cameraLog.blank = true; });
+  await page.waitForTimeout(300);
+  await page.locator("#shutterBtn").click();
+  await expect(page.locator("#captureHint")).toHaveText("That shot came out blank — try again");
+  await expect(page.locator("#shotCount")).toHaveText("0 photos");
+  await expect(page.locator("#shotStrip")).toBeHidden();
+
+  await page.evaluate(() => { window.cameraLog.blank = false; });
+  await page.waitForTimeout(300);
+  await page.locator("#shutterBtn").click();
+  await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator("#shotCount")).toHaveText("1 photo");
+});
+
+test("zoomed in, the outline finds a page that fills the zoomed view, and lies where the view shows it", async ({ page }) => {
+  await openApp(page);
+  // A page covering 15% of the frame sits inside the middle quarter that 2× keeps, and fills most of it.
+  await openCamera(page, { scene: { paper: "a4", background: "dark", fill: 0.15 }, cameras: IPHONE_CAMERAS });
+  await outlineShown(page);
+  await page.locator('.zoom-chip[data-step="2"]').click();
+  await outlineShown(page);
+  await page.waitForTimeout(1000);
+  const { drawn, expected } = await page.evaluate(() => {
+    const video = document.getElementById("captureVideo");
+    const box = { width: video.clientWidth, height: video.clientHeight };
+    const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight);
+    const offsetX = (box.width - video.videoWidth * scale) / 2, offsetY = (box.height - video.videoHeight * scale) / 2;
+    const truth = window.cameraLog.truthInFrame();
+    const points = document.querySelector("#captureOutline polygon").getAttribute("points").trim().split(/\s+/)
+      .map((pair) => pair.split(",").map(Number));
+    return {
+      drawn: points,
+      expected: ["tl", "tr", "br", "bl"].map((key) => [truth[key].x * scale + offsetX, truth[key].y * scale + offsetY]),
+    };
+  });
+  // The outline stays in the video's own pixels, which the zoom then magnifies with the video.
+  drawn.forEach(([x, y], i) => {
+    expect(Math.hypot(x - expected[i][0], y - expected[i][1]), `corner ${i}`).toBeLessThan(0.03 * 390);
+  });
 });
