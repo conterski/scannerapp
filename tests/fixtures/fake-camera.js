@@ -11,8 +11,14 @@
  * delivered — and applyConstraints picks again, as a phone would. A frame is
  * repainted every 33 ms with a pixel of jitter, so frames keep arriving and
  * no two are identical. The scene is cropped to each format, never stretched.
- * The state returned records every request and reconfiguration, and
- * `truthInFrame()` gives the page's true corners in the frames being sent.
+ * `cameras` — [{ label, deviceId }] — is the phone's list of cameras, as
+ * enumerateDevices gives it; the first is the one a request with no
+ * `deviceId` is answered by, as a fused iOS camera answers, and a request
+ * naming a `deviceId` gets that camera or fails. Without it the phone has
+ * one camera and no names. The state returned records every request and
+ * reconfiguration, which camera is running (`activeDeviceId`), and
+ * `truthInFrame()` gives the page's true corners in the frames being sent;
+ * setting `blank` makes the frames black, as a camera between lenses sends.
  *
  * Needs SyntheticScenes. Exposes window.FakeCamera.
  */
@@ -42,14 +48,27 @@
     return formats.slice().sort((a, b) => aspectCost(a) - aspectCost(b) || sizeCost(a) - sizeCost(b))[0];
   }
 
-  function install({ scene, formats }) {
+  function install({ scene, formats, cameras = null }) {
     const spec = typeof scene === "object" ? { seed: 1, ...scene } : SyntheticScenes.SCENES.find((candidate) => candidate.name === scene);
     if (!spec) throw new Error(`No synthetic scene named ${scene}`);
     const rendered = SyntheticScenes.render(spec);
-    const state = { requests: [], applied: [] };
+    const state = { requests: [], applied: [], activeDeviceId: null, blank: false };
+
+    if (cameras) {
+      navigator.mediaDevices.enumerateDevices = async () =>
+        cameras.map(({ label, deviceId }) => ({ kind: "videoinput", label, deviceId }));
+    }
 
     navigator.mediaDevices.getUserMedia = async (constraints) => {
       state.requests.push(constraints);
+      const wanted = constraints.video && constraints.video.deviceId && constraints.video.deviceId.exact;
+      const camera = cameras ? (wanted ? cameras.find((candidate) => candidate.deviceId === wanted) : cameras[0]) : null;
+      if (wanted && !camera) {
+        const error = new Error("No such camera");
+        error.name = "OverconstrainedError";
+        throw error;
+      }
+      state.activeDeviceId = camera ? camera.deviceId : null;
       const canvas = document.createElement("canvas");
       const ctx = canvas.getContext("2d");
       const resize = ([width, height]) => { canvas.width = width; canvas.height = height; };
@@ -58,6 +77,7 @@
       // Cropped to the format rather than stretched, as a sensor crops to
       // its video modes: the scene's own proportions survive every format.
       const paint = () => {
+        if (state.blank) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height); return; }
         const source = rendered.canvas;
         const scale = Math.max(canvas.width / source.width, canvas.height / source.height);
         const dx = (canvas.width - source.width * scale) / 2 + (tick % 3 - 1) * JITTER_PX;
@@ -78,7 +98,7 @@
       const track = stream.getVideoTracks()[0];
       const stop = track.stop.bind(track);
       track.stop = () => { clearInterval(timer); stop(); };
-      track.getSettings = () => ({ width: canvas.width, height: canvas.height, frameRate: 30 });
+      track.getSettings = () => ({ width: canvas.width, height: canvas.height, frameRate: 30, deviceId: camera ? camera.deviceId : undefined });
       track.getCapabilities = () => ({});
       track.applyConstraints = async (next) => {
         state.applied.push(next);

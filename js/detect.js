@@ -284,14 +284,13 @@
 
   /** Draws the current frame into the scratch canvas at preview size.
    *  @returns { imageData, scale } */
-  function grabPreviewFrame(frameSource) {
-    const { width, height } = ImageUtils.sourceDimensions(frameSource);
-    const scale = Math.min(1, PREVIEW_MAX_EDGE / Math.max(width, height));
-    const targetWidth = Math.max(1, Math.round(width * scale));
-    const targetHeight = Math.max(1, Math.round(height * scale));
+  function grabPreviewFrame(frameSource, part) {
+    const scale = Math.min(1, PREVIEW_MAX_EDGE / Math.max(part.width, part.height));
+    const targetWidth = Math.max(1, Math.round(part.width * scale));
+    const targetHeight = Math.max(1, Math.round(part.height * scale));
     const context = previewScratch.context(targetWidth, targetHeight);
-    context.drawImage(frameSource, 0, 0, targetWidth, targetHeight);
-    return { imageData: imageDataOf(previewScratch.canvas), scale: targetWidth / width };
+    context.drawImage(frameSource, part.x, part.y, part.width, part.height, 0, 0, targetWidth, targetHeight);
+    return { imageData: imageDataOf(previewScratch.canvas), scale: targetWidth / part.width };
   }
 
   /**
@@ -300,15 +299,18 @@
    * is idle while the camera is open; each call also re-arms its idle
    * shutdown, which is what keeps it warm for the whole session.
    * @param frameSource  anything drawable with a size: the <video> element
+   * @param options  { sourceRect } looks only at that part of the frame, in
+   *                 its pixels — what a zoomed viewfinder shows
    * @returns { corners, light } — corners {tl,tr,br,bl} in the frame's own
    *          pixels, light { mean, clipped } over the page (see the worker's
    *          pageLight) — or null when nothing plausible is in view
    */
   async function previewPage(frameSource, options) {
-    const bounds = ImageUtils.sourceDimensions(frameSource);
-    if (!bounds.width || !bounds.height) return null;
+    const frame = ImageUtils.sourceDimensions(frameSource);
+    if (!frame.width || !frame.height) return null;
+    const part = (options && options.sourceRect) || { x: 0, y: 0, width: frame.width, height: frame.height };
     await detector.ensureReady();
-    const { imageData, scale } = grabPreviewFrame(frameSource);
+    const { imageData, scale } = grabPreviewFrame(frameSource, part);
     const response = await callDetector("previewQuad", {
       width: imageData.width,
       height: imageData.height,
@@ -316,8 +318,10 @@
       engine: engineFor(options),
     }, [imageData.data.buffer]);
     if (!response.corners) return null;
-    const corners = toFullResolutionCorners(response.corners, scale, bounds);
-    return isPlausibleDocumentQuad(corners, bounds) ? { corners, light: response.light } : null;
+    const inPart = toFullResolutionCorners(response.corners, scale, part);
+    if (!isPlausibleDocumentQuad(inPart, part)) return null;
+    const corners = mapCorners(inPart, (point) => ({ x: point.x + part.x, y: point.y + part.y }));
+    return { corners, light: response.light };
   }
 
   // Which detector answers. "refined" is the legacy pipeline's crop

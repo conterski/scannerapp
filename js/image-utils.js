@@ -60,20 +60,23 @@
    *                 resample — area averaging rather than a bilinear pick,
    *                 which keeps fine print clean on the way down. Costlier,
    *                 so it is for the photo that gets kept, not for a preview
-   *                 frame or a thumbnail. */
+   *                 frame or a thumbnail.
+   *  @param options { sourceRect: { x, y, width, height } } scales only that
+   *                 part of the source, in its own pixels; the scale
+   *                 returned is then relative to the part. */
   function createScaledCanvas(source, maxEdge, options) {
-    const { width, height } = sourceDimensions(source);
+    const part = (options && options.sourceRect) || { x: 0, y: 0, ...sourceDimensions(source) };
     // Without this the returned scale divides by zero: the caller would get an
     // Infinity scale and a 1x1 canvas instead of an error it can report.
-    if (!width || !height) throw new Error("Image has no pixels");
-    const requestedScale = Math.min(1, maxEdge / Math.max(width, height));
+    if (!part.width || !part.height) throw new Error("Image has no pixels");
+    const requestedScale = Math.min(1, maxEdge / Math.max(part.width, part.height));
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(width * requestedScale));
-    canvas.height = Math.max(1, Math.round(height * requestedScale));
+    canvas.width = Math.max(1, Math.round(part.width * requestedScale));
+    canvas.height = Math.max(1, Math.round(part.height * requestedScale));
     const context = canvas.getContext("2d");
     if (options && options.smoothing) context.imageSmoothingQuality = options.smoothing;
-    context.drawImage(source, 0, 0, canvas.width, canvas.height);
-    return { canvas, scale: canvas.width / width };
+    context.drawImage(source, part.x, part.y, part.width, part.height, 0, 0, canvas.width, canvas.height);
+    return { canvas, scale: canvas.width / part.width };
   }
 
   function decodeViaImageElement(blob) {

@@ -178,11 +178,18 @@
       <span id="frameInfo" class="frame-info"></span>
       <div class="capture-tools">
         <button id="autoBtn" class="torch-btn auto-btn" type="button" aria-pressed="false">AUTO</button>
+        <button id="macroBtn" class="torch-btn auto-btn" type="button" aria-pressed="false" hidden>MACRO</button>
         <button id="rotateBtn" class="torch-btn" type="button" title="Photos saved as the camera sees them" aria-label="Photos saved as the camera sees them"><span class="rotate-glyph">&#10227;</span></button>
         <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
       </div>
     </div>
     <p id="captureHint" class="capture-hint" aria-live="polite" hidden></p>
+    <div id="zoomBar" class="zoom-bar" role="group" aria-label="Zoom">
+      <button class="zoom-chip" type="button" data-step="0.5" hidden>0.5&times;</button>
+      <button class="zoom-chip" type="button" data-step="1">1&times;</button>
+      <button class="zoom-chip" type="button" data-step="2">2&times;</button>
+      <button class="zoom-chip" type="button" data-step="3">3&times;</button>
+    </div>
     <div class="capture-bottom">
       <button id="shotStrip" class="shot-strip capture-side capture-side-left" type="button" title="Review photos" hidden></button>
       <button id="shutterBtn" class="shutter" type="button" title="Take photo"></button>
@@ -222,6 +229,7 @@
 <script src="js/scan-render.js?v=5245349e8f"></script>
 <script src="js/capture-rotation.js?v=5245349e8f"></script>
 <script src="js/frame-sharpness.js?v=5245349e8f"></script>
+<script src="js/capture-lens.js?v=5245349e8f"></script>
 <script src="js/camera.js?v=5245349e8f"></script>
 <script src="js/photo-store.js?v=5245349e8f"></script>
 <script src="js/capture-outline.js?v=5245349e8f"></script>

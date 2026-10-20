@@ -85,6 +85,7 @@
     ChoicePrompt.init();
     CaptureQuality.loadPersistedSetting();
     CaptureRotation.loadPersistedSetting();
+    CaptureLens.loadPersistedSetting();
     AutoShutter.loadPersistedSetting();
     ScanQuality.loadPersistedSetting();
     PageNumber.loadPersistedSetting();
