@@ -370,6 +370,22 @@ html, body {
 }
 #editorCanvas { display: block; border-radius: 8px; }
 
+/* Two views of one page. The cropped one is the crop alone, centred in the
+   room the controls leave; the edit one is the whole photo with its handles. */
+#editorView[data-mode="cropped"] .edit-only,
+#editorView[data-mode="edit"] .cropped-only { display: none; }
+#editorView[data-mode="cropped"] .editor-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#resultCanvas {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+  background: #0d0f13;
+}
+
 .corner-handle {
   position: absolute;
   width: 44px;
@@ -457,23 +473,6 @@ html, body {
 .control-row { display: flex; gap: 8px; }
 .control-row .btn { flex: 1; }
 .control-row .btn-nav { flex: 0 0 52px; }
-
-.preview-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--surface);
-  border-radius: var(--radius);
-  padding: 10px;
-}
-.preview-label { font-size: 13px; color: var(--text-dim); }
-#previewCanvas {
-  max-height: 140px;
-  max-width: 70%;
-  margin-left: auto;
-  border-radius: 6px;
-  background: #0d0f13;
-}
 
 /* ---------- Jump anchors ---------- */
 /* Above the grid, below the busy (100) and capture (200) overlays, so those
