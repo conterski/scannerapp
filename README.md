@@ -22,7 +22,7 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
 - **Lens and zoom, never switched for you** — the camera screen has a
-  **0.5× / 1× / 2× / 3×** row and a **MACRO** button. 0.5× is the ultra-wide
+  **0.5× / 1× / 2× / 3×** row with **MACRO** beside 3×, in one centred group. 0.5× is the ultra-wide
   lens in full, 1× the main lens, and 2× and 3× a centred crop of it. MACRO
   is the ultra-wide too, for how close it focuses, but cropped to its middle
   half so the view looks like 1× and a page is framed as usual. The

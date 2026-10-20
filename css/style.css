@@ -722,11 +722,12 @@ html, body {
   text-align: center;
 }
 
-/* The zoom steps, a pill above the shutter bar. */
+/* The zoom steps and Macro, one pill above the shutter bar, centred. */
 .zoom-bar {
   align-self: center;
   margin-top: auto;
   display: flex;
+  justify-content: center;
   gap: 4px;
   padding: 4px;
   background: rgba(10, 12, 16, 0.6);

@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="css/style.css?v=1d741d4d0e">
+<link rel="stylesheet" href="css/style.css?v=5a24ebc1fd">
 </head>
 <body>
 
@@ -178,7 +178,6 @@
       <span id="frameInfo" class="frame-info"></span>
       <div class="capture-tools">
         <button id="autoBtn" class="torch-btn auto-btn" type="button" aria-pressed="false">AUTO</button>
-        <button id="macroBtn" class="torch-btn auto-btn" type="button" aria-pressed="false" hidden>MACRO</button>
         <button id="rotateBtn" class="torch-btn" type="button" title="Photos saved as the camera sees them" aria-label="Photos saved as the camera sees them"><span class="rotate-glyph">&#10227;</span></button>
         <button id="torchBtn" class="torch-btn" type="button" aria-pressed="false" hidden>&#128161;</button>
       </div>
@@ -189,6 +188,7 @@
       <button class="zoom-chip" type="button" data-step="1">1&times;</button>
       <button class="zoom-chip" type="button" data-step="2">2&times;</button>
       <button class="zoom-chip" type="button" data-step="3">3&times;</button>
+      <button id="macroBtn" class="zoom-chip" type="button" aria-pressed="false" hidden>MACRO</button>
     </div>
     <div class="capture-bottom">
       <button id="shotStrip" class="shot-strip capture-side capture-side-left" type="button" title="Review photos" hidden></button>
@@ -215,36 +215,36 @@
 </div>
 
 <script src="vendor/jspdf.umd.min.js?v=30a1b3a46c"></script>
-<script src="js/promise-utils.js?v=1d741d4d0e"></script>
-<script src="js/image-utils.js?v=1d741d4d0e"></script>
-<script src="js/page-scroll.js?v=1d741d4d0e"></script>
-<script src="js/choice-prompt.js?v=1d741d4d0e"></script>
-<script src="js/pointer-drag.js?v=1d741d4d0e"></script>
-<script src="js/persisted-flag.js?v=1d741d4d0e"></script>
-<script src="js/capture-quality.js?v=1d741d4d0e"></script>
-<script src="js/scan-quality.js?v=1d741d4d0e"></script>
-<script src="js/page-number.js?v=1d741d4d0e"></script>
-<script src="js/page-proportions.js?v=1d741d4d0e"></script>
-<script src="js/detect.js?v=1d741d4d0e"></script>
-<script src="js/scan-render.js?v=1d741d4d0e"></script>
-<script src="js/capture-rotation.js?v=1d741d4d0e"></script>
-<script src="js/frame-sharpness.js?v=1d741d4d0e"></script>
-<script src="js/capture-lens.js?v=1d741d4d0e"></script>
-<script src="js/camera.js?v=1d741d4d0e"></script>
-<script src="js/photo-store.js?v=1d741d4d0e"></script>
-<script src="js/capture-outline.js?v=1d741d4d0e"></script>
-<script src="js/capture-guidance.js?v=1d741d4d0e"></script>
-<script src="js/auto-shutter.js?v=1d741d4d0e"></script>
-<script src="js/capture-ui.js?v=1d741d4d0e"></script>
-<script src="js/editor.js?v=1d741d4d0e"></script>
-<script src="js/share-note.js?v=1d741d4d0e"></script>
-<script src="js/page-list-view.js?v=1d741d4d0e"></script>
-<script src="js/export.js?v=1d741d4d0e"></script>
-<script src="js/store.js?v=1d741d4d0e"></script>
-<script src="js/job-queue.js?v=1d741d4d0e"></script>
-<script src="js/app-chrome.js?v=1d741d4d0e"></script>
-<script src="js/source-cache.js?v=1d741d4d0e"></script>
-<script src="js/render-tracker.js?v=1d741d4d0e"></script>
-<script src="js/app.js?v=1d741d4d0e"></script>
+<script src="js/promise-utils.js?v=5a24ebc1fd"></script>
+<script src="js/image-utils.js?v=5a24ebc1fd"></script>
+<script src="js/page-scroll.js?v=5a24ebc1fd"></script>
+<script src="js/choice-prompt.js?v=5a24ebc1fd"></script>
+<script src="js/pointer-drag.js?v=5a24ebc1fd"></script>
+<script src="js/persisted-flag.js?v=5a24ebc1fd"></script>
+<script src="js/capture-quality.js?v=5a24ebc1fd"></script>
+<script src="js/scan-quality.js?v=5a24ebc1fd"></script>
+<script src="js/page-number.js?v=5a24ebc1fd"></script>
+<script src="js/page-proportions.js?v=5a24ebc1fd"></script>
+<script src="js/detect.js?v=5a24ebc1fd"></script>
+<script src="js/scan-render.js?v=5a24ebc1fd"></script>
+<script src="js/capture-rotation.js?v=5a24ebc1fd"></script>
+<script src="js/frame-sharpness.js?v=5a24ebc1fd"></script>
+<script src="js/capture-lens.js?v=5a24ebc1fd"></script>
+<script src="js/camera.js?v=5a24ebc1fd"></script>
+<script src="js/photo-store.js?v=5a24ebc1fd"></script>
+<script src="js/capture-outline.js?v=5a24ebc1fd"></script>
+<script src="js/capture-guidance.js?v=5a24ebc1fd"></script>
+<script src="js/auto-shutter.js?v=5a24ebc1fd"></script>
+<script src="js/capture-ui.js?v=5a24ebc1fd"></script>
+<script src="js/editor.js?v=5a24ebc1fd"></script>
+<script src="js/share-note.js?v=5a24ebc1fd"></script>
+<script src="js/page-list-view.js?v=5a24ebc1fd"></script>
+<script src="js/export.js?v=5a24ebc1fd"></script>
+<script src="js/store.js?v=5a24ebc1fd"></script>
+<script src="js/job-queue.js?v=5a24ebc1fd"></script>
+<script src="js/app-chrome.js?v=5a24ebc1fd"></script>
+<script src="js/source-cache.js?v=5a24ebc1fd"></script>
+<script src="js/render-tracker.js?v=5a24ebc1fd"></script>
+<script src="js/app.js?v=5a24ebc1fd"></script>
 </body>
 </html>
