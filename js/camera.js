@@ -264,10 +264,10 @@
     // prompt. The stream that arrives afterwards is held by nothing, so it has
     // to be released on arrival or the camera stays on for the life of the tab.
     let isStopped = false;
-    // The cameras each lens is: { macro, normal } device ids, null for a lens
+    // The cameras each lens is: device ids by lens name, null for a lens
     // this phone does not show the page. Known once the camera is open, since
     // browsers name cameras only after permission is given.
-    let lensDevices = { macro: null, normal: null };
+    let lensDevices = { [CaptureLens.ULTRA_WIDE]: null, [CaptureLens.MAIN]: null };
     // How far the frame is cropped in, 1 for the whole of it.
     let zoom = 1;
 
@@ -378,7 +378,7 @@
 
     /** Whether the phone has an ultra-wide lens the page can pick. */
     function lenses() {
-      return { hasMacro: lensDevices.macro !== null };
+      return { hasUltraWide: lensDevices[CaptureLens.ULTRA_WIDE] !== null };
     }
 
     /** The part of the frame the photo keeps and the viewfinder shows, as
@@ -421,8 +421,8 @@
       return navigator.mediaDevices.enumerateDevices()
         .then((devices) => {
           lensDevices = {
-            macro: CaptureLens.pickDevice(devices, CaptureLens.MACRO),
-            normal: CaptureLens.pickDevice(devices, CaptureLens.NORMAL),
+            [CaptureLens.ULTRA_WIDE]: CaptureLens.pickDevice(devices, CaptureLens.ULTRA_WIDE),
+            [CaptureLens.MAIN]: CaptureLens.pickDevice(devices, CaptureLens.MAIN),
           };
         })
         // A phone that will not list its cameras keeps the one it opened.
@@ -456,7 +456,7 @@
       return openStream(video, mediaConstraints(null))
         .then(discoverLenses)
         // A phone without an ultra-wide still gets its main lens pinned.
-        .then(() => selectLens(video, lens === CaptureLens.MACRO && !lensDevices.macro ? CaptureLens.NORMAL : lens))
+        .then(() => selectLens(video, lensDevices[lens] ? lens : CaptureLens.MAIN))
         .catch((error) => { stop(video); throw error; });
     }
 

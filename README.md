@@ -22,12 +22,13 @@ Turn photos of documents into clean scans, entirely in the browser — nothing i
   applies to new photos only, since resolution is fixed the moment a shot is
   taken.
 - **Lens and zoom, never switched for you** — the camera screen has a
-  **0.5× / 1× / 2× / 3×** row and a **MACRO** button, linked as in the
-  phone's Camera app. 0.5× (or MACRO) is the ultra-wide lens, the one for
-  close-ups; 1× is the main lens; 2× and 3× are a centred crop of it, and the
+  **0.5× / 1× / 2× / 3×** row and a **MACRO** button. 0.5× is the ultra-wide
+  lens in full, 1× the main lens, and 2× and 3× a centred crop of it. MACRO
+  is the ultra-wide too, for how close it focuses, but cropped to its middle
+  half so the view looks like 1× and a page is framed as usual. The
   viewfinder shows exactly the part a shot keeps. The page opens one lens by
   name and keeps it, so the phone's own switching between lenses can't happen
-  mid-session; the last step is remembered. A phone whose browser lists no
+  mid-session; the choice is remembered. A phone whose browser lists no
   ultra-wide lens doesn't get MACRO or 0.5×. A black frame is never saved:
   the shot waits for a real picture, and says so if it can't get one.
 - **Advice over the viewfinder** — one line when something stands between the

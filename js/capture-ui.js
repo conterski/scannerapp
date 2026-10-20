@@ -146,16 +146,15 @@
         els.autoBtn.title = isOn ? "Taking a photo when the page holds still — tap to stop" : "Take a photo when the page holds still";
       }
 
-      /** The lens and zoom as they stand: the Macro button and the zoom chips
-       *  light up together, since they are one setting. */
+      /** The lens and zoom as they stand. Macro is a view of its own, so with it
+       *  on no zoom step is lit: the chips are for the Camera app's steps. */
       function renderLens() {
-        const zoomStep = CaptureLens.step();
-        const isMacro = CaptureLens.lensFor(zoomStep) === CaptureLens.MACRO;
+        const isMacro = CaptureLens.isMacro();
         els.macroBtn.classList.toggle("is-on", isMacro);
         els.macroBtn.setAttribute("aria-pressed", String(isMacro));
-        els.macroBtn.title = isMacro ? "Close-up lens on — tap for the main lens" : "Use the close-up lens";
+        els.macroBtn.title = isMacro ? "Close-up lens on — tap to turn it off" : "Use the close-up lens, cropped to look like 1×";
         for (const chip of zoomChips) {
-          const isOn = Number(chip.dataset.step) === zoomStep;
+          const isOn = !isMacro && Number(chip.dataset.step) === CaptureLens.step();
           chip.classList.toggle("is-on", isOn);
           chip.setAttribute("aria-pressed", String(isOn));
         }
@@ -164,7 +163,7 @@
       /** Shows the zoom: the video magnified about its centre, and everything
        *  of the frame the photo will not keep hidden (CaptureLens.clipFor). */
       function renderZoomView() {
-        const zoom = CaptureLens.digitalZoomFor(CaptureLens.step());
+        const zoom = CaptureLens.zoom();
         const frame = ImageUtils.sourceDimensions(els.captureVideo);
         const box = { width: els.captureVideo.clientWidth, height: els.captureVideo.clientHeight };
         const clip = zoom > 1 && frame.width && box.width ? CaptureLens.clipFor(box, frame, zoom) : null;
@@ -172,9 +171,9 @@
         els.captureView.style.setProperty("--capture-clip", clip ? `${clip.top}px ${clip.left}px` : "0px");
       }
 
-      /** Hands the camera the step's zoom and shows it. */
+      /** Hands the camera the zoom the settings ask for and shows it. */
       function applyZoom() {
-        camera.setZoom(CaptureLens.digitalZoomFor(CaptureLens.step()));
+        camera.setZoom(CaptureLens.zoom());
         renderZoomView();
       }
 
@@ -404,23 +403,25 @@
         renderZoomView();
       }
 
-      /** Swaps the lens to the one the step now names. Shots already tapped
+      /** Swaps the lens to the one the settings now name. Shots already tapped
        *  finish first, so no grab is cut by the swap; the shutter, AUTO and the
-       *  outline rest meanwhile. A lens that will not open is put back. */
-      async function switchLens(previousStep) {
+       *  outline rest meanwhile. A lens that will not open is put back, with
+       *  the `previous` { step, macro } that named it. */
+      async function switchLens(previous) {
         isLensBusy = true;
         els.shutterBtn.disabled = true;
         restFrameReading();
         try {
           await encodeChain;
-          await moveToLens(CaptureLens.lensFor(CaptureLens.step()));
+          await moveToLens(CaptureLens.currentLens());
         } catch (error) {
           if (!accepting) return;
           console.warn("Couldn't switch lens:", error);
-          CaptureLens.setStep(previousStep);
+          CaptureLens.setStep(previous.step);
+          CaptureLens.setMacro(previous.macro);
           applyZoom();
           try {
-            await moveToLens(CaptureLens.lensFor(previousStep));
+            await moveToLens(CaptureLens.currentLens());
             notice("That lens wouldn't open");
           } catch (restoreError) {
             console.warn("Couldn't go back to the lens before:", restoreError);
@@ -437,23 +438,26 @@
         outline.start();
       }
 
-      /** A tap on a zoom step, or the Macro button's step. The frames being
-       *  read are of the old view, so the outline starts again; the lens is
-       *  swapped only when the step is on the other one. */
-      function chooseStep(next) {
-        const previous = CaptureLens.step();
-        if (isLensBusy || !accepting || next === previous) return;
-        CaptureLens.setStep(next);
+      /** A tap on a zoom step or the Macro button: `next` is the { step, macro }
+       *  it asks for. The frames being read are of the old view, so the outline
+       *  starts again; the lens is swapped only when it is another one. */
+      function chooseView(next) {
+        const previous = { step: CaptureLens.step(), macro: CaptureLens.isMacro() };
+        if (isLensBusy || !accepting || (next.step === previous.step && next.macro === previous.macro)) return;
+        const previousLens = CaptureLens.currentLens();
+        CaptureLens.setStep(next.step);
+        CaptureLens.setMacro(next.macro);
         applyZoom();
         renderLens();
         restFrameReading();
-        if (CaptureLens.lensFor(next) !== CaptureLens.lensFor(previous)) switchLens(previous);
+        if (CaptureLens.currentLens() !== previousLens) switchLens(previous);
         else outline.start();
       }
 
       function wireLensControls() {
-        binder.on(els.macroBtn, "click", () => chooseStep(CaptureLens.macroToggleStep(CaptureLens.step())));
-        for (const chip of zoomChips) binder.on(chip, "click", () => chooseStep(Number(chip.dataset.step)));
+        binder.on(els.macroBtn, "click", () => chooseView({ step: CaptureLens.step(), macro: !CaptureLens.isMacro() }));
+        // A step is its own view: it takes Macro off.
+        for (const chip of zoomChips) binder.on(chip, "click", () => chooseView({ step: Number(chip.dataset.step), macro: false }));
         // The view is clipped in pixels of the box, which a turn or resize
         // moves, and of the frame, which a lens changes.
         binder.on(window, "resize", renderZoomView);
@@ -506,16 +510,18 @@
       // finishes opening, and writing to the torn-down screen would leave the
       // error panel showing when the next session opens.
       applyZoom();
-      camera.start(els.captureVideo, CaptureLens.lensFor(CaptureLens.step())).then(
+      camera.start(els.captureVideo, CaptureLens.currentLens()).then(
         () => {
           if (!accepting) return;
           isLensBusy = false;
-          // A step the phone cannot reach is not offered, and a remembered one
-          // falls back to the main lens, which start() has pinned.
-          const { hasMacro } = camera.lenses();
-          els.macroBtn.hidden = !hasMacro;
-          for (const chip of zoomChips) chip.hidden = !hasMacro && Number(chip.dataset.step) < 1;
-          if (!hasMacro && CaptureLens.lensFor(CaptureLens.step()) === CaptureLens.MACRO) {
+          // What needs the ultra-wide is not offered where the phone has none,
+          // and a remembered choice of it falls back to the main lens, which
+          // start() has pinned.
+          const { hasUltraWide } = camera.lenses();
+          els.macroBtn.hidden = !hasUltraWide;
+          for (const chip of zoomChips) chip.hidden = !hasUltraWide && CaptureLens.lensFor(Number(chip.dataset.step)) === CaptureLens.ULTRA_WIDE;
+          if (!hasUltraWide && CaptureLens.currentLens() === CaptureLens.ULTRA_WIDE) {
+            CaptureLens.setMacro(false);
             CaptureLens.setStep(1);
             applyZoom();
           }
