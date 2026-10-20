@@ -65,7 +65,7 @@
       // being swapped: the shutter, AUTO and the zoom steps all wait.
       let isLensBusy = true;
       let noticeTimer = 0;
-      const zoomChips = [...els.zoomBar.querySelectorAll(".zoom-chip")];
+      const zoomChips = [...els.zoomBar.querySelectorAll(".zoom-chip[data-step]")]; // the steps; Macro sits among them but is no step
 
       // Here, beside the handlers they call, which are declared in this scope.
       const outline = CaptureOutline.create(els.captureOutline, els.captureVideo,

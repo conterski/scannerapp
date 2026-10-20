@@ -191,7 +191,7 @@ test("Macro is the ultra-wide cropped to its middle half, so the view looks like
   await expect.poll(() => activeCamera(page)).toBe("ultra");
   await expect(page.locator("#shutterBtn")).toBeEnabled();
   await expect(page.locator("#macroBtn")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".zoom-chip.is-on")).toHaveCount(0); // macro is a view of its own
+  await expect(page.locator(".zoom-chip[data-step].is-on")).toHaveCount(0); // macro is a view of its own
   const shown = await zoomShown(page);
   expect(shown.zoom).toBe("2");
   expect(shown.vertical).toBeCloseTo(292, 1);
@@ -252,6 +252,15 @@ test("2× stays on the main lens, shows the middle of the frame, and keeps exact
   await expect(page.locator("#shotStrip img")).toHaveCount(1, { timeout: 30_000 });
   const size = await page.locator("#shotStrip img").evaluate((image) => [image.naturalWidth, image.naturalHeight]);
   expect(size).toEqual([1512, 2016]); // the middle quarter of the 3024×4032 frame
+});
+
+test("Macro sits beside 3× in the one centred zoom group", async ({ page }) => {
+  await openApp(page);
+  await openCamera(page, { cameras: IPHONE_CAMERAS });
+  const labels = await page.locator("#zoomBar button:visible").allTextContents();
+  expect(labels).toEqual(["0.5×", "1×", "2×", "3×", "MACRO"]);
+  const bar = await page.locator("#zoomBar").boundingBox();
+  expect(bar.x + bar.width / 2).toBeCloseTo(195, 0); // the middle of a 390px screen
 });
 
 test("a phone without an ultra-wide offers neither Macro nor 0.5×", async ({ page }) => {
