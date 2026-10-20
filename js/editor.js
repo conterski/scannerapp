@@ -1,7 +1,7 @@
-/* editor.js — the crop editor UI. A page opens on its cropped result alone;
- * Edit swaps that for the whole photo with its four corner handles, four
- * edge handles and magnifier loupe, and Apply swaps back to the result of
- * the new crop. Rotation turns the result. The warp itself lives in
+/* editor.js — the crop editor UI. A page opens on the whole photo with its
+ * four corner handles, four edge handles and magnifier loupe; Apply swaps
+ * that for the cropped result alone, and Edit swaps back. Rotation turns the
+ * result. The warp itself lives in
  * ScanRenderer; this file only decides which corners to warp with. Exposes
  * window.Editor.
  */
@@ -50,7 +50,8 @@
 
   const elements = {};
   // { source, corners, quarterTurns, mode, scale, resolve, openId }; mode is
-  // "cropped" (the result alone) or "edit" (the whole photo and its handles)
+  // "edit" (the whole photo and its handles, where a page opens) or
+  // "cropped" (the result alone)
   let session = null;
   let isResultRendering = false;
   let isResultStale = false;
@@ -86,7 +87,7 @@
         corners: cloneCorners(settings.corners),
         viewfinderCorners: settings.viewfinderCorners ? cloneCorners(settings.viewfinderCorners) : null,
         quarterTurns: settings.quarterTurns || 0,
-        mode: "cropped",
+        mode: "edit",
         scale: 1,
         resolve,
         openId: ++lastOpenId,
@@ -100,9 +101,9 @@
       // document and would open it part way down. app.js has already stashed
       // it, so starting from the top here costs nothing on the way back.
       window.scrollTo(0, 0);
-      // Cleared so the page before never shows while this one renders.
+      // Cleared so the page before never shows when Apply brings the result up.
       elements.result.width = elements.result.height = 0;
-      setMode("cropped");
+      setMode("edit");
     });
   }
 
